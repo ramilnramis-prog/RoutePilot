@@ -40,7 +40,6 @@ from core.model.solution import (
 from core.validation.errors import (
     InvalidOrderError,
     InvalidRoutePlanError,
-    UnsupportedFeatureError,
 )
 from tests.support import WAREHOUSE, FixedTravelMatrix, build_plan, place, point, stop, utc
 
@@ -553,16 +552,29 @@ class DeterminismTests(unittest.TestCase):
 class RouteEvaluationContractTests(unittest.TestCase):
     """The evaluation type keeps order, timelines, violations and metrics consistent."""
 
-    def test_solve_is_not_implemented_and_says_so(self) -> None:
-        # The greedy seed and the local improvement are later units (D17); the boundary refuses
-        # to return a route nobody measured rather than approximating one (D16).
+    def test_solve_is_implemented_and_returns_a_committed_route(self) -> None:
+        # Stage 2 unit U2 replaced the not-implemented boundary with the real optimizer; the
+        # committed route still keeps the driver's selected first stop first (I3/I4, D32).
         plan = three_stop_plan(first_service_stop=chosen(STOP_A))
-        with self.assertRaises(UnsupportedFeatureError):
-            solve(
-                plan=plan,
-                travel_matrix=FixedTravelMatrix(),
-                algorithm_order=[STOP_A, STOP_B, STOP_C],
-            )
+
+        solution = solve(
+            plan=plan,
+            travel_matrix=FixedTravelMatrix(),
+            algorithm_order=[STOP_A, STOP_B, STOP_C],
+        )
+
+        self.assertEqual(solution.order[0], STOP_A)
+        self.assertIs(solution.status, SolutionStatus.OK)
+        self.assertEqual(len(solution.order), 3)
+        self.assertEqual(len(solution.timelines), 3)
+        self.assertIsNotNone(solution.user_baseline)
+        self.assertIsNotNone(solution.algorithm_baseline)
+
+    def test_solve_requires_a_driver_selected_first_stop(self) -> None:
+        # Nothing selects a stop automatically: the engine recommends, the driver decides.
+        plan = three_stop_plan()  # FirstStopIntent.recommend(): nothing chosen yet
+        with self.assertRaises(InvalidRoutePlanError):
+            solve(plan=plan, travel_matrix=FixedTravelMatrix())
 
     def test_evaluation_rejects_timelines_that_do_not_follow_the_order(self) -> None:
         plan = three_stop_plan()
