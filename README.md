@@ -23,8 +23,9 @@ Implemented so far:
   `service_finish_before_end` / `service_start_before_end` window-end policies;
 - **cost scoring** over the implemented components only (`travel_time`, `waiting_time`, `distance`),
   with a capability gate that refuses weights for anything unimplemented;
-- **first-stop candidate evaluation**: every possible first stop timed and priced, feasible ones
-  ranked deterministically, infeasible ones reported explicitly;
+- **first-stop recommendation**: every possible first stop timed and priced, feasible ones ranked
+  deterministically, infeasible ones reported explicitly. The engine **recommends**; the **driver
+  decides** — nothing is applied automatically (D4/D32);
 - **deterministic demo scenario**: ~30 synthetic stops, departure 04:00, customers opening 08:00,
   and a numeric report (`python -m demo.report`);
 - error taxonomy split from violations, `tools/doctor.py`, and a deterministic offline test suite;

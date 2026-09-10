@@ -1,17 +1,19 @@
-"""First service stop: intent, resolution and candidates (decisions D4-D9, D11).
+"""First service stop: the driver's decision and the engine's recommendation (D4-D11, D32).
 
-Selection provenance and pinning are separate concepts (D6):
+Two concepts that must never be merged:
 
-* ``selection_source`` - **how** the stop was selected (``auto_recommendation`` or ``driver``);
-* ``pinned`` / ``pinned_via`` - **whether** that selection is currently locked, and by what.
+* **intent** - the driver's persisted decision: ``mode``, ``selected_stop_id``,
+  ``selection_source``, ``pinned``. It is a decision, not a computation.
+* **recommendation** - derived, cached and recomputable: ``recommended_stop_id`` and the ranked
+  top-K candidates. It **never implies a selection**.
 
-Locking an automatically recommended stop must therefore **not** rewrite its provenance into
-``driver``. There is deliberately no invariant such as
-``selection_source == 'auto_recommendation' iff pinned == false`` - it is false by design.
+The optimizer recommends; the driver decides (D4). Nothing in this module applies a
+recommendation, and nothing automatic can produce a selection or ``pinned = True`` (D5).
 
-Intent (persisted, the user's decision) and resolution (derived, cached, recomputable) are
-different types: AUTO is dynamic, so its selection is *data about a computation*, not a user
-decision (D11).
+This supersedes the revoked AUTO model, in which the system applied a recommendation itself and
+provenance was recorded with ``auto_recommendation`` / ``driver`` plus a separate ``pinned_via``.
+``pinned_via`` is gone: with no automatic application there is no "Lock" action left for it to
+describe.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from enum import Enum
 from typing import Mapping
 
 from core.model.ids import StopId
-from core.model.value_objects import DurationSec, Instant
+from core.model.value_objects import DurationSec, Instant, ensure_utc
 from core.validation.errors import InvalidRoutePlanError
 
 __all__ = [
@@ -29,60 +31,56 @@ __all__ = [
     "FirstStopCandidate",
     "FirstStopIntent",
     "FirstStopMode",
-    "FirstStopResolution",
-    "FirstStopStatus",
-    "PinnedVia",
+    "FirstStopRecommendation",
+    "FirstStopState",
+    "RecommendationStatus",
     "SelectionSource",
-    "UNRESOLVED_FIRST_STOP_STATUSES",
 ]
 
 
 class FirstStopMode(str, Enum):
-    """How the first service stop is chosen (spec section 3).
+    """How the first service stop is decided (D4).
 
     Not to be confused with :class:`~core.model.route_mode.RouteMode`, which is a different
     axis (spec section 19).
     """
 
-    AUTO = "auto"
+    #: RoutePilot ranks candidates and shows the top-K; the driver still chooses.
+    RECOMMEND = "recommend"
+    #: The driver selects directly, without needing a ranked recommendation.
     MANUAL = "manual"
 
 
 class SelectionSource(str, Enum):
-    """How the applied first stop was selected (D6)."""
+    """How the driver arrived at the choice (D6).
 
-    AUTO_RECOMMENDATION = "auto_recommendation"
-    DRIVER = "driver"
+    Provenance belongs to the *choice*, not to the recommendation: a recommendation carries none.
+    """
 
-
-class PinnedVia(str, Enum):
-    """What locked the current first stop (D6)."""
-
-    LOCK = "lock"
-    OVERRIDE = "override"
-    MANUAL_MODE = "manual_mode"
+    ACCEPTED_RECOMMENDATION = "accepted_recommendation"
+    MANUAL_CHOICE = "manual_choice"
 
 
-class FirstStopStatus(str, Enum):
-    """Resolution state, including the legitimate "no first stop yet" states (D9)."""
+class FirstStopState(str, Enum):
+    """Derived state of the plan's first service stop (D9, D32). Never stored.
 
-    RESOLVED = "resolved"
-    UNRESOLVED_EMPTY_PLAN = "unresolved_empty_plan"
-    UNRESOLVED_MANUAL_AWAITING_CHOICE = "unresolved_manual_awaiting_choice"
+    ``awaiting_first_stop_choice`` is a normal state, not an error: in RECOMMEND mode the driver
+    is looking at ranked complete-route outcomes and has not chosen yet.
+    """
+
+    AWAITING_FIRST_STOP_CHOICE = "awaiting_first_stop_choice"
+    FIRST_STOP_SELECTED = "first_stop_selected"
     NO_ACTIVE_STOPS = "no_active_stops"
+    EMPTY_PLAN = "empty_plan"
+
+
+class RecommendationStatus(str, Enum):
+    """Outcome of the recommendation computation, including why nothing could be recommended."""
+
+    RECOMMENDED = "recommended"
     NO_FEASIBLE_FIRST_STOP = "no_feasible_first_stop"
-
-
-#: Statuses that legitimately have ``selected_stop_id is None``. A fake StopId is never
-#: substituted for these states (D9).
-UNRESOLVED_FIRST_STOP_STATUSES = frozenset(
-    {
-        FirstStopStatus.UNRESOLVED_EMPTY_PLAN,
-        FirstStopStatus.UNRESOLVED_MANUAL_AWAITING_CHOICE,
-        FirstStopStatus.NO_ACTIVE_STOPS,
-        FirstStopStatus.NO_FEASIBLE_FIRST_STOP,
-    }
-)
+    NO_ACTIVE_STOPS = "no_active_stops"
+    EMPTY_PLAN = "empty_plan"
 
 
 def _coerce(enum_type: type[Enum], value: object, field_name: str) -> Enum:
@@ -99,61 +97,118 @@ def _coerce(enum_type: type[Enum], value: object, field_name: str) -> Enum:
 
 @dataclass(frozen=True)
 class FirstStopIntent:
-    """Persisted user intent about the first service stop (D11).
+    """The driver's persisted decision about the first service stop (D11).
 
-    * AUTO, not pinned: the optimizer picks and may change it (``pinned_stop_id is None``);
-    * AUTO, pinned: the driver locked the recommendation, or overrode it;
-    * MANUAL, pinned: the driver chose the stop explicitly.
+    Valid states:
+
+    * nothing chosen yet - ``selected_stop_id is None``, ``selection_source is None``,
+      ``pinned = False`` (this is the state the driver starts in, in both modes);
+    * chosen - ``selected_stop_id`` set, ``selection_source`` records how, ``pinned`` defaults to
+      ``True`` ("once the driver selects the first service stop, it is pinned by default").
+      A driver may explicitly leave it unlocked (``pinned = False``), which means "chosen, but the
+      optimizer may move it"; the exact behaviour of that state is a Stage 2 decision.
     """
 
-    mode: FirstStopMode = FirstStopMode.AUTO
+    mode: FirstStopMode = FirstStopMode.RECOMMEND
+    selected_stop_id: StopId | None = None
+    selection_source: SelectionSource | None = None
     pinned: bool = False
-    pinned_stop_id: StopId | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _coerce(FirstStopMode, self.mode, "mode"))
-        has_id = self.pinned_stop_id is not None
-        if self.pinned and not has_id:
-            raise InvalidRoutePlanError(
-                "a pinned first stop must have pinned_stop_id; pinned means an explicit "
-                "user fixation of a concrete stop (D5)"
+        if self.selection_source is not None:
+            object.__setattr__(
+                self,
+                "selection_source",
+                _coerce(SelectionSource, self.selection_source, "selection_source"),
             )
-        if has_id and not self.pinned:
+
+        has_selection = self.selected_stop_id is not None
+        if not has_selection:
+            if self.selection_source is not None:
+                raise InvalidRoutePlanError(
+                    "selection_source must be None while nothing is selected: provenance "
+                    "describes a driver's choice, and there is no choice yet (D6)"
+                )
+            if self.pinned:
+                raise InvalidRoutePlanError(
+                    "nothing is selected, so nothing can be pinned (D5)"
+                )
+            return
+
+        if self.selection_source is None:
             raise InvalidRoutePlanError(
-                "pinned_stop_id is set but pinned is False; an unpinned first stop has no "
-                "fixed choice (D5)"
+                "a selected first stop must record how the driver chose it "
+                "(accepted_recommendation or manual_choice) - D6"
+            )
+        if (
+            self.mode is FirstStopMode.MANUAL
+            and self.selection_source is not SelectionSource.MANUAL_CHOICE
+        ):
+            raise InvalidRoutePlanError(
+                "in MANUAL mode the driver selects directly, so selection_source must be "
+                "'manual_choice' (D7)"
             )
 
     # ---- constructors -------------------------------------------------- #
     @classmethod
-    def auto(cls) -> "FirstStopIntent":
-        """AUTO with a dynamic (unpinned) selection."""
-        return cls(FirstStopMode.AUTO, False, None)
+    def recommend(cls) -> "FirstStopIntent":
+        """RECOMMEND mode with no choice made yet."""
+        return cls(FirstStopMode.RECOMMEND)
 
     @classmethod
-    def auto_locked(cls, stop_id: StopId) -> "FirstStopIntent":
-        """The driver pressed "Lock" on the current AUTO recommendation (D6)."""
-        return cls(FirstStopMode.AUTO, True, stop_id)
+    def manual_mode(cls) -> "FirstStopIntent":
+        """MANUAL mode with no choice made yet."""
+        return cls(FirstStopMode.MANUAL)
 
     @classmethod
-    def auto_overridden(cls, stop_id: StopId) -> "FirstStopIntent":
-        """The driver overrode AUTO and picked another first stop."""
-        return cls(FirstStopMode.AUTO, True, stop_id)
+    def accepted_recommendation(cls, stop_id: StopId, *, pinned: bool = True) -> "FirstStopIntent":
+        """The driver pressed "start from this stop" on the recommended candidate."""
+        return cls(
+            FirstStopMode.RECOMMEND,
+            stop_id,
+            SelectionSource.ACCEPTED_RECOMMENDATION,
+            pinned,
+        )
 
     @classmethod
-    def manual(cls, stop_id: StopId) -> "FirstStopIntent":
-        """MANUAL selection: the driver explicitly chose the first stop."""
-        return cls(FirstStopMode.MANUAL, True, stop_id)
+    def manual_choice(
+        cls,
+        stop_id: StopId,
+        *,
+        mode: FirstStopMode = FirstStopMode.RECOMMEND,
+        pinned: bool = True,
+    ) -> "FirstStopIntent":
+        """The driver chose a stop themselves (another alternative, or directly in MANUAL mode)."""
+        return cls(mode, stop_id, SelectionSource.MANUAL_CHOICE, pinned)
+
+    # ---- queries ------------------------------------------------------- #
+    @property
+    def has_selection(self) -> bool:
+        return self.selected_stop_id is not None
 
     @property
-    def is_dynamic(self) -> bool:
-        """True when AUTO is allowed to re-evaluate the first stop (D4)."""
-        return self.mode is FirstStopMode.AUTO and not self.pinned
+    def state(self) -> FirstStopState:
+        """Plan-level state from the intent alone (stop-set states need the plan)."""
+        if self.has_selection:
+            return FirstStopState.FIRST_STOP_SELECTED
+        return FirstStopState.AWAITING_FIRST_STOP_CHOICE
+
+    def cleared(self) -> "FirstStopIntent":
+        """The same mode with no choice: back to ``awaiting_first_stop_choice`` (D8).
+
+        The domain never substitutes a stop here.
+        """
+        return FirstStopIntent(mode=self.mode)
 
     def describe(self) -> str:
-        if self.pinned:
-            return f"{self.mode.value}, pinned to {self.pinned_stop_id}"
-        return f"{self.mode.value}, dynamic"
+        if not self.has_selection:
+            return f"{self.mode.value}: awaiting first stop choice"
+        lock = "pinned" if self.pinned else "chosen, not locked"
+        return (
+            f"{self.mode.value}: {self.selected_stop_id} "
+            f"({self.selection_source.value}, {lock})"  # type: ignore[union-attr]
+        )
 
 
 @dataclass(frozen=True)
@@ -171,7 +226,12 @@ class CandidateDiagnostic:
 
 @dataclass(frozen=True)
 class FirstStopCandidate:
-    """One ranked first-stop alternative, with the deterministic explanation inputs (spec 9)."""
+    """One ranked first-stop alternative with its deterministic explanation inputs (spec 9).
+
+    ``feasible`` currently describes the **first leg**. From Stage 2 it must describe the
+    **complete** route outcome (D32), because a candidate whose remainder contains an
+    impossible hard window must not look feasible.
+    """
 
     stop_id: StopId
     travel_time: DurationSec
@@ -195,8 +255,8 @@ class FirstStopCandidate:
             raise InvalidRoutePlanError(
                 "estimated_complete_route_duration cannot be shorter than the first leg"
             )
-        # A candidate that begins service after the window closes is infeasible, and that is
-        # exactly what lateness > 0 means (D13 amendment).
+        # A candidate that would be served outside its window is infeasible, and that is exactly
+        # what lateness > 0 means (D13 amendment, D29).
         if self.feasible == (self.lateness > 0):
             raise InvalidRoutePlanError(
                 "a candidate with lateness > 0 must be infeasible and vice versa"
@@ -204,200 +264,116 @@ class FirstStopCandidate:
 
 
 @dataclass(frozen=True)
-class FirstStopResolution:
-    """Derived first-stop result: which stop, why, and whether it is currently locked (D11).
+class FirstStopRecommendation:
+    """Derived recommendation: what the engine suggests, never what the driver chose (D32).
 
-    Factories below encode the canonical combinations of D6 so callers cannot drift from them.
+    A recommendation for ``S73`` with ``FirstStopIntent.selected_stop_id = None`` is a perfectly
+    valid state - it is the normal state before the driver decides.
     """
 
-    status: FirstStopStatus
-    selected_stop_id: StopId | None = None
-    selection_source: SelectionSource | None = None
-    pinned_via: PinnedVia | None = None
+    status: RecommendationStatus
+    recommended_stop_id: StopId | None = None
+    ranked: tuple[FirstStopCandidate, ...] = field(default_factory=tuple)
     resolved_at: Instant | None = None
     inputs_fingerprint: str | None = None
     diagnostics: tuple[CandidateDiagnostic, ...] = field(default_factory=tuple)
-    top_k: tuple[FirstStopCandidate, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "status", _coerce(FirstStopStatus, self.status, "status"))
-        if self.selection_source is not None:
-            object.__setattr__(
-                self,
-                "selection_source",
-                _coerce(SelectionSource, self.selection_source, "selection_source"),
-            )
-        if self.pinned_via is not None:
-            object.__setattr__(
-                self, "pinned_via", _coerce(PinnedVia, self.pinned_via, "pinned_via")
-            )
+        object.__setattr__(self, "status", _coerce(RecommendationStatus, self.status, "status"))
+        object.__setattr__(self, "ranked", tuple(self.ranked))
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
-        object.__setattr__(self, "top_k", tuple(self.top_k))
-
         if self.resolved_at is not None:
-            from core.model.value_objects import ensure_utc
-
             object.__setattr__(
                 self, "resolved_at", ensure_utc(self.resolved_at, field_name="resolved_at")
             )
 
-        if self.status is FirstStopStatus.RESOLVED:
-            if self.selected_stop_id is None:
-                raise InvalidRoutePlanError("a resolved first stop needs selected_stop_id")
-            if self.selection_source is None:
-                raise InvalidRoutePlanError("a resolved first stop needs selection_source")
+        if self.status is RecommendationStatus.RECOMMENDED:
+            if self.recommended_stop_id is None:
+                raise InvalidRoutePlanError("a 'recommended' outcome needs recommended_stop_id")
             if self.resolved_at is None:
-                raise InvalidRoutePlanError("a resolved first stop needs resolved_at")
+                raise InvalidRoutePlanError("a 'recommended' outcome needs resolved_at")
             if not self.inputs_fingerprint:
                 raise InvalidRoutePlanError(
-                    "a resolved first stop needs inputs_fingerprint; without it AUTO cannot "
-                    "notice that its recommendation went stale (D4)"
+                    "a 'recommended' outcome needs inputs_fingerprint so a stale recommendation "
+                    "can be detected (D4)"
+                )
+            ranked_ids = [candidate.stop_id for candidate in self.ranked]
+            if not ranked_ids:
+                raise InvalidRoutePlanError(
+                    "a 'recommended' outcome must carry the ranked candidates it recommends from"
+                )
+            if self.recommended_stop_id not in ranked_ids:
+                raise InvalidRoutePlanError(
+                    "recommended_stop_id must be one of the ranked candidates"
                 )
         else:
-            if self.selected_stop_id is not None:
+            if self.recommended_stop_id is not None:
                 raise InvalidRoutePlanError(
-                    f"status={self.status.value!r} must not carry selected_stop_id; "
-                    "unresolved states are not masked with a plausible-looking stop (D9)"
+                    f"status={self.status.value!r} must not carry recommended_stop_id: a "
+                    "recommendation that does not exist is not masked with a plausible stop (D9)"
                 )
-            if self.selection_source is not None:
+            if self.ranked:
                 raise InvalidRoutePlanError(
-                    f"status={self.status.value!r} must not carry selection_source"
-                )
-            if self.pinned_via is not None:
-                raise InvalidRoutePlanError(
-                    f"status={self.status.value!r} must not carry pinned_via"
+                    f"status={self.status.value!r} must not carry ranked candidates"
                 )
 
-        # Provenance/pinning consistency (D6). Note the absence of any rule tying
-        # selection_source to pinned: a locked auto recommendation keeps its provenance.
-        if self.pinned_via is not None:
-            if self.pinned_via is PinnedVia.LOCK:
-                if self.selection_source is not SelectionSource.AUTO_RECOMMENDATION:
-                    raise InvalidRoutePlanError(
-                        "pinned_via='lock' describes locking an auto recommendation, so "
-                        "selection_source must stay 'auto_recommendation' (D6)"
-                    )
-            elif self.selection_source is not SelectionSource.DRIVER:
-                raise InvalidRoutePlanError(
-                    f"pinned_via={self.pinned_via.value!r} means the driver fixed this stop, "
-                    "so selection_source must be 'driver'"
-                )
-
-    # ---- canonical states (D6) ----------------------------------------- #
+    # ---- constructors -------------------------------------------------- #
     @classmethod
-    def auto_recommendation(
+    def recommended(
         cls,
         stop_id: StopId,
         *,
+        ranked: tuple[FirstStopCandidate, ...],
         resolved_at: Instant,
         inputs_fingerprint: str,
-        top_k: tuple[FirstStopCandidate, ...] = (),
         diagnostics: tuple[CandidateDiagnostic, ...] = (),
-    ) -> "FirstStopResolution":
-        """AUTO applied a recommendation; it stays dynamic (``pinned = false``)."""
+    ) -> "FirstStopRecommendation":
         return cls(
-            status=FirstStopStatus.RESOLVED,
-            selected_stop_id=stop_id,
-            selection_source=SelectionSource.AUTO_RECOMMENDATION,
-            pinned_via=None,
-            resolved_at=resolved_at,
-            inputs_fingerprint=inputs_fingerprint,
-            diagnostics=diagnostics,
-            top_k=top_k,
+            RecommendationStatus.RECOMMENDED,
+            stop_id,
+            ranked,
+            resolved_at,
+            inputs_fingerprint,
+            diagnostics,
         )
 
     @classmethod
-    def locked_auto_recommendation(
+    def none(
         cls,
-        stop_id: StopId,
-        *,
-        resolved_at: Instant,
-        inputs_fingerprint: str,
-        top_k: tuple[FirstStopCandidate, ...] = (),
-        diagnostics: tuple[CandidateDiagnostic, ...] = (),
-    ) -> "FirstStopResolution":
-        """The driver locked an auto recommendation: provenance stays ``auto_recommendation``."""
-        return cls(
-            status=FirstStopStatus.RESOLVED,
-            selected_stop_id=stop_id,
-            selection_source=SelectionSource.AUTO_RECOMMENDATION,
-            pinned_via=PinnedVia.LOCK,
-            resolved_at=resolved_at,
-            inputs_fingerprint=inputs_fingerprint,
-            diagnostics=diagnostics,
-            top_k=top_k,
-        )
-
-    @classmethod
-    def driver_override(
-        cls,
-        stop_id: StopId,
-        *,
-        resolved_at: Instant,
-        inputs_fingerprint: str,
-        top_k: tuple[FirstStopCandidate, ...] = (),
-        diagnostics: tuple[CandidateDiagnostic, ...] = (),
-    ) -> "FirstStopResolution":
-        """The driver overrode AUTO and picked another stop."""
-        return cls(
-            status=FirstStopStatus.RESOLVED,
-            selected_stop_id=stop_id,
-            selection_source=SelectionSource.DRIVER,
-            pinned_via=PinnedVia.OVERRIDE,
-            resolved_at=resolved_at,
-            inputs_fingerprint=inputs_fingerprint,
-            diagnostics=diagnostics,
-            top_k=top_k,
-        )
-
-    @classmethod
-    def manual_selection(
-        cls,
-        stop_id: StopId,
-        *,
-        resolved_at: Instant,
-        inputs_fingerprint: str,
-        top_k: tuple[FirstStopCandidate, ...] = (),
-        diagnostics: tuple[CandidateDiagnostic, ...] = (),
-    ) -> "FirstStopResolution":
-        """MANUAL mode: the driver chose the first stop."""
-        return cls(
-            status=FirstStopStatus.RESOLVED,
-            selected_stop_id=stop_id,
-            selection_source=SelectionSource.DRIVER,
-            pinned_via=PinnedVia.MANUAL_MODE,
-            resolved_at=resolved_at,
-            inputs_fingerprint=inputs_fingerprint,
-            diagnostics=diagnostics,
-            top_k=top_k,
-        )
-
-    @classmethod
-    def unresolved(
-        cls,
-        status: FirstStopStatus,
+        status: RecommendationStatus,
         *,
         diagnostics: tuple[CandidateDiagnostic, ...] = (),
-    ) -> "FirstStopResolution":
-        """A legal "no first stop" state (D9). Never carries a placeholder stop."""
-        if status is FirstStopStatus.RESOLVED:
+    ) -> "FirstStopRecommendation":
+        """No candidate could be recommended (D9: a distinct reason, never a placeholder stop)."""
+        if status is RecommendationStatus.RECOMMENDED:
             raise InvalidRoutePlanError(
-                "use one of the resolved factories for status='resolved'"
+                "use FirstStopRecommendation.recommended() for status='recommended'"
             )
         return cls(status=status, diagnostics=diagnostics)
 
+    # ---- queries ------------------------------------------------------- #
     @property
-    def is_resolved(self) -> bool:
-        return self.status is FirstStopStatus.RESOLVED
+    def is_available(self) -> bool:
+        return self.status is RecommendationStatus.RECOMMENDED
 
-    @property
-    def is_pinned(self) -> bool:
-        """True when the current selection is locked by the user (D6)."""
-        return self.pinned_via is not None
+    def top(self, count: int) -> tuple[FirstStopCandidate, ...]:
+        return self.ranked[:count]
+
+    def find(self, stop_id: StopId) -> FirstStopCandidate | None:
+        for candidate in self.ranked:
+            if candidate.stop_id == stop_id:
+                return candidate
+        return None
+
+    def rank_of(self, stop_id: StopId) -> int | None:
+        for position, candidate in enumerate(self.ranked, start=1):
+            if candidate.stop_id == stop_id:
+                return position
+        return None
 
     def explanation(self) -> Mapping[str, float]:
-        """Deterministic cost breakdown of the selected candidate (spec section 9)."""
-        for candidate in self.top_k:
-            if candidate.stop_id == self.selected_stop_id:
-                return dict(candidate.explanation)
-        return {}
+        """Deterministic cost breakdown of the recommended candidate (spec section 9)."""
+        if self.recommended_stop_id is None:
+            return {}
+        candidate = self.find(self.recommended_stop_id)
+        return dict(candidate.explanation) if candidate is not None else {}

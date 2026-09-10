@@ -195,7 +195,7 @@ def build_demo_plan(
         cost_policy=cost_policy if cost_policy is not None else demo_provisional_policy(),
         window_end_policy=window_end_policy,
         default_service_duration=DEMO_DEFAULT_SERVICE_DURATION,
-        first_service_stop=FirstStopIntent.auto(),
+        first_service_stop=FirstStopIntent.recommend(),
     )
 
 

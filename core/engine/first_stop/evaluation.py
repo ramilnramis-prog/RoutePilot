@@ -1,20 +1,23 @@
-"""First-stop candidate evaluation (spec sections 1, 8 and 9; Stage 1).
+"""First-stop candidate evaluation - the recommendation engine (spec sections 1, 8, 9; D32).
 
-This module **evaluates** every possible first stop: it times the first leg with the real
-timeline arithmetic and prices it with the cost policy. It deliberately does **not** select,
-pin, persist or explain-as-a-decision anything - selection, provenance, pinning and the
-``inputs_fingerprint`` recomputation belong to Stage 2.
+This module **evaluates** every possible first stop and ranks them: it times the first leg with the
+real timeline arithmetic and prices it with the cost policy. What it produces is a
+**recommendation**. It deliberately does **not** select, pin, persist or apply anything - the
+driver decides (D4), and the driver's decision lives in
+:class:`~core.model.first_stop.FirstStopIntent`, not here.
 
-Spec section 8 requires candidate quality to include the route *after* the candidate. That term
-is not implemented yet (``first_stop_remaining_route_weight`` is declared ``planned`` and is not
-part of any policy), so :attr:`CandidateEvaluation.remaining_route_estimate` is ``None`` and the
-score covers the first leg only. This is stated rather than hidden, because on the first leg
-alone every candidate that arrives before opening has the same ``travel + waiting`` total, which
-is exactly the degeneracy the remaining-route term exists to break.
+Spec section 8 requires candidate quality to include the route *after* the candidate, and D32
+requires ranking **complete route outcomes** (``START -> candidate -> optimized remaining stops ->
+FINISH``). The optimizer that can produce those outcomes is Stage 2, so
+:attr:`CandidateEvaluation.remaining_route_estimate` is still ``None`` and the score covers the
+first leg only. This is stated rather than hidden, because on the first leg alone every candidate
+that arrives before opening has the same ``travel + waiting`` total - exactly the degeneracy the
+remaining-route term exists to break.
 
 A candidate whose **hard** service window cannot be met is never ranked: it is returned in a
-separate ``infeasible`` collection with its explicit Violation, so infeasibility is reported
-rather than folded into a comparable score (D13 amendment).
+separate ``infeasible`` collection with its explicit Violation, so infeasibility is reported rather
+than folded into a comparable score (D13 amendment). Once complete-route outcomes exist, this rule
+applies to the whole route, not just the first leg (D32).
 """
 
 from __future__ import annotations
@@ -135,11 +138,11 @@ class CandidateEvaluation:
 
 @dataclass(frozen=True)
 class FirstStopEvaluationReport:
-    """Every candidate for the first service stop, ranked deterministically.
+    """Every candidate for the first service stop, ranked deterministically - a recommendation.
 
     Ranking rule: feasible candidates only, ordered by ``(score, travel_time, stop_id)``. The
     explicit tie-break makes the result reproducible even when a weight set cannot separate
-    candidates.
+    candidates. The report is advisory input for the driver, never a decision (D32).
     """
 
     plan_id: PlanId
@@ -155,13 +158,18 @@ class FirstStopEvaluationReport:
     def has_candidates(self) -> bool:
         return bool(self.ranked) or bool(self.infeasible)
 
-    def best(self) -> CandidateEvaluation | None:
-        """The preferred feasible first stop, or ``None`` when no candidate is feasible (D9)."""
+    def recommended(self) -> CandidateEvaluation | None:
+        """The candidate RoutePilot *recommends* as the first stop, or ``None`` if none is feasible.
+
+        A recommendation only: nothing is applied, nothing is pinned and no working route is
+        committed until the driver chooses (D4/D32, I4).
+        """
         return self.ranked[0] if self.ranked else None
 
-    def best_id(self) -> StopId | None:
-        best = self.best()
-        return best.stop_id if best is not None else None
+    @property
+    def recommended_stop_id(self) -> StopId | None:
+        recommended = self.recommended()
+        return recommended.stop_id if recommended is not None else None
 
     def nearest(self) -> CandidateEvaluation | None:
         """Feasible candidate with the shortest first leg (the naive answer)."""

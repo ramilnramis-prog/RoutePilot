@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 
+from core.model.first_stop import FirstStopMode, FirstStopState
 from core.model.route_stop import GeocodeStatus
 from core.time import tzdata, tz
 from demo.dataset import (
@@ -94,6 +95,12 @@ class DemoDatasetTests(unittest.TestCase):
         stop_ids = {stop.id for stop in self.plan.stops}
         self.assertNotIn(self.plan.departure.label, stop_ids)
         self.assertNotIn(self.plan.finish.label, stop_ids)
+
+    def test_the_demo_plan_waits_for_the_driver_choice(self) -> None:
+        # D4/D32: the demo starts in RECOMMEND mode with nothing selected.
+        self.assertIs(self.plan.first_stop_state, FirstStopState.AWAITING_FIRST_STOP_CHOICE)
+        self.assertIs(self.plan.first_service_stop.mode, FirstStopMode.RECOMMEND)
+        self.assertIsNone(self.plan.first_service_stop.selected_stop_id)
 
 
 if __name__ == "__main__":

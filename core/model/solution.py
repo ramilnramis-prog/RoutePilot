@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import Enum
 
-from core.model.first_stop import FirstStopCandidate, FirstStopResolution
+from core.model.first_stop import FirstStopIntent, FirstStopRecommendation
 from core.model.ids import StopId
 from core.model.service_window import WindowEndPolicy, WindowKind
 from core.model.value_objects import DataProvenance, DurationSec, Instant, ensure_utc
@@ -61,7 +61,8 @@ class SolutionStatus(str, Enum):
 
     OK = "ok"
     HAS_INFEASIBLE_WINDOWS = "has_infeasible_windows"
-    UNRESOLVED_FIRST_STOP = "unresolved_first_stop"
+    #: No committed route: in RECOMMEND mode the driver has not chosen a first stop yet (D4/I4).
+    AWAITING_FIRST_STOP_CHOICE = "awaiting_first_stop_choice"
 
 
 class BaselineKind(str, Enum):
@@ -286,14 +287,16 @@ class RouteSolution:
     timelines: tuple[StopTimeline, ...]
     metrics: RouteMetrics
     status: SolutionStatus
-    first_service_stop: FirstStopResolution
+    #: The driver's decision the route was built from (never a recommendation - D4/D32).
+    first_service_stop: FirstStopIntent
     provenance: DataProvenance
     inputs_fingerprint: str
     tzdata_version: str | None = None
+    #: What RoutePilot recommended at the time, kept for audit; it never implies a selection.
+    recommendation: FirstStopRecommendation | None = None
     user_baseline: RouteMetrics | None = None
     algorithm_baseline: RouteMetrics | None = None
     violations: tuple[Violation, ...] = field(default_factory=tuple)
-    top_k: tuple[FirstStopCandidate, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         order = tuple(self.order)
@@ -302,7 +305,6 @@ class RouteSolution:
         object.__setattr__(self, "order", order)
         object.__setattr__(self, "timelines", timelines)
         object.__setattr__(self, "violations", violations)
-        object.__setattr__(self, "top_k", tuple(self.top_k))
 
         if not isinstance(self.status, SolutionStatus):
             object.__setattr__(self, "status", SolutionStatus(self.status))
@@ -339,16 +341,21 @@ class RouteSolution:
                 raise InvalidRoutePlanError(
                     "metrics.feasible must be False when the solution has infeasible windows"
                 )
-        if self.status is not SolutionStatus.UNRESOLVED_FIRST_STOP and not (
-            self.first_service_stop.is_resolved
+        has_selection = self.first_service_stop.has_selection
+        if self.status is not SolutionStatus.AWAITING_FIRST_STOP_CHOICE and not has_selection:
+            raise InvalidRoutePlanError(
+                "a committed route requires a driver-selected first service stop: in RECOMMEND mode "
+                "the plan stays 'awaiting_first_stop_choice' until the driver chooses (D4/I4)"
+            )
+        if self.status is SolutionStatus.AWAITING_FIRST_STOP_CHOICE and has_selection:
+            raise InvalidRoutePlanError(
+                "status 'awaiting_first_stop_choice' contradicts a driver-selected first service stop"
+            )
+        if self.recommendation is not None and not isinstance(
+            self.recommendation, FirstStopRecommendation
         ):
             raise InvalidRoutePlanError(
-                "a built route needs a resolved first service stop; unresolved first stop is a "
-                "separate solution status (D9)"
-            )
-        if self.status is SolutionStatus.UNRESOLVED_FIRST_STOP and self.first_service_stop.is_resolved:
-            raise InvalidRoutePlanError(
-                "status 'unresolved_first_stop' contradicts a resolved first service stop"
+                "recommendation must be a FirstStopRecommendation (advisory, never a decision)"
             )
 
         unknown_violation_ids = [sid for sid in violating_ids if sid not in order]

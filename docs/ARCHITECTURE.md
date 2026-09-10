@@ -42,8 +42,9 @@ core/
     route_stop.py      GeocodeStatus, ServiceStatus, RouteStop
     route_plan.py      RoutePlan + invariant validation + order validation
     order_override.py  OrderConstraint, OrderOverrides (generic, D21)
-    first_stop.py      FirstStopMode, SelectionSource, PinnedVia, FirstStopStatus,
-                       FirstStopIntent, FirstStopResolution, CandidateDiagnostic, FirstStopCandidate
+    first_stop.py      FirstStopMode, SelectionSource, FirstStopState, RecommendationStatus,
+                       FirstStopIntent, FirstStopRecommendation, CandidateDiagnostic,
+                       FirstStopCandidate
     cost_policy.py     CostComponent, ComponentStatus, RouteCostPolicy (D13)
     route_mode.py      RouteMode + ROUTE_MODE_STATUS registry (D19)
     solution.py        StopTimeline, TimelineFlag, Feasibility, Violation, RouteMetrics,
@@ -68,8 +69,9 @@ demo/
 ```
 
 Stage status: `core/model`, `core/time`, `core/validation` and `core/engine/providers.py` are
-Stage 0; `core/engine/cost.py`, `core/engine/first_stop/evaluation.py` and `demo/` are Stage 1.
-There is still no optimizer, no storage code, no API and no UI.
+Stage 0; `core/engine/cost.py`, `core/engine/first_stop/evaluation.py` and `demo/` are Stage 1. The
+first-stop semantics were then migrated off the revoked AUTO model (D4/D32): the engine recommends,
+the driver decides. There is still no optimizer, no storage code, no API and no UI.
 
 ## 3. Domain model
 
@@ -125,53 +127,71 @@ Structural invariants (D10):
 - **I1** START is a `PlaceRef`, never a `RouteStop`; `validate_order()` rejects any order containing
   the departure location, and START never appears in timelines.
 - **I2** FINISH is a `PlaceRef` and is never part of the optimized order; it may not appear in it.
-- **I3** a pinned first stop stays first until explicitly unpinned (enforced by the optimizer in
-  Stage 2; the model records the intent now).
-- **I4** AUTO never yields a "waiting for driver choice" state when a feasible candidate exists;
-  MANUAL without a chosen first stop is a legal unresolved state, not an error.
+- **I3** a driver-selected first stop stays first through any optimization and is never replaced by a
+  recomputation or a changed recommendation (enforced by the optimizer in Stage 2; the model records
+  the decision now).
+- **I4** in RECOMMEND mode the system always returns ranked recommendations when a feasible candidate
+  exists, but a **committed** first service stop — and therefore a committed working route — requires
+  an explicit driver choice. `awaiting_first_stop_choice` is a valid state, not an error.
+- **I5** a recommendation never implies selection: `recommended_stop_id` and `selected_stop_id` are
+  separate fields with separate lifecycles.
+- **I6** a candidate's previewed complete-route figure must come from the same objective and
+  optimizer that builds the final route (preview and commit never diverge).
 
 `validate_order(order)` is pure domain validation (not a solver) and guarantees spec §27.3/§27.4/
 §27.17: exactly the enabled stops, each exactly once, no duplicates, no unknowns, no disabled
 stops, no START, no FINISH.
 
-### 3.4 First stop: intent vs resolution (D11)
+### 3.4 First stop: the driver's decision vs the engine's recommendation (D4/D11/D32)
 
 ```
-FirstStopIntent      mode, pinned, pinned_stop_id              # persisted user intent
-FirstStopResolution  selected_stop_id, selection_source,       # derived, cached, never intent
-                     pinned_via, status, resolved_at,
-                     inputs_fingerprint, diagnostics
+FirstStopIntent          mode, selected_stop_id, selection_source, pinned   # persisted decision
+FirstStopRecommendation  recommended_stop_id, ranked top-K, status,         # derived, recomputable
+                         resolved_at, inputs_fingerprint, diagnostics
 ```
 
-Validated combinations:
+The optimizer recommends; the driver decides. `awaiting_first_stop_choice` is the normal starting
+state in RECOMMEND mode, and a recommendation may exist while nothing is selected:
 
-| Case | source | pinned | pinned_via |
-|---|---|---|---|
-| AUTO, unpinned | `auto_recommendation` | `false` | `None` |
-| AUTO, driver pressed Lock | `auto_recommendation` | `true` | `lock` |
-| driver overrode AUTO | `driver` | `true` | `override` |
-| MANUAL choice | `driver` | `true` | `manual_mode` |
+```
+recommended_stop_id = S73
+selected_stop_id    = None
+state               = awaiting_first_stop_choice     # valid, expected
+```
 
-Model rules: `pinned_via` is `None` exactly when `pinned` is `false`; `lock` implies
-`auto_recommendation`; `override`/`manual_mode` imply `driver`; `status == resolved` implies
-`selected_stop_id is not None`; an unresolved status implies `selected_stop_id is None`. There is
-deliberately **no** rule tying `selection_source` to `pinned` — that invariant was explicitly
-rejected in D6.
+Validated combinations (D6):
 
-First-stop statuses (D9): `resolved`, `unresolved_empty_plan`, `unresolved_manual_awaiting_choice`,
-`no_active_stops`, `no_feasible_first_stop` (+ diagnostics).
+| Driver action | mode | selection_source | pinned | state |
+|---|---|---|---|---|
+| no choice yet | `recommend` | — | `false` | `awaiting_first_stop_choice` |
+| no choice yet | `manual` | — | `false` | `awaiting_first_stop_choice` |
+| pressed "start from this stop" on the recommendation | `recommend` | `accepted_recommendation` | `true` | `first_stop_selected` |
+| chose another stop | `recommend` | `manual_choice` | `true` | `first_stop_selected` |
+| chose directly | `manual` | `manual_choice` | `true` | `first_stop_selected` |
+
+Model rules: a selection requires provenance (`selection_source`), provenance requires a selection,
+nothing selected cannot be pinned, and MANUAL mode only accepts `manual_choice`. A choice may be
+explicitly left unlocked (`pinned = false`); what the optimizer does with an unlocked choice is a
+Stage 2 decision (open item).
+
+`pinned_via` and the old `auto_recommendation` / `driver` values are gone: with no automatic
+application there is no "Lock" action left for them to describe.
+
+Plan-level states (derived, never stored): `awaiting_first_stop_choice`, `first_stop_selected`,
+`no_active_stops`, `empty_plan`. Recommendation outcomes (D9, distinct reasons rather than a bare
+`None`): `recommended`, `no_feasible_first_stop`, `no_active_stops`, `empty_plan` (+ diagnostics).
 
 ### 3.5 Order overrides (D21)
 
 `OrderOverrides` holds a tuple of `OrderConstraint(kind, stop_id, position)`:
 
-- `kind='first_stop'` — implemented; at most one instance; when the intent is pinned it must agree
-  with `first_stop_intent.pinned_stop_id` (consistency is validated, so two sources of truth cannot
-  silently diverge);
-- `kind='position'` — reserved for future drag/reorder. The domain can represent it, but Stage 0
+- `kind='first_stop'` — implemented; at most one instance, and when present it must mirror the
+  driver's `selected_stop_id` (validated, so the two representations cannot silently diverge). An
+  absent override is not a conflict: the selection is authoritative;
+- `kind='position'` — reserved for future drag/reorder. The domain can represent it, but this stage
   rejects it with `UnsupportedConstraintError` instead of pretending to honour it.
 
-No constraint solver is built at Stage 0.
+No constraint solver is built yet.
 
 ### 3.6 Cost policy (D13, amended)
 
@@ -254,7 +274,7 @@ Key semantics:
 - `window_kind='unknown'` raises no violation — it raises a timeline flag (`window_unknown`) so the
   driver sees "hours unknown" instead of silently treated-as-open.
 
-### 5.1 First-stop candidate evaluation (Stage 1)
+### 5.1 First-stop recommendation (Stage 1, D32)
 
 `core.engine.first_stop.evaluate_first_stop_candidates` times and prices **every** possible first
 stop with the same per-leg arithmetic as a real route leg, and returns a
@@ -263,17 +283,21 @@ stop with the same per-leg arithmetic as a real route leg, and returns a
 - `ranked` — feasible candidates ordered by `(score, travel_time, stop_id)`. The explicit tie-break
   keeps results reproducible even when a weight set cannot separate candidates;
 - `infeasible` — candidates whose hard window cannot be met, each with its explicit `Violation`.
-  They are **never** ranked and never become the preferred stop, even when their score is the
-  lowest of all candidates;
+  They are **never** ranked and never recommended, even when their score is the lowest of all
+  candidates;
 - `disabled_stop_ids` — excluded stops, reported rather than silently dropped.
 
-What this deliberately is **not**: it does not select, pin, persist or explain a decision. Those
-belong to Stage 2, together with `inputs_fingerprint`-driven recomputation. Spec §8 requires
-candidate quality to include the route *after* the candidate; that term is declared `planned`, and
-`remaining_route_estimate` is `None` rather than approximated. The reason is measurable: for every
-candidate arriving before opening, `travel + waiting` is fixed by the opening time, so at a 1:1
-weight ratio they tie exactly. The demo report shows that degeneracy explicitly, which is why the
-demo weights are marked provisional (D31).
+What this deliberately is **not**: it never selects, pins or applies anything. `report.recommended()`
+is advisory input for the driver (D4), and the driver's decision lives in `FirstStopIntent`, not in
+the engine.
+
+Spec §8 and D32 require ranking **complete route outcomes**
+(`START → candidate → optimized remaining stops → FINISH`). The optimizer that produces them is
+Stage 2, so `remaining_route_estimate` is `None` rather than approximated, and `feasible` still
+describes the first leg only. The reason is measurable: for every candidate arriving before opening,
+`travel + waiting` is fixed by the opening time, so at a 1:1 weight ratio they tie exactly. The demo
+report shows that degeneracy explicitly, which is why the demo weights are marked provisional (D31).
+Once complete-route outcomes exist, candidate feasibility must cover the whole route (D32).
 
 ### 5.2 Demo data and provenance (Stage 1)
 
@@ -338,8 +362,8 @@ visible attribution; `core/` never references them.
 |---|---|
 | 1, 2 | `tests/model/test_route_plan.py` (model invariants), timeline tests |
 | 3, 4, 17 | `validate_order` tests (exactly-once, no disabled, no loss/duplication) |
-| 5, 6 | `tests/model/test_first_stop.py` (pinned first stop; Lock keeps provenance) |
-| 7–10 | `tests/engine/test_first_stop_evaluation.py` (A/B/C criteria), `tests/demo/test_report.py` (sweep) |
+| 5, 6 | `tests/model/test_first_stop.py` (the driver's choice; provenance records how it was made, never by the engine) |
+| 7–10 | `tests/engine/test_first_stop_evaluation.py` (A/B/C criteria of the *recommendation*), `tests/demo/test_report.py` (departure sweep) |
 | 11–14 | `tests/time/test_timeline.py` |
 | 15, 16 | `tests/time/test_tz_strict_validation.py` |
 | 18 | Stage 2 (local search monotonicity) |
@@ -355,8 +379,10 @@ visible attribution; `core/` never references them.
 
 | Stage | Extension |
 |---|---|
-| 1 (done) | cost scoring over implemented components, demo dataset, synthetic matrix, 04:00/08:00 scenario, candidate evaluation, numeric demo report |
-| 2 | first-stop selection + provenance/pinning + `inputs_fingerprint` recomputation, optimizer (seed + local search), remaining-route term, top-K explanation |
+| 0 ✅ | foundation: docs, domain skeleton, time layer, strict DST, error taxonomy, doctor, tests, storage schema proposal |
+| 1 ✅ | cost scoring over implemented components, deterministic demo dataset (~30 stops), synthetic matrix, 04:00 / 08:00 scenario, candidate evaluation, numeric demo report |
+| 1.5 ✅ | semantics migration off the revoked AUTO model: RECOMMEND/MANUAL, recommendation vs driver decision, `awaiting_first_stop_choice` (D4–D11, D32) |
+| 2 | recommendation engine over **complete route outcomes** + optimizer + remaining-route term + top-K + driver-choice actions + caching + performance measurement |
 | 3 | SQLite repositories behind the approved schema |
 | 4 | API transport + web UI (map, timeline panel, summary, override controls) |
 | 5 | reoptimization after each served stop, active-leg protection groundwork |

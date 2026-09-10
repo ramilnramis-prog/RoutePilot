@@ -10,7 +10,7 @@ import dataclasses
 import unittest
 from datetime import datetime, time
 
-from core.model.first_stop import FirstStopIntent
+from core.model.first_stop import FirstStopIntent, FirstStopMode, FirstStopState
 from core.model.ids import PlanId, StopId
 from core.model.order_override import (
     OrderConstraint,
@@ -142,29 +142,66 @@ class OrderValidationTests(unittest.TestCase):
             self.plan.validate_order([StopId(ENABLED), StopId(ENABLED), StopId(ENABLED2)])
 
 
-class FirstStopConsistencyTests(unittest.TestCase):
-    def test_a_pinned_intent_must_match_an_order_override(self) -> None:
+class FirstStopSelectionTests(unittest.TestCase):
+    """The driver's choice is intent; a recommendation is derived and implies nothing (D4/D11/D32)."""
+
+    def test_a_new_plan_awaits_the_driver_choice(self) -> None:
+        plan = build_plan(stop(ENABLED, 55.80, 37.70))
+        self.assertIs(plan.first_stop_state, FirstStopState.AWAITING_FIRST_STOP_CHOICE)
+        self.assertFalse(plan.first_service_stop.has_selection)
+        self.assertTrue(plan.order_overrides.is_empty())
+
+    def test_empty_plan_and_no_active_stops_have_their_own_states(self) -> None:
+        self.assertIs(build_plan().first_stop_state, FirstStopState.EMPTY_PLAN)
+        only_disabled = build_plan(stop(ENABLED, 55.80, 37.70, enabled=False))
+        self.assertIs(only_disabled.first_stop_state, FirstStopState.NO_ACTIVE_STOPS)
+
+    def test_selecting_a_stop_marks_the_plan_as_selected(self) -> None:
+        plan = build_plan(
+            stop(ENABLED, 55.80, 37.70),
+            stop(ENABLED2, 55.90, 37.80),
+            first_service_stop=FirstStopIntent.manual_choice(StopId(ENABLED)),
+        )
+        self.assertIs(plan.first_stop_state, FirstStopState.FIRST_STOP_SELECTED)
+        self.assertEqual(plan.first_service_stop.selected_stop_id, ENABLED)
+
+    def test_accepting_a_recommendation_in_recommend_mode_is_valid(self) -> None:
+        plan = build_plan(
+            stop(ENABLED, 55.80, 37.70),
+            first_service_stop=FirstStopIntent.accepted_recommendation(StopId(ENABLED)),
+        )
+        self.assertIs(plan.first_stop_state, FirstStopState.FIRST_STOP_SELECTED)
+        self.assertTrue(plan.first_service_stop.pinned)
+
+    def test_selection_must_match_an_order_override(self) -> None:
         with self.assertRaises(InvalidRoutePlanError):
             build_plan(
                 stop(ENABLED, 55.80, 37.70),
                 stop(ENABLED2, 55.90, 37.80),
-                first_service_stop=FirstStopIntent.auto_locked(StopId(ENABLED)),
+                first_service_stop=FirstStopIntent.manual_choice(StopId(ENABLED)),
                 order_overrides=OrderOverrides.first_stop(StopId(ENABLED2)),
             )
 
-    def test_matching_pin_is_accepted(self) -> None:
+    def test_matching_selection_and_override_are_accepted(self) -> None:
         plan = build_plan(
             stop(ENABLED, 55.80, 37.70),
             stop(ENABLED2, 55.90, 37.80),
-            first_service_stop=FirstStopIntent.auto_locked(StopId(ENABLED)),
+            first_service_stop=FirstStopIntent.manual_choice(StopId(ENABLED)),
             order_overrides=OrderOverrides.first_stop(StopId(ENABLED)),
         )
         self.assertEqual(plan.order_overrides.first_stop_id(), ENABLED)
 
-    def test_dynamic_auto_intent_without_overrides_is_valid(self) -> None:
-        plan = build_plan(stop(ENABLED, 55.80, 37.70))
-        self.assertTrue(plan.first_service_stop.is_dynamic)
-        self.assertTrue(plan.order_overrides.is_empty())
+    def test_selected_stop_must_exist_and_be_enabled(self) -> None:
+        with self.assertRaises(InvalidRoutePlanError):
+            build_plan(
+                stop(ENABLED, 55.80, 37.70),
+                first_service_stop=FirstStopIntent.manual_choice(StopId("ghost")),
+            )
+        with self.assertRaises(InvalidRoutePlanError):
+            build_plan(
+                stop(ENABLED, 55.80, 37.70, enabled=False),
+                first_service_stop=FirstStopIntent.manual_choice(StopId(ENABLED)),
+            )
 
     def test_unimplemented_position_constraint_is_rejected_by_the_plan(self) -> None:
         with self.assertRaises(UnsupportedConstraintError):
@@ -250,6 +287,24 @@ class FingerprintTests(unittest.TestCase):
         annotated = dataclasses.replace(base.stops[0], notes="call the back door")
         changed = dataclasses.replace(base, stops=(annotated,) + base.stops[1:])
         self.assertEqual(self.fingerprint(base), self.fingerprint(changed))
+
+    def test_the_driver_choice_does_not_change_the_recommendation_fingerprint(self) -> None:
+        # D4: the fingerprint decides whether the *recommendation* is stale. Choosing a first stop
+        # must not make it look stale, otherwise the driver would be told "recommendation has
+        # changed" the instant they accept one.
+        base = sample_plan()
+        chosen = dataclasses.replace(
+            base,
+            first_service_stop=FirstStopIntent.manual_choice(
+                StopId(ENABLED), mode=FirstStopMode.MANUAL
+            ),
+            order_overrides=OrderOverrides.first_stop(StopId(ENABLED)),
+        )
+        self.assertEqual(self.fingerprint(base), self.fingerprint(chosen))
+        self.assertNotEqual(
+            base.first_service_stop.selected_stop_id,
+            chosen.first_service_stop.selected_stop_id,
+        )
 
     def test_matrix_fingerprint_participates(self) -> None:
         plan = sample_plan()

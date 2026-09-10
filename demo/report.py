@@ -6,7 +6,7 @@ Prints, deterministically:
 * the input route (the order as supplied by the user = the product's BEFORE baseline);
 * first-leg timelines for the notable stops;
 * candidate costs for every possible first stop, plus the top 5;
-* why the winner is neither the nearest nor the farthest stop;
+* why the recommendation is neither the nearest nor the farthest stop;
 * the effect of changing the departure time;
 * sensitivity to the provisional waiting weight;
 * the window-end policy (D29) and what it changes;
@@ -123,26 +123,30 @@ def _policy_text(policy: RouteCostPolicy) -> str:
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class DepartureOutcome:
-    """Result of evaluating the demo plan at one departure time."""
+    """Result of evaluating the demo plan at one departure time.
+
+    ``recommended_*`` describes what RoutePilot would propose - never a selection. The driver makes
+    the first-stop decision (D4/D32).
+    """
 
     local_hour: int
     departure: datetime
-    winner_id: str | None
-    winner_score: float
-    winner_travel: int
-    winner_wait: int
+    recommended_id: str | None
+    recommended_score: float
+    recommended_travel: int
+    recommended_wait: int
     runner_up_id: str | None
     runner_up_score: float | None
-    winner_note: str = ""
+    recommended_note: str = ""
 
 
 @dataclass(frozen=True)
 class WeightSensitivityRow:
-    """Winner under one waiting:travel ratio."""
+    """Recommendation under one waiting:travel ratio."""
 
     waiting_weight: float
-    winner_id: str | None
-    winner_score: float
+    recommended_id: str | None
+    recommended_score: float
     note: str
 
 
@@ -167,30 +171,30 @@ def departure_sweep(
     for hour in hours:
         plan = build_demo_plan(departure_time=demo_departure_time_at(hour))
         report = evaluate(plan=plan, policy=policy)
-        best = report.best()
-        if best is None:
+        recommended = report.recommended()
+        if recommended is None:
             outcomes.append(
                 DepartureOutcome(hour, plan.departure_time, None, 0.0, 0, 0, None, None)
             )
             continue
         runner_up = report.ranked[1] if len(report.ranked) > 1 else None
         note = ""
-        stop = plan.stop_by_id(best.stop_id)
+        stop = plan.stop_by_id(recommended.stop_id)
         if stop.service_window.window_kind.value == "unknown":
             note = "hours unknown: no opening constraint applies"
-        elif best.waiting_time == 0:
+        elif recommended.waiting_time == 0:
             note = "arrives at or after opening: no waiting"
         outcomes.append(
             DepartureOutcome(
                 local_hour=hour,
                 departure=plan.departure_time,
-                winner_id=best.stop_id,
-                winner_score=best.score,
-                winner_travel=best.travel_time,
-                winner_wait=best.waiting_time,
+                recommended_id=recommended.stop_id,
+                recommended_score=recommended.score,
+                recommended_travel=recommended.travel_time,
+                recommended_wait=recommended.waiting_time,
                 runner_up_id=runner_up.stop_id if runner_up else None,
                 runner_up_score=runner_up.score if runner_up else None,
-                winner_note=note,
+                recommended_note=note,
             )
         )
     return tuple(outcomes)
@@ -201,32 +205,32 @@ def weight_sensitivity(
     ratios: tuple[float, ...] = WEIGHT_SENSITIVITY_RATIOS,
     travel_weight: float = DEMO_TRAVEL_TIME_WEIGHT,
 ) -> tuple[WeightSensitivityRow, ...]:
-    """Winner at 04:00 for several waiting:travel ratios (the demo weights are provisional)."""
+    """Recommended stop at 04:00 for several waiting:travel ratios (the demo weights are provisional)."""
     rows: list[WeightSensitivityRow] = []
     for ratio in ratios:
         policy = demo_provisional_policy(
             travel_time_weight=travel_weight, waiting_time_weight=ratio
         )
         report = evaluate(plan=build_demo_plan(cost_policy=policy), policy=policy)
-        best = report.best()
+        recommended = report.recommended()
         note = ""
-        if best is not None and ratio == travel_weight:
+        if recommended is not None and ratio == travel_weight:
             ties = [
                 evaluation
                 for evaluation in report.ranked
-                if abs(evaluation.score - best.score) < 1e-9
+                if abs(evaluation.score - recommended.score) < 1e-9
             ]
             note = (
-                f"degenerate: {len(ties)} candidates tie at {best.score:.0f}; the tie-break "
-                "(shortest first leg) hands the choice to the nearest stop"
+                f"degenerate: {len(ties)} candidates tie at {recommended.score:.0f}; the tie-break "
+                "(shortest first leg) hands the recommendation to the nearest stop"
             )
-        elif best is not None:
-            note = "waiting is penalised, so arriving close to opening wins"
+        elif recommended is not None:
+            note = "waiting is penalised, so arriving close to opening is recommended"
         rows.append(
             WeightSensitivityRow(
                 waiting_weight=ratio,
-                winner_id=best.stop_id if best else None,
-                winner_score=best.score if best else 0.0,
+                recommended_id=recommended.stop_id if recommended else None,
+                recommended_score=recommended.score if recommended else 0.0,
                 note=note,
             )
         )
@@ -414,6 +418,10 @@ def build_report() -> str:
         "(used when a stop's duration is unknown)"
     )
     lines.append(f"window end policy : {plan.window_end_policy.value} (plan default, D29)")
+    lines.append(
+        f"first stop        : {plan.first_stop_state.value} - the driver decides; nothing is "
+        "applied automatically (D4/D32)"
+    )
     lines.append(f"cost policy       : {_policy_text(plan.cost_policy)}")
     lines.append("")
 
@@ -513,18 +521,18 @@ def build_report() -> str:
         )
     lines.append("")
 
-    # ---- nearest / farthest / winner ------------------------------------ #
-    best = report.best()
+    # ---- nearest / farthest / recommendation ---------------------------- #
+    recommended = report.recommended()
     nearest = report.nearest()
     farthest = report.farthest()
-    assert best is not None and nearest is not None and farthest is not None
+    assert recommended is not None and nearest is not None and farthest is not None
     lines.append(_SUBSEPARATOR)
-    lines.append("WHY THE WINNER IS NEITHER THE NEAREST NOR THE FARTHEST")
+    lines.append("WHY THE RECOMMENDATION IS NEITHER THE NEAREST NOR THE FARTHEST")
     lines.append(_SUBSEPARATOR)
     for label, evaluation in (
-        ("nearest ", nearest),
-        ("winner  ", best),
-        ("farthest", farthest),
+        ("nearest      ", nearest),
+        ("recommended  ", recommended),
+        ("farthest     ", farthest),
     ):
         rank = report.rank_of(evaluation.stop_id)
         lines.append(
@@ -535,20 +543,25 @@ def build_report() -> str:
         )
     lines.append("")
     lines.append(
-        f"why the winner wins : it reaches the opening time with the least driving - "
-        f"{format_duration(best.travel_time)} of driving and "
-        f"{format_duration(best.waiting_time)} of waiting, total {best.score:.0f}."
+        f"why it is recommended : it reaches the opening time with the least driving - "
+        f"{format_duration(recommended.travel_time)} of driving and "
+        f"{format_duration(recommended.waiting_time)} of waiting, total {recommended.score:.0f}."
     )
     lines.append(
-        f"why nearest loses   : the {format_duration(nearest.travel_time)} leg is cheap, but "
+        f"why nearest loses     : the {format_duration(nearest.travel_time)} leg is cheap, but "
         f"{format_duration(nearest.waiting_time)} of dead waiting costs "
         f"{nearest.component(CostComponent.WAITING_TIME):.0f} units, so it totals "
         f"{nearest.score:.0f} and ranks #{report.rank_of(nearest.stop_id)}."
     )
     lines.append(
-        f"why farthest loses  : {format_duration(farthest.travel_time)} of driving saves no "
+        f"why farthest loses    : {format_duration(farthest.travel_time)} of driving saves no "
         f"waiting at all (it already arrives after opening), so it totals {farthest.score:.0f} - "
-        f"{farthest.score - best.score:.0f} more than the winner."
+        f"{farthest.score - recommended.score:.0f} more than the recommendation."
+    )
+    lines.append("")
+    lines.append(
+        "NOTE: these are recommendations only. Nothing is applied and no working route is "
+        "committed; the driver chooses the first service stop (D4/D32)."
     )
     lines.append("")
     groups: dict[str, list[int]] = {}
@@ -588,18 +601,18 @@ def build_report() -> str:
     lines.append("EFFECT OF CHANGING DEPARTURE TIME")
     lines.append(_SUBSEPARATOR)
     lines.append(
-        f"{'departure':<10} {'winner':<22} {'travel':>7}  {'wait':>7}  {'score':>10}  "
+        f"{'departure':<10} {'recommended':<22} {'travel':>7}  {'wait':>7}  {'score':>10}  "
         f"{'runner-up':<22} {'score':>10}  note"
     )
     for outcome in departure_sweep():
         lines.append(
-            f"{outcome.local_hour:02d}:00      {str(outcome.winner_id):<22} "
-            f"{format_duration(outcome.winner_travel):>7}  "
-            f"{format_duration(outcome.winner_wait):>7}  "
-            f"{outcome.winner_score:>10.0f}  "
+            f"{outcome.local_hour:02d}:00      {str(outcome.recommended_id):<22} "
+            f"{format_duration(outcome.recommended_travel):>7}  "
+            f"{format_duration(outcome.recommended_wait):>7}  "
+            f"{outcome.recommended_score:>10.0f}  "
             f"{str(outcome.runner_up_id):<22} "
             f"{(outcome.runner_up_score if outcome.runner_up_score is not None else 0):>10.0f}  "
-            f"{outcome.winner_note}"
+            f"{outcome.recommended_note}"
         )
     lines.append("")
 
@@ -607,11 +620,11 @@ def build_report() -> str:
     lines.append(_SUBSEPARATOR)
     lines.append("SENSITIVITY TO THE PROVISIONAL WAITING WEIGHT (departure 04:00)")
     lines.append(_SUBSEPARATOR)
-    lines.append(f"{'wait/travel':>11}  {'winner':<22} {'score':>10}  note")
+    lines.append(f"{'wait/travel':>11}  {'recommended':<22} {'score':>10}  note")
     for row in weight_sensitivity():
         lines.append(
-            f"{row.waiting_weight:>11.2f}  {str(row.winner_id):<22} "
-            f"{row.winner_score:>10.0f}  {row.note}"
+            f"{row.waiting_weight:>11.2f}  {str(row.recommended_id):<22} "
+            f"{row.recommended_score:>10.0f}  {row.note}"
         )
     lines.append("")
 

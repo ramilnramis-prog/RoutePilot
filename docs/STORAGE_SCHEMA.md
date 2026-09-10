@@ -51,9 +51,10 @@ order, never edited after release, never destructive by default.
 | `finish_latitude` | REAL | NOT NULL |
 | `finish_longitude` | REAL | NOT NULL |
 | `route_mode` | TEXT | NOT NULL, CHECK in (`FASTEST`,`SHORTEST`,`MINIMUM_TURNS`,`ON_THE_WAY`,`START_TO_FINISH`,`SMART_ROUTE`) |
-| `first_stop_mode` | TEXT | NOT NULL, CHECK in (`auto`,`manual`) |
-| `first_stop_pinned` | INTEGER | NOT NULL DEFAULT 0 |
-| `first_stop_pinned_stop_id` | TEXT | NULL, FK → `route_stops(id)` |
+| `first_stop_mode` | TEXT | NOT NULL, CHECK in (`recommend`,`manual`) — the old `auto` value no longer exists (D4) |
+| `first_stop_selected_stop_id` | TEXT | NULL, FK → `route_stops(id)` — the **driver's** choice; NULL means `awaiting_first_stop_choice` (D11/D32) |
+| `first_stop_selection_source` | TEXT | NULL, CHECK in (`accepted_recommendation`,`manual_choice`) — how the driver chose; NULL while nothing is selected (D6) |
+| `first_stop_pinned` | INTEGER | NOT NULL DEFAULT 0 — set when the driver selects (pinned by default, D5) |
 | `window_end_policy` | TEXT | NOT NULL DEFAULT `'service_finish_before_end'`, CHECK in (`service_start_before_end`,`service_finish_before_end`) — what the end of a fixed window means for this plan (D29) |
 | `order_overrides_json` | TEXT | NOT NULL DEFAULT `'{"version": 1, "constraints": []}'` — **versioned** envelope of user ordering constraints (D21/D30) |
 | `cost_policy_json` | TEXT | NOT NULL — policy in force for the plan |
@@ -67,11 +68,13 @@ Notes:
 
 - START and FINISH are **not** rows in `route_stops` (I1/I2). Enforcing this structurally removes the
   possibility of a start location being served.
-- `first_stop_pinned_stop_id` is the persisted **intent** (D11). The **resolution**
-  (`selected_stop_id`, `selection_source`, `pinned_via`, `status`) is derived and belongs to the run
-  that produced it — it is not stored as plan truth, because AUTO is dynamic (D4).
-- `first_stop_pinned` and `first_stop_pinned_stop_id` are the only pin state; `selection_source` is
-  never rewritten by Lock (D6), so it is deliberately absent from the plan table.
+- The plan stores the driver's **decision** (mode, selected stop, provenance, pinned). It never
+  stores `recommended_stop_id`: a recommendation is derived, recomputable, and must never be mistaken
+  for a decision (D4/D11/D32).
+- `first_stop_selected_stop_id` is NULL in the normal pre-choice state
+  `awaiting_first_stop_choice`; no placeholder stop is ever written (D9).
+- `first_stop_selection_source` records **how the driver chose** and is never written by the engine
+  (D6); a recommendation carries no provenance at all.
 
 Indexes: none beyond the PK (plans are few).
 
@@ -171,7 +174,7 @@ Immutable history: one row per optimize/reoptimize execution.
 | `data_provenance` | TEXT | NOT NULL, CHECK in (`DEMO_SYNTHETIC`,`REAL_ROUTING`) |
 | `status` | TEXT | NOT NULL, CHECK in (`ok`,`has_infeasible_windows`,`unresolved_first_stop`) |
 | `order_json` | TEXT | NOT NULL — ordered stop ids |
-| `first_stop_resolution_json` | TEXT | NOT NULL — selected id, source, pinned_via, status, diagnostics |
+| `first_stop_recommendation_json` | TEXT | NOT NULL — the recommendation the run showed: recommended id, ranked top-K outcomes, status, diagnostics. Never a decision (D32) |
 | `top_k_json` | TEXT | NULL — ranked candidates with explanations (§9) |
 | `violations_json` | TEXT | NOT NULL — explicit infeasibilities (D13 amendment) |
 | `metrics_json` | TEXT | NOT NULL — see below |
@@ -225,7 +228,7 @@ producing a half-valid plan.
 |---|---|
 | Timelines, ETA, waiting | derived from plan + matrix + policy; recomputable, and storing them invites stale truth |
 | Matrices | large, provider-owned, cacheable separately later |
-| `selection_source` / `pinned_via` on the plan | they belong to a run's resolution, not to plan intent (D6/D11) |
+| `recommended_stop_id` on the plan | it is derived and recomputable; storing it would turn an advisory recommendation into apparent plan truth (D32) |
 | Route geometry | provider data, requested in chunks later (D18) |
 
 ## 9. Open questions for the schema review

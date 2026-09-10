@@ -5,9 +5,8 @@ The plan is the root of the domain graph. Three structural choices carry most of
 * START and FINISH are :class:`~core.model.value_objects.PlaceRef`, a *different type* from a
   service stop, so a departure location or a finish location cannot be served, ordered or
   optimized (invariants I1/I2) - this is enforced by the type system, not by a runtime check.
-* ``first_service_stop`` holds the persisted **intent** only. The derived resolution (which
-  stop was chosen, why, whether it is locked) belongs to a solution and is recomputed, because
-  AUTO is dynamic (D4/D11).
+* ``first_service_stop`` holds the driver's persisted **decision** (intent) only. What the engine
+  recommends is derived, cached and recomputable, and never implies a selection (D4/D11/D32).
 * ``order_overrides`` is a generic container so future drag/reorder does not require
   redesigning the plan (D21). Only ``first_stop`` constraints are implemented today.
 """
@@ -22,7 +21,7 @@ from datetime import time
 from zoneinfo import ZoneInfo
 
 from core.model.cost_policy import RouteCostPolicy, empty_cost_policy
-from core.model.first_stop import FirstStopIntent
+from core.model.first_stop import FirstStopIntent, FirstStopState
 from core.model.ids import PlanId, StopId
 from core.model.order_override import OrderOverrides
 from core.model.route_mode import DEFAULT_ROUTE_MODE, RouteMode
@@ -49,7 +48,9 @@ class RoutePlan:
     route_mode: RouteMode = DEFAULT_ROUTE_MODE
     #: Default interpretation of a fixed window's end; a stop may override it (D29).
     window_end_policy: WindowEndPolicy = DEFAULT_WINDOW_END_POLICY
-    first_service_stop: FirstStopIntent = field(default_factory=FirstStopIntent.auto)
+    #: The driver's decision. Defaults to "RECOMMEND mode, nothing chosen yet": the optimizer
+    #: proposes, the driver decides (D4/D32).
+    first_service_stop: FirstStopIntent = field(default_factory=FirstStopIntent.recommend)
     order_overrides: OrderOverrides = field(default_factory=OrderOverrides.empty)
     default_service_duration: DurationSec | None = None
 
@@ -105,16 +106,33 @@ class RoutePlan:
         # Declared-but-unimplemented constraint kinds are rejected, never ignored (D16/D21).
         self.order_overrides.validate_supported()
 
-        # One source of truth for the pinned first stop: if a first_stop constraint exists it
-        # must be exactly the pinned intent, otherwise the two would silently diverge.
+        # One source of truth for the chosen first stop: the driver's selection is authoritative.
+        # When a generic first_stop order override is present it must mirror that selection, so the
+        # two representations cannot silently diverge (D21). An absent override is not a conflict.
         constrained_first = self.order_overrides.first_stop_id()
-        intent_first = self.first_service_stop.pinned_stop_id
-        if constrained_first != intent_first:
+        selected_first = self.first_service_stop.selected_stop_id
+        if constrained_first is not None and constrained_first != selected_first:
             raise InvalidRoutePlanError(
                 f"order_overrides says first stop {constrained_first!r} while "
-                f"first_service_stop.pinned_stop_id is {intent_first!r}; the plan would have "
+                f"first_service_stop.selected_stop_id is {selected_first!r}; the plan would have "
                 "two conflicting sources of truth (D21)"
             )
+
+        # A selected first stop must be a real, enabled stop: disabling the chosen stop afterwards
+        # would otherwise leave the plan claiming a first stop it can no longer serve.
+        if selected_first is not None:
+            by_id = {stop.id: stop for stop in stops}
+            chosen = by_id.get(selected_first)
+            if chosen is None:
+                raise InvalidRoutePlanError(
+                    f"first_service_stop.selected_stop_id {selected_first!r} is not a stop of "
+                    f"plan {self.id!r}"
+                )
+            if not chosen.enabled:
+                raise InvalidRoutePlanError(
+                    f"first_service_stop.selected_stop_id {selected_first!r} is disabled; a "
+                    "disabled stop cannot be the first service stop"
+                )
 
         if self.default_service_duration is not None:
             if (
@@ -153,6 +171,22 @@ class RoutePlan:
     @property
     def has_active_stops(self) -> bool:
         return any(stop.enabled for stop in self.stops)
+
+    @property
+    def first_stop_state(self) -> FirstStopState:
+        """Derived state of the first service stop (D9/D32); never stored.
+
+        In RECOMMEND mode ``awaiting_first_stop_choice`` is the normal starting state: the engine
+        has (or will compute) a recommendation, but no working route is committed until the driver
+        chooses (I4).
+        """
+        if not self.stops:
+            return FirstStopState.EMPTY_PLAN
+        if not self.has_active_stops:
+            return FirstStopState.NO_ACTIVE_STOPS
+        if self.first_service_stop.selected_stop_id is None:
+            return FirstStopState.AWAITING_FIRST_STOP_CHOICE
+        return FirstStopState.FIRST_STOP_SELECTED
 
     def stop_by_id(self, stop_id: StopId) -> RouteStop:
         for stop in self.stops:
@@ -239,17 +273,15 @@ class RoutePlan:
             },
             "route_mode": self.route_mode.value,
             # Interpreting a window end differently changes feasibility, so it must be able to
-            # invalidate a cached AUTO recommendation (D4/D29).
+            # invalidate a cached recommendation (D4/D29).
             "window_end_policy": self.window_end_policy.value,
-            "first_service_stop": {
-                "mode": self.first_service_stop.mode.value,
-                "pinned": self.first_service_stop.pinned,
-                "pinned_stop_id": self.first_service_stop.pinned_stop_id,
-            },
-            "order_overrides": [
-                {"kind": c.kind.value, "stop_id": c.stop_id, "position": c.position}
-                for c in self.order_overrides.constraints
-            ],
+            # Deliberately NOT part of this payload: the driver's first-stop decision
+            # (mode / selected_stop_id / selection_source / pinned) and the matching order
+            # override. The recommendation depends on routing inputs, not on which candidate the
+            # driver already accepted - otherwise choosing a stop would immediately make the
+            # recommendation look stale, which is exactly the "recommendation has changed" bug
+            # D4 warns about. Stage 2 will add a separate route fingerprint for the committed
+            # route, which does depend on the selection.
             "default_service_duration": self.default_service_duration,
             "cost_policy": {
                 "name": self.cost_policy.name,

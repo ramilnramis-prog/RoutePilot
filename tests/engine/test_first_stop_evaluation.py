@@ -8,6 +8,10 @@ E. an impossible hard service window is reported explicitly, never hidden by a l
 F. the service_window_end policy is respected
 G. all outputs are deterministic
 
+Terminology: what the engine produces is a **recommendation**. It never selects, pins or applies a
+first stop - the driver decides (D4/D32). The A/B criteria are therefore properties of the
+recommendation.
+
 All travel data here is synthetic and labelled DEMO_SYNTHETIC.
 """
 
@@ -22,6 +26,7 @@ from core.model.cost_policy import (
     demo_provisional_policy,
     empty_cost_policy,
 )
+from core.model.first_stop import FirstStopState
 from core.model.ids import StopId
 from core.model.service_window import ServiceWindow, WindowEndPolicy
 from core.model.solution import ViolationKind
@@ -57,7 +62,7 @@ class AcceptanceCriteriaTests(unittest.TestCase):
 
     def test_a_nearest_is_not_the_best_first_stop(self) -> None:
         report = demo_report(hour=4)
-        best = report.best()
+        best = report.recommended()
         nearest = report.nearest()
         assert best is not None and nearest is not None
         self.assertNotEqual(best.stop_id, nearest.stop_id)
@@ -69,7 +74,7 @@ class AcceptanceCriteriaTests(unittest.TestCase):
 
     def test_b_farthest_is_not_the_best_first_stop(self) -> None:
         report = demo_report(hour=4)
-        best = report.best()
+        best = report.recommended()
         farthest = report.farthest()
         assert best is not None and farthest is not None
         self.assertNotEqual(best.stop_id, farthest.stop_id)
@@ -78,21 +83,21 @@ class AcceptanceCriteriaTests(unittest.TestCase):
 
     def test_c_departure_time_changes_the_preferred_candidate(self) -> None:
         winners = {
-            hour: demo_report(hour=hour).best_id()
+            hour: demo_report(hour=hour).recommended_stop_id
             for hour in (4, 5, 6, 7, 8)
         }
         self.assertEqual(len(set(winners.values())), 5, winners)
         self.assertNotEqual(winners[4], winners[7])
 
         travels = [
-            demo_report(hour=hour).best().travel_time for hour in (4, 6, 7, 8)  # type: ignore[union-attr]
+            demo_report(hour=hour).recommended().travel_time for hour in (4, 6, 7, 8)  # type: ignore[union-attr]
         ]
         # The later the departure, the closer the best first stop: waiting is what makes far better.
         self.assertEqual(travels, sorted(travels, reverse=True))
 
     def test_c_the_latest_departure_favours_the_nearest_stop(self) -> None:
         report = demo_report(hour=8)
-        best = report.best()
+        best = report.recommended()
         nearest = report.nearest()
         assert best is not None and nearest is not None
         self.assertEqual(best.stop_id, nearest.stop_id)
@@ -120,7 +125,7 @@ class AcceptanceCriteriaTests(unittest.TestCase):
             2 * (later.waiting_time - early.waiting_time),
             "the score difference must be exactly the waiting difference at the waiting weight",
         )
-        self.assertEqual(report.best_id(), StopId("early"))
+        self.assertEqual(report.recommended_stop_id, StopId("early"))
 
     def test_e_impossible_hard_window_is_reported_explicitly(self) -> None:
         report = demo_report(hour=4)
@@ -133,7 +138,7 @@ class AcceptanceCriteriaTests(unittest.TestCase):
         self.assertIn("cannot be served within the permitted window", tight.violation.message)
         # Excluded from the ranking, and never the preferred stop.
         self.assertIsNone(report.rank_of(tight.stop_id))
-        self.assertNotEqual(report.best_id(), tight.stop_id)
+        self.assertNotEqual(report.recommended_stop_id, tight.stop_id)
 
     def test_e_a_lowest_scoring_infeasible_stop_still_loses(self) -> None:
         # The cheapest-looking candidate is infeasible (its window closes before the driver can
@@ -157,7 +162,7 @@ class AcceptanceCriteriaTests(unittest.TestCase):
 
         self.assertFalse(impossible.feasible)
         self.assertLess(impossible.score, possible.score)
-        self.assertEqual(report.best_id(), StopId("possible"))
+        self.assertEqual(report.recommended_stop_id, StopId("possible"))
         self.assertEqual(report.ranked_ids(), (StopId("possible"),))
 
     def test_f_window_end_policy_is_respected(self) -> None:
@@ -199,6 +204,16 @@ class AcceptanceCriteriaTests(unittest.TestCase):
             [evaluation.travel_time for evaluation in first.infeasible],
             [evaluation.travel_time for evaluation in second.infeasible],
         )
+
+    def test_evaluation_only_recommends_it_never_selects(self) -> None:
+        # D4/D32/I5: a recommendation is available, and nothing is selected. These are two
+        # separate facts about two separate fields.
+        report = demo_report(hour=4)
+        plan = build_demo_plan()
+        self.assertIsNotNone(report.recommended_stop_id)
+        self.assertIs(plan.first_stop_state, FirstStopState.AWAITING_FIRST_STOP_CHOICE)
+        self.assertIsNone(plan.first_service_stop.selected_stop_id)
+        self.assertFalse(plan.first_service_stop.pinned)
 
 
 class EvaluationRulesTests(unittest.TestCase):
@@ -250,7 +265,7 @@ class EvaluationRulesTests(unittest.TestCase):
         )
         top = report.top(5)
         self.assertEqual(len(top), 5)
-        self.assertEqual(top[0].stop_id, report.best_id())
+        self.assertEqual(top[0].stop_id, report.recommended_stop_id)
         for evaluation in top:
             self.assertTrue(evaluation.feasible)
 
@@ -318,7 +333,7 @@ class EvaluationRulesTests(unittest.TestCase):
         report = evaluate_first_stop_candidates(
             plan=plan, travel_matrix=demo_matrix(), policy=policy
         )
-        self.assertEqual(report.best_id(), StopId("a-first"))
+        self.assertEqual(report.recommended_stop_id, StopId("a-first"))
 
 
 if __name__ == "__main__":

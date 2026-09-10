@@ -4,7 +4,8 @@ This file is the **only** place where a decision counts as settled. Chat/session
 not a decision log. The product specification ([`PRODUCT_SPEC.md`](PRODUCT_SPEC.md)) is the
 Source of Truth for *what* the product must do; this registry records *how* we decided to do it.
 
-- Registry revision: **D1–D31**, approved 2026-09-11 (Stage 0, extended during Stage 1).
+- Registry revision: **D1–D32**, approved 2026-09-11 (Stage 0, extended during Stage 1; D4–D11
+  amended when the AUTO semantics were revoked).
 - Status values: `approved` (settled), `amended` (settled with a recorded change), `deferred` (recorded, not implemented).
 
 ---
@@ -38,84 +39,121 @@ Source of Truth for *what* the product must do; this registry records *how* we d
 - Configurable resolution policies may be added later; **strict validation is the default**.
 - Status: `approved`. Spec: §21.
 
-## D4 — AUTO first-stop semantics
+## D4 — First-stop modes: recommendation, not selection *(amended)*
 
-- AUTO evaluates candidate first stops, **automatically applies** the best one and builds the
-  complete route **without requiring confirmation**.
-- The applied automatic choice is **dynamic**: `selection_source = auto_recommendation`, `pinned = false`.
-- When meaningful inputs change, AUTO must re-evaluate and may choose a different first stop.
-  Triggers: `departure_time`, `departure_location`, active stop set, service windows,
-  priorities, finish location, route/travel matrix, traffic (when it exists later).
-- A deterministic `inputs_fingerprint` prevents a stale recommendation from being retained.
-- Status: `approved`. Spec: §3, §5.
+> **Amended 2026-09-11: the previously approved AUTO semantics are revoked.** The product has not
+> been released, so no obsolete AUTO behaviour is retained for compatibility.
 
-## D5 — Pinning only by explicit user action
+- The first-stop modes are **`recommend`** and **`manual`** (the old `auto` mode is gone).
+- **RECOMMEND**: RoutePilot 1) evaluates possible first service stops, 2) calculates complete-route
+  outcomes for the candidates, 3) ranks them, 4) shows the recommended candidate and top-K
+  alternatives, 5) **does not automatically apply any candidate**, 6) waits for the driver to choose
+  explicitly, and 7) only then finalizes the full working route.
+- **MANUAL**: the driver selects the first service stop directly, without needing a ranked
+  recommendation.
+- In **both** modes the final first service stop is a **driver decision**.
+- Input changes that alter the ranking (`departure_time`, `departure_location`, active stop set,
+  service windows, priorities, finish location, travel matrix, traffic later) are reported as
+  **"recommendation has changed"** and must **never** replace an already driver-selected first stop.
+  The driver may keep the current first stop, accept the new recommendation, or choose another stop.
+- `inputs_fingerprint` is retained, but its meaning changes: it detects that the **recommendation**
+  is stale, not that an applied choice should be invalidated.
+- **Revoked invariant:** "AUTO always returns a committed full route without driver confirmation."
+  Replaced by the invariant in D10/I4.
+- Status: `amended` (supersedes the earlier AUTO semantics, and the AUTO part of spec §3).
+  Spec: §3, §5.
 
-- `pinned = true` arises **only** from an explicit user action: Lock, override in AUTO, or a
-  MANUAL selection.
-- An automatic selection never produces `pinned = true`.
-- Status: `approved`. Spec: §3, §4, §18.
+## D5 — Pinning follows an explicit driver choice *(amended)*
 
-## D6 — Selection provenance and pinning are separate
+- `pinned = true` arises **only** from an explicit driver selection of the first service stop.
+- Selecting the first service stop pins it by default; the optimizer must never silently change it.
+- Nothing automatic produces a selection at all, so nothing automatic can produce `pinned = true`.
+- Status: `amended`. Spec: §3, §4, §18.
 
-- `selection_source` describes **how the stop was selected**; `pinned` describes **whether that
-  selection is currently locked**; `pinned_via` describes **what locked it**.
-- Locking an automatically recommended stop **must not** rewrite its provenance.
-- Canonical states:
+## D6 — Choice provenance *(amended)*
 
-| State | selection_source | pinned | pinned_via |
-|---|---|---|---|
-| AUTO recommendation | `auto_recommendation` | `false` | `None` |
-| AUTO recommendation locked by driver | `auto_recommendation` | `true` | `lock` |
-| Driver overrides AUTO | `driver` | `true` | `override` |
-| MANUAL selection | `driver` | `true` | `manual_mode` |
+- `selection_source` records **how the driver arrived at the choice**; `pinned` records that the
+  choice is locked. They remain separate concepts.
+- Values:
 
-- The invariant `selection_source == 'auto_recommendation' iff pinned == false` is **invalid**.
-- Status: `approved`. Spec: §4, §27.6.
+| Driver action | selection_source | pinned |
+|---|---|---|
+| Pressed "start from this stop" on the recommended candidate | `accepted_recommendation` | `true` |
+| Chose a different stop from the alternatives | `manual_choice` | `true` |
+| Chose directly in MANUAL mode | `manual_choice` | `true` |
+| No choice yet | — (`None`) | `false` |
 
-## D7 — MANUAL first stop
+- A recommendation carries **no** provenance: it is not a choice (see D32).
+- `pinned_via` is **removed** (proposal, awaiting confirmation): with no automatically applied
+  selection there is no "Lock" action left, so `pinned_via` would only duplicate `selection_source`.
+  The old values `lock` / `override` / `manual_mode` no longer exist.
+- Status: `amended`. Spec: §4, §27.6.
 
-- The driver explicitly chooses the first service stop: `selection_source = driver`,
-  `pinned = true`, `pinned_via = manual_mode`.
-- The optimizer preserves that first stop and optimizes all remaining stops around it.
-- The system never silently replaces a manually pinned first stop.
-- On unpin: the first stop becomes **unresolved**. The domain does **not** choose a stop and does
-  **not** switch modes; the user must choose another first stop or explicitly switch to AUTO.
-- Status: `approved`. Spec: §3, §6, §18.
+## D7 — MANUAL mode *(amended)*
 
-## D8 — Unpin in AUTO
+- The driver selects the first service stop directly; no ranked recommendation is required.
+  The choice is `selection_source = manual_choice`, `pinned = true`.
+- The optimizer preserves that first stop and optimizes all remaining stops around it; the system
+  never silently replaces it.
+- On clearing the choice: the plan returns to `awaiting_first_stop_choice`. The domain never chooses
+  a stop on the driver's behalf — in either mode.
+- Status: `amended`. Spec: §3, §6, §18.
 
-- `unpin` → recompute the recommendation → `selection_source = auto_recommendation`,
-  `pinned = false`, `pinned_via = None` → rebuild the route.
-- Status: `approved`. Spec: §6.
+## D8 — Clearing the first stop *(amended)*
 
-## D9 — `selected_stop_id` may legitimately be `None`
+- Clearing the first stop (any mode) → `status = awaiting_first_stop_choice`,
+  `selected_stop_id = None`.
+- A recommendation may still be computed and displayed; nothing is applied and no working route is
+  committed.
+- Status: `amended`. Spec: §6.
 
-- `selected_stop_id: StopId | None` is a legal domain state; a fake `StopId` is never substituted.
-- Distinct reasons are distinguished, not collapsed into one `None`:
-  `resolved`, `unresolved_empty_plan`, `unresolved_manual_awaiting_choice`, `no_active_stops`,
-  `no_feasible_first_stop`.
+## D9 — `selected_stop_id` may legitimately be `None` *(amended)*
+
+- `selected_stop_id: StopId | None` is a legal and *normal* state: it is the state before the driver
+  chooses. A fake `StopId` is never substituted.
+- Distinct states are distinguished, not collapsed into one `None`:
+  `awaiting_first_stop_choice`, `unresolved_empty_plan`, `no_active_stops`,
+  `no_feasible_first_stop`; after a choice the state is `first_stop_selected`.
+- `recommended_stop_id` is a **separate** field with a separate lifecycle. This is valid:
+
+  ```
+  recommended_stop_id = S73
+  selected_stop_id    = None
+  status              = awaiting_first_stop_choice
+  ```
+
 - `no_feasible_first_stop` must carry diagnostics (which stop, which constraint, why rejected).
-- Status: `approved`. Spec: §6, §7, §10.
+- Status: `amended`. Spec: §6, §7, §10.
 
-## D10 — Model invariants
+## D10 — Model invariants *(amended)*
 
-- **I1** — the departure location (START) is never treated as a service stop and never appears in
-  the order or in timelines.
-- **I2** — FINISH is fixed and is never reordered as a normal stop.
-- **I3** — a pinned first stop stays first through any optimization until explicitly unpinned.
-- **I4** — in AUTO, when at least one feasible candidate exists, optimization always returns a
-  complete route and never returns a "waiting for driver choice" state. In MANUAL without a
-  chosen first stop, no complete route is built, and that is a valid domain state, not an error.
-- Status: `approved`. Spec: §1, §2, §3, §18, §27.
+- **I1** — the departure location (START) is never treated as a service stop and never appears in the
+  order or in timelines. *(unchanged)*
+- **I2** — FINISH is fixed and is never reordered as a normal stop. *(unchanged)*
+- **I3** — a driver-selected first stop stays first through any optimization and is never replaced by
+  a recomputation, a changed input or a changed recommendation. Only an explicit driver action
+  changes it. *(strengthened)*
+- **I4** *(replaced)* — in RECOMMEND mode, when at least one feasible candidate exists, the system
+  always returns ranked recommendations, but a **committed first service stop** — and therefore a
+  committed working route — requires an **explicit driver choice**. Before that choice the plan is in
+  `awaiting_first_stop_choice`, which is a valid state and not an error.
+- **I5** *(new)* — a recommendation never implies selection: `recommended_stop_id` and
+  `selected_stop_id` are separate fields with separate lifecycles (D32).
+- **I6** *(new, proposed)* — a candidate's previewed "complete route" figure must be produced by the
+  same objective and the same optimizer that builds the final route; preview and commit never
+  diverge.
+- Status: `amended`. Spec: §1, §2, §3, §18, §27.
 
-## D11 — Intent vs resolution
+## D11 — Intent vs recommendation *(amended, restructured)*
 
-- `first_service_stop` is split internally:
-  - **intent** (persisted user intent): `mode`, `pinned`, `pinned_stop_id`;
-  - **resolution** (derived, cached, never intent): `selected_stop_id`, `selection_source`,
-    `pinned_via`, `status`, `resolved_at`, `inputs_fingerprint`, `diagnostics`.
-- Status: `approved`. Spec: §4, §5.
+- **intent** (persisted — the driver's decision): `mode`, `selected_stop_id` (or `None`), `pinned`.
+- **recommendation** (derived, cached, recomputable — never a decision): `recommended_stop_id`,
+  the ranked top-K complete-route candidates, `inputs_fingerprint`, `resolved_at`, `status`,
+  diagnostics.
+- The driver's choice is **intent**, not a derived value: recomputation may change the
+  recommendation and can never change the selection.
+- This supersedes the previous split, where the applied selection was treated as derived.
+- Status: `amended`. Spec: §4, §5.
 
 ## D12 — `doctor` environment check
 
@@ -201,7 +239,7 @@ Source of Truth for *what* the product must do; this registry records *how* we d
   representable in the domain.
 - MVP implements `SMART_ROUTE` (or a deterministic demo approximation) only; the rest are
   declared not implemented and are never presented as working.
-- Note: first-stop mode (`auto` / `manual`, §3) and route mode (§19) are **different axes** and
+- Note: first-stop mode (`recommend` / `manual`, §3) and route mode (§19) are **different axes** and
   must not be conflated in naming.
 - Status: `approved`. Spec: §19.
 
@@ -344,6 +382,24 @@ Source of Truth for *what* the product must do; this registry records *how* we d
   `implemented`, so nothing unimplemented can be scored silently.
 - Status: `approved`. Spec: §10, §24.
 
+## D32 — Recommendation is not selection
+
+- In RECOMMEND mode, before the driver chooses, the plan's first-stop state is
+  **`awaiting_first_stop_choice`**.
+- The application may calculate and display: the recommended candidate, top-K alternatives,
+  complete-route previews, ETA, waiting, expected finish, total travel, route cost and violations —
+  but there is **no committed working route** yet.
+- `recommended_stop_id` and `selected_stop_id` are separate fields; a recommendation does not imply
+  selection (I5).
+- For every candidate the engine computes the **complete route outcome**:
+  `START → candidate → optimized remaining stops → FINISH`. The driver chooses between complete
+  outcomes, not between first-leg distances.
+- The top 3–5 candidates are shown and **alternatives are never hidden**; the driver must make the
+  selection.
+- A candidate whose *complete* route contains an infeasible hard window is excluded from the ranking
+  and reported explicitly with its violations, exactly like a first-leg infeasibility.
+- Status: `approved`. Spec: §3, §5, §6, §9, §25.
+
 ---
 
 ## Stage gates
@@ -367,6 +423,16 @@ Source of Truth for *what* the product must do; this registry records *how* we d
    storage schema review.
 4. **`algorithm_baseline` definition** (which heuristic, which tie-breaking) — Stage 2.
 5. **Active-leg protection** implementation — Stage 5.
+6. **`PRODUCT_SPEC.md` still describes AUTO.** The Source of Truth is stored verbatim and is never
+   rewritten (D27), so spec §3 conflicts with D4. **Decided:** a **separate v2 specification
+   document** will be published verbatim once its text is supplied; v1 stays untouched.
+7. **Unlocked choice semantics.** A driver may explicitly leave the chosen first stop unlocked
+   (`pinned = False`). What the optimizer does with a chosen-but-unlocked stop (treat it as a soft
+   preference, or refuse the combination) is still to be decided — Stage 2.
+8. **Recommendation fingerprint vs route fingerprint.** `RoutePlan.inputs_fingerprint()` now
+   deliberately excludes the driver's decision, so choosing a stop cannot make the recommendation
+   look stale. Stage 2 must add a separate fingerprint for the committed route, which *does* depend
+   on the selection.
 
 ## Environment notes (machine-specific, not product decisions)
 

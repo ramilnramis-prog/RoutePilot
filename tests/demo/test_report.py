@@ -58,7 +58,7 @@ class ReportTextTests(unittest.TestCase):
             "FIRST-LEG TIMELINE",
             "ALL CANDIDATE FIRST STOPS",
             "TOP 5 CANDIDATES",
-            "WHY THE WINNER IS NEITHER THE NEAREST NOR THE FARTHEST",
+            "WHY THE RECOMMENDATION IS NEITHER THE NEAREST NOR THE FARTHEST",
             "EFFECT OF CHANGING DEPARTURE TIME",
             "SENSITIVITY TO THE PROVISIONAL WAITING WEIGHT",
             "WINDOW END POLICY (D29)",
@@ -73,6 +73,13 @@ class ReportTextTests(unittest.TestCase):
             f"window end policy : {WindowEndPolicy.SERVICE_FINISH_BEFORE_END.value}",
             build_report(),
         )
+
+    def test_report_states_that_nothing_is_applied(self) -> None:
+        # D4/D32: the report is a recommendation; the driver decides.
+        report = build_report()
+        self.assertIn("awaiting_first_stop_choice", report)
+        self.assertIn("the driver decides", report)
+        self.assertIn("Nothing is applied and no working route is committed", report)
 
     def test_cli_prints_the_report(self) -> None:
         buffer = io.StringIO()
@@ -100,22 +107,22 @@ class DepartureSweepTests(unittest.TestCase):
     def test_every_departure_has_a_feasible_winner(self) -> None:
         for outcome in self.outcomes:
             with self.subTest(hour=outcome.local_hour):
-                self.assertIsNotNone(outcome.winner_id)
-                self.assertGreater(outcome.winner_score, 0)
+                self.assertIsNotNone(outcome.recommended_id)
+                self.assertGreater(outcome.recommended_score, 0)
 
     def test_changing_departure_time_changes_the_winner(self) -> None:
-        winners = [outcome.winner_id for outcome in self.outcomes]
+        winners = [outcome.recommended_id for outcome in self.outcomes]
         self.assertEqual(len(set(winners)), len(winners))
 
     def test_the_winner_gets_closer_as_departure_approaches_opening(self) -> None:
-        travels = [outcome.winner_travel for outcome in self.outcomes]
+        travels = [outcome.recommended_travel for outcome in self.outcomes]
         self.assertEqual(travels, sorted(travels, reverse=True))
 
     def test_at_0800_the_nearest_stop_wins(self) -> None:
         final = self.outcomes[-1]
         self.assertEqual(final.local_hour, 8)
-        self.assertEqual(final.winner_id, HEADLINE_STOP_IDS["nearest"])
-        self.assertEqual(final.winner_wait, 0)
+        self.assertEqual(final.recommended_id, HEADLINE_STOP_IDS["nearest"])
+        self.assertEqual(final.recommended_wait, 0)
 
 
 class WeightSensitivityTests(unittest.TestCase):
@@ -130,14 +137,14 @@ class WeightSensitivityTests(unittest.TestCase):
     def test_equal_weights_are_degenerate_and_favour_the_nearest_stop(self) -> None:
         row = self.rows[0]
         self.assertEqual(row.waiting_weight, 1.0)
-        self.assertEqual(row.winner_id, HEADLINE_STOP_IDS["nearest"])
+        self.assertEqual(row.recommended_id, HEADLINE_STOP_IDS["nearest"])
         self.assertIn("degenerate", row.note)
         self.assertIn("tie", row.note)
 
     def test_penalising_waiting_favours_arriving_at_opening(self) -> None:
         for row in self.rows[1:]:
             with self.subTest(waiting_weight=row.waiting_weight):
-                self.assertEqual(row.winner_id, HEADLINE_STOP_IDS["on_opening"])
+                self.assertEqual(row.recommended_id, HEADLINE_STOP_IDS["on_opening"])
 
     def test_waiting_is_never_cheaper_than_driving_in_the_demo_policy(self) -> None:
         self.assertGreaterEqual(WEIGHT_SENSITIVITY_RATIOS[-1], 2.0)
