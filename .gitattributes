@@ -1,0 +1,16 @@
+# Line endings: the repository stores LF, on every platform.
+# Python, Markdown, SQL and web sources all read better as LF and this keeps diffs stable.
+* text=auto eol=lf
+
+# Binary assets are never normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.sqlite binary
+*.sqlite3 binary
+*.pdf binary
