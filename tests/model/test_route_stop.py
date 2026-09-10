@@ -18,6 +18,7 @@ class RouteStopTests(unittest.TestCase):
                 id="s1",
                 raw_address="Main street 1",
                 service_window=ServiceWindow.unrestricted(),
+                input_position=0,
                 geocode_status=GeocodeStatus.RESOLVED,
             )
 
@@ -28,6 +29,7 @@ class RouteStopTests(unittest.TestCase):
                     id="s1",
                     raw_address="Main street 1",
                     service_window=ServiceWindow.unrestricted(),
+                    input_position=0,
                     latitude=55.75,
                     longitude=37.62,
                     geocode_status=status,
@@ -38,6 +40,7 @@ class RouteStopTests(unittest.TestCase):
             id="s1",
             raw_address="Main street",
             service_window=ServiceWindow.unrestricted(),
+            input_position=0,
             latitude=55.75,
             longitude=37.62,
             geocode_status=GeocodeStatus.AMBIGUOUS,
@@ -51,6 +54,7 @@ class RouteStopTests(unittest.TestCase):
                 id="s1",
                 raw_address="Main street 1",
                 service_window=ServiceWindow.unrestricted(),
+                input_position=0,
                 latitude=55.75,
                 geocode_status=GeocodeStatus.RESOLVED,
             )
@@ -65,6 +69,7 @@ class RouteStopTests(unittest.TestCase):
                 id="s1",
                 raw_address="Main street 1",
                 service_window=ServiceWindow.fixed(time(8, 0), time(18, 0)),
+                input_position=0,
             )
         self.assertIn("fixed service window", str(context.exception))
 
@@ -101,6 +106,7 @@ class RouteStopTests(unittest.TestCase):
                 id="s1",
                 raw_address="   ",
                 service_window=ServiceWindow.unrestricted(),
+                input_position=0,
                 latitude=55.75,
                 longitude=37.62,
                 geocode_status=GeocodeStatus.RESOLVED,
@@ -111,6 +117,7 @@ class RouteStopTests(unittest.TestCase):
             id="s1",
             raw_address="Main street 1",
             service_window=ServiceWindow.unrestricted(),
+            input_position=0,
             latitude=55.75,
             longitude=37.62,
             geocode_status="resolved",

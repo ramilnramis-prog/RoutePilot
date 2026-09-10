@@ -9,6 +9,9 @@ The plan is the root of the domain graph. Three structural choices carry most of
   recommends is derived, cached and recomputable, and never implies a selection (D4/D11/D32).
 * ``order_overrides`` is a generic container so future drag/reorder does not require
   redesigning the plan (D21). Only ``first_stop`` constraints are implemented today.
+* ``stops`` are held in **input order** (their immutable ``input_position``), which is also the
+  order of the user-facing BEFORE baseline (v2 section 30). Route order is a separate concept and
+  lives in the solution, never in the stop.
 """
 
 from __future__ import annotations
@@ -80,8 +83,8 @@ class RoutePlan:
         )
 
         stops = tuple(self.stops)
-        object.__setattr__(self, "stops", stops)
         seen: set[str] = set()
+        positions: dict[int, str] = {}
         for stop in stops:
             if not isinstance(stop, RouteStop):
                 raise InvalidRoutePlanError(
@@ -90,6 +93,21 @@ class RoutePlan:
             if stop.id in seen:
                 raise InvalidRoutePlanError(f"duplicate stop id {stop.id!r} in plan {self.id!r}")
             seen.add(stop.id)
+
+            previous = positions.get(stop.input_position)
+            if previous is not None:
+                raise InvalidRoutePlanError(
+                    f"duplicate input_position {stop.input_position} in plan {self.id!r}: "
+                    f"stops {previous!r} and {stop.id!r}. input_position is immutable input-order "
+                    "provenance and must be unique within a plan (v2 section 30); gaps are "
+                    "allowed, renumbering is not."
+                )
+            positions[stop.input_position] = stop.id
+
+        # Keep the stops in input order, so nothing downstream depends on the order the caller
+        # happened to pass them in. Nothing is renumbered: the positions are exactly as supplied.
+        stops = tuple(sorted(stops, key=lambda stop: stop.input_position))
+        object.__setattr__(self, "stops", stops)
 
         if not isinstance(self.route_mode, RouteMode):
             object.__setattr__(self, "route_mode", RouteMode(self.route_mode))
@@ -162,11 +180,28 @@ class RoutePlan:
     # stops
     # ------------------------------------------------------------------ #
     def active_stops(self) -> tuple[RouteStop, ...]:
-        """Enabled stops, in the order the user supplied them."""
+        """Enabled stops, in **input order** (their ``input_position``)."""
         return tuple(stop for stop in self.stops if stop.enabled)
 
     def disabled_stops(self) -> tuple[RouteStop, ...]:
+        """Disabled stops, in input order. They are excluded from routing but keep their position."""
         return tuple(stop for stop in self.stops if not stop.enabled)
+
+    def user_baseline_order(self) -> tuple[StopId, ...]:
+        """The user-facing BEFORE route order (v2 section 30).
+
+        ``START -> enabled stops sorted by input_position -> FINISH``: disabled stops are omitted,
+        but their existence never renumbers the remaining stops.
+        """
+        return tuple(stop.id for stop in self.active_stops())
+
+    def next_input_position(self) -> int:
+        """The position to give a stop appended later (v2 section 30, requirement 8).
+
+        Appending must never renumber historical stops, so a new stop takes the next free position
+        after the highest one in use.
+        """
+        return max((stop.input_position for stop in self.stops), default=-1) + 1
 
     @property
     def has_active_stops(self) -> bool:
@@ -282,6 +317,12 @@ class RoutePlan:
             # recommendation look stale, which is exactly the "recommendation has changed" bug
             # D4 warns about. Stage 2 will add a separate route fingerprint for the committed
             # route, which does depend on the selection.
+            #
+            # Also excluded: input_position. It is input-order provenance that the user-facing
+            # BEFORE baseline uses (v2 section 30); the recommendation does not depend on the
+            # order the stops arrived in, so reordering positions must not report the
+            # recommendation as stale. The stop list is therefore serialised in a stable order
+            # (by id) rather than in input order.
             "default_service_duration": self.default_service_duration,
             "cost_policy": {
                 "name": self.cost_policy.name,
@@ -312,7 +353,7 @@ class RoutePlan:
                     "priority": stop.priority,
                     "enabled": stop.enabled,
                 }
-                for stop in self.stops
+                for stop in sorted(self.stops, key=lambda some_stop: some_stop.id)
             ],
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)

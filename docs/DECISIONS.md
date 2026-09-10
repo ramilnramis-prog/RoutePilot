@@ -7,8 +7,9 @@ and unchanged. Precedence (v2 section 37): the current specification plus explic
 decisions in this registry control future implementation; this registry records *how* we decided to
 do it.
 
-- Registry revision: **D1–D32**, approved 2026-09-11 (Stage 0, extended during Stage 1; D4–D11
-  amended when the AUTO semantics were revoked; D5/D9/D16 aligned with v2 sections 5, 14 and 23).
+- Registry revision: **D1–D33**, approved 2026-09-11 (Stage 0, extended during Stage 1; D4–D11
+  amended when the AUTO semantics were revoked; D5/D9/D16 aligned with v2 sections 5, 14 and 23;
+  D33 added for `input_position`).
 - Status values: `approved` (settled), `amended` (settled with a recorded change), `deferred` (recorded, not implemented).
 
 ---
@@ -408,6 +409,24 @@ do it.
   and reported explicitly with its violations, exactly like a first-leg infeasibility.
 - Status: `approved`. Spec: §3, §5, §6, §9, §25.
 
+## D33 — `input_position` is immutable input-order provenance
+
+- `RouteStop.input_position: int` records the position the stop had in the user-supplied or imported
+  list (v2 §25, §30). It is **not** route order.
+- `input_position >= 0`, and it must be **unique within a plan**. Gaps are allowed and must not be
+  renumbered (`0, 1, 4, 7` is valid).
+- RouteStop is frozen and nothing in the domain rewrites the field: optimization, route reordering,
+  order overrides and drag/reorder never change it. Future manual reordering uses the order-constraint
+  / order-override model (D21), never `input_position`.
+- Appending a later stop takes `RoutePlan.next_input_position()` = `max(input_position) + 1`, so
+  historical positions stay stable instead of being rewritten.
+- The **USER baseline** (v2 §30) is `START -> enabled stops sorted by input_position -> FINISH`.
+  Disabled stops are omitted, but their existence never renumbers the remaining positions.
+- A plan holds its stops in input order regardless of the order the caller passed them, and the
+  **recommendation fingerprint is independent of input order**: swapping positions does not report
+  the recommendation as stale (the recommendation does not depend on arrival order — v2 §7).
+- Status: `approved`. v2 §25, §30.
+
 ---
 
 ## Stage gates
@@ -451,9 +470,9 @@ Recorded so nothing is silently dropped; each item is a real model or engine cha
 3. **Route fingerprint** (v2 §7, §35): `RoutePlan.inputs_fingerprint()` deliberately excludes the
    driver's decision; the committed route needs its own fingerprint that *does* depend on the
    selected first stop. Add it to the plan/run model and to `route_optimization_runs`.
-4. **`input_position` on `RouteStop`** (v2 §25, §30): the USER baseline is defined as the stops in
-   their exact original input position order, so the position must live on the stop rather than being
-   implied by tuple order.
+4. ~~**`input_position` on `RouteStop`** (v2 §25, §30)~~ **Done** in the spec-alignment commit
+   (D33): the field exists, is unique per plan, allows gaps, is never rewritten, and
+   `RoutePlan.user_baseline_order()` provides the BEFORE baseline.
 5. **Objective model** (v2 §16): the real model is elapsed time (travel + waiting + service), with
    any preference for less idle waiting expressed as a configurable soft preference rather than a
    universal multiplier. The provisional `travel_time = 1 / waiting_time = 2` demo policy stays

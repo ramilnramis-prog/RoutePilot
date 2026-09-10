@@ -105,7 +105,8 @@ states a known 24/7 access. Neither is ever turned into guessed business hours.
 ### 3.2 `RouteStop`
 
 Spec §17 fields: `id`, `raw_address`, `normalized_address`, `latitude`, `longitude`,
-`service_duration`, service window, `priority`, status, `enabled`, `notes`.
+`service_duration`, service window, `priority`, status, `enabled`, `notes`; plus `input_position`
+(v2 §25).
 
 The three state fields are independent (D20):
 
@@ -113,9 +114,15 @@ The three state fields are independent (D20):
 - `service_status` — `pending | in_progress | served | failed | skipped` (route execution);
 - `enabled` — a disabled stop is excluded from optimization regardless of `service_status`.
 
+`input_position` is a fourth, different kind of field (D33, v2 §25/§30): immutable **input-order
+provenance**, not route order. It is non-negative, unique within a plan, gaps are allowed, and
+neither optimization, route reordering, order overrides nor drag/reorder may change it. The
+user-facing BEFORE baseline is built from it, and a newly appended stop takes
+`max(input_position) + 1` so historical positions stay stable.
+
 Validated invariants: `geocode_status == resolved` requires coordinates; a `fixed` window requires
 a resolved customer (a stop with an unknown address and a fixed window is rejected rather than
-half-modelled).
+half-modelled); `input_position` is an integer `>= 0` and unique within the plan.
 
 ### 3.3 `RoutePlan`
 
@@ -145,6 +152,11 @@ Structural invariants (D10):
 `validate_order(order)` is pure domain validation (not a solver) and guarantees spec §27.3/§27.4/
 §27.17: exactly the enabled stops, each exactly once, no duplicates, no unknowns, no disabled
 stops, no START, no FINISH.
+
+The plan holds its stops in **input order** (`input_position`), and
+`RoutePlan.user_baseline_order()` is the user-facing BEFORE route of v2 §30:
+`START -> enabled stops sorted by input_position -> FINISH`. Disabled stops are omitted without
+renumbering the remaining positions.
 
 ### 3.4 First stop: the driver's decision vs the engine's recommendation (D4/D11/D32)
 

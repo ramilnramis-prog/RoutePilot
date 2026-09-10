@@ -6,6 +6,8 @@ tests must never look like real road routing.
 
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Sequence
 from datetime import datetime, time, timezone
 
 from core.engine.providers import ProviderCapabilities
@@ -112,8 +114,13 @@ def stop(
     geocode_status: GeocodeStatus | None = None,
     raw_address: str | None = None,
     service_status: ServiceStatus = ServiceStatus.PENDING,
+    input_position: int = 0,
 ) -> RouteStop:
-    """Build a stop with sensible defaults; coordinates imply a resolved address."""
+    """Build a stop with sensible defaults; coordinates imply a resolved address.
+
+    ``input_position`` defaults to 0 for single-stop cases; :func:`build_plan` assigns positions by
+    call order unless the caller passes explicit ones.
+    """
     if geocode_status is None:
         geocode_status = (
             GeocodeStatus.RESOLVED if latitude is not None else GeocodeStatus.PENDING
@@ -130,6 +137,7 @@ def stop(
         priority=priority,
         service_status=service_status,
         enabled=enabled,
+        input_position=input_position,
     )
 
 
@@ -145,10 +153,29 @@ def build_plan(
     order_overrides=None,
     cost_policy=None,
     window_end_policy=None,
+    input_positions: Sequence[int] | None = None,
 ) -> RoutePlan:
-    """Build a plan whose START is a warehouse at 04:00 Moscow by default."""
+    """Build a plan whose START is a warehouse at 04:00 Moscow by default.
+
+    Unless ``input_positions`` is given, the stops receive ``input_position`` values by call order
+    (0, 1, 2, ...), which is the normal user-supplied case. Pass ``input_positions`` to build a
+    plan with gaps or with a deliberately different input order.
+    """
     from core.model.first_stop import FirstStopIntent  # local import keeps the fixture light
     from core.model.service_window import DEFAULT_WINDOW_END_POLICY
+
+    if input_positions is None:
+        positioned = tuple(
+            dataclasses.replace(some_stop, input_position=index)
+            for index, some_stop in enumerate(stops)
+        )
+    else:
+        if len(input_positions) != len(stops):
+            raise ValueError("input_positions must have one entry per stop")
+        positioned = tuple(
+            dataclasses.replace(some_stop, input_position=position)
+            for some_stop, position in zip(stops, input_positions)
+        )
 
     kwargs = {}
     if first_service_stop is not None:
@@ -163,7 +190,7 @@ def build_plan(
         departure=departure or place("Warehouse", *WAREHOUSE),
         departure_time=departure_time or utc(2026, 9, 11, 1, 0),  # 04:00 Moscow
         finish=finish or place("Depot", 55.70, 37.55),
-        stops=tuple(stops),
+        stops=positioned,
         default_service_duration=default_service_duration,
         window_end_policy=(
             window_end_policy if window_end_policy is not None else DEFAULT_WINDOW_END_POLICY

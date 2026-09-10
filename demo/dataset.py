@@ -162,7 +162,7 @@ def _point_for_offset(offset_minutes: float) -> GeoPoint:
     )
 
 
-def _build_stop(spec: _StopSpec) -> RouteStop:
+def _build_stop(spec: _StopSpec, input_position: int) -> RouteStop:
     return RouteStop(
         id=spec.stop_id,
         raw_address=f"{spec.label}, demo district {spec.offset_minutes // 10}",
@@ -174,6 +174,9 @@ def _build_stop(spec: _StopSpec) -> RouteStop:
         service_duration=spec.service_duration,
         priority=spec.priority,
         enabled=spec.enabled,
+        # Input order as authored: this is the user-facing BEFORE baseline (v2 section 30) and is
+        # never rewritten by optimization.
+        input_position=input_position,
     )
 
 
@@ -191,7 +194,9 @@ def build_demo_plan(
         departure=PlaceRef(WAREHOUSE_LABEL, WAREHOUSE_POINT),
         departure_time=departure_time if departure_time is not None else DEMO_DEPARTURE_TIME,
         finish=PlaceRef(FINISH_LABEL, FINISH_POINT),
-        stops=tuple(_build_stop(spec) for spec in _SPECS),
+        stops=tuple(
+            _build_stop(spec, index) for index, spec in enumerate(_SPECS)
+        ),
         cost_policy=cost_policy if cost_policy is not None else demo_provisional_policy(),
         window_end_policy=window_end_policy,
         default_service_duration=DEMO_DEFAULT_SERVICE_DURATION,

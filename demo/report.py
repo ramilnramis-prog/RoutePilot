@@ -430,10 +430,11 @@ def build_report() -> str:
     lines.append("INPUT ROUTE - the order exactly as supplied by the user (the product's BEFORE)")
     lines.append(_SUBSEPARATOR)
     lines.append(
-        f"{'#':>3}  {'stop':<22} {'travel from depot':>17}  {'window':<14}  "
+        f"{'pos':>3}  {'stop':<22} {'travel from depot':>17}  {'window':<14}  "
         f"{'service':>7}  {'prio':>4}  {'state':<8}  address"
     )
-    for position, stop in enumerate(plan.stops, start=1):
+    for stop in plan.stops:
+        # `pos` is the stop's immutable input_position: the BEFORE baseline order (v2 section 30).
         evaluation = report.find(stop.id)
         travel = format_duration(evaluation.travel_time) if evaluation else "-"
         duration = (
@@ -443,7 +444,7 @@ def build_report() -> str:
         )
         state = "enabled" if stop.enabled else "DISABLED"
         lines.append(
-            f"{position:>3}  {stop.id:<22} {travel:>17}  {_window_text(stop):<14}  "
+            f"{stop.input_position:>3}  {stop.id:<22} {travel:>17}  {_window_text(stop):<14}  "
             f"{duration:>7}  "
             f"{(stop.priority if stop.priority is not None else '-'):>4}  {state:<8}  "
             f"{stop.raw_address}"

@@ -107,7 +107,7 @@ Rules:
 |---|---|---|
 | `id` | TEXT | PK (uuid text) |
 | `plan_id` | TEXT | NOT NULL, FK → `route_plans(id)` ON DELETE CASCADE |
-| `input_position` | INTEGER | NOT NULL — the order **as supplied by the user** |
+| `input_position` | INTEGER | NOT NULL — immutable input-order provenance (v2 §25/§30), unique per plan, gaps allowed, never rewritten by optimization or reorder |
 | `raw_address` | TEXT | NOT NULL |
 | `normalized_address` | TEXT | NULL |
 | `latitude` | REAL | NULL |
@@ -147,11 +147,16 @@ CHECK (
 CHECK (service_window_kind <> 'fixed' OR latitude IS NOT NULL)
 -- only a fixed window has an end whose meaning can be chosen (D29)
 CHECK (window_end_policy IS NULL OR service_window_kind = 'fixed')
+-- input-order provenance: non-negative and unique inside a plan, gaps allowed (D33)
+CHECK (input_position >= 0)
+UNIQUE (plan_id, input_position)
 ```
 
 Indexes:
 
-- `idx_route_stops_plan` on (`plan_id`, `input_position`) — reconstructs the user's BEFORE order (D22);
+- `idx_route_stops_plan` on (`plan_id`, `input_position`) — reconstructs the user's BEFORE baseline in
+  input order (v2 §30). `input_position` is never rewritten, so this order survives re-optimization,
+  drag/reorder, disabling a stop and appending new stops (D33).
 - `idx_route_stops_plan_enabled` on (`plan_id`, `enabled`) — active stop set.
 
 `input_position` is the storage counterpart of the user-supplied baseline: without it, the BEFORE

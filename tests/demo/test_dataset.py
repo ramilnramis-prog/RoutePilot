@@ -102,6 +102,29 @@ class DemoDatasetTests(unittest.TestCase):
         self.assertIs(self.plan.first_service_stop.mode, FirstStopMode.RECOMMEND)
         self.assertIsNone(self.plan.first_service_stop.selected_stop_id)
 
+    def test_input_positions_are_unique_contiguous_and_stable(self) -> None:
+        positions = [stop.input_position for stop in self.plan.stops]
+        self.assertEqual(positions, list(range(len(self.plan.stops))))
+        self.assertEqual(len(set(positions)), len(positions))
+
+        # The disabled stop keeps its position: disabling must not renumber the rest (v2 §30).
+        disabled = self.plan.disabled_stops()[0]
+        self.assertEqual(disabled.input_position, 9)
+        self.assertNotIn(disabled.id, self.plan.user_baseline_order())
+        self.assertEqual(
+            [stop.input_position for stop in self.plan.active_stops()],
+            [position for position in positions if position != 9],
+        )
+
+    def test_user_baseline_is_the_input_order(self) -> None:
+        self.assertEqual(
+            self.plan.user_baseline_order(),
+            tuple(stop.id for stop in self.plan.active_stops()),
+        )
+        self.assertEqual(
+            self.plan.next_input_position(), max(s.input_position for s in self.plan.stops) + 1
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

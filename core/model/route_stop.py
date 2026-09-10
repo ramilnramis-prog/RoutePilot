@@ -1,4 +1,4 @@
-"""Route stop model (spec section 17, decisions D20 and D28).
+"""Route stop model (spec section 17, decisions D20 and D28; v2 sections 25 and 30).
 
 Three state fields are deliberately independent:
 
@@ -6,6 +6,11 @@ Three state fields are deliberately independent:
 * ``service_status`` - route execution state (``pending | in_progress | served | failed | skipped``);
 * ``enabled``        - whether the stop takes part in optimization at all, regardless of the
   other two.
+
+``input_position`` is a fourth, different kind of field: **historical input-order provenance**. It
+records where the stop stood in the list the user supplied or imported, it is immutable, and it is
+never rewritten by optimization, by route order or by drag/reorder (v2 sections 25, 30). The
+user-facing BEFORE baseline is built from it.
 
 Coordinates stay plain coordinates: routing-specific information (side of road, approach,
 geometry) belongs to a routing provider, never to a stop (spec section 17, D16).
@@ -63,6 +68,10 @@ class RouteStop:
     id: StopId
     raw_address: str
     service_window: ServiceWindow
+    #: Immutable historical input-order provenance: the position the stop had in the user-supplied
+    #: or imported list (v2 sections 25 and 30). It is **not** the current route order, and neither
+    #: optimization nor drag/reorder may ever change it. Gaps are allowed.
+    input_position: int
     normalized_address: str | None = None
     latitude: float | None = None
     longitude: float | None = None
@@ -82,6 +91,18 @@ class RouteStop:
             raise InvalidRouteStopError(
                 f"stop {self.id!r} needs a ServiceWindow, got "
                 f"{type(self.service_window).__name__}"
+            )
+
+        # input_position is provenance, so it must be a plain non-negative integer. Uniqueness
+        # inside a plan is a plan-level invariant, checked by RoutePlan.
+        if isinstance(self.input_position, bool) or not isinstance(self.input_position, int):
+            raise InvalidRouteStopError(
+                f"stop {self.id!r}: input_position must be an integer, got "
+                f"{type(self.input_position).__name__}"
+            )
+        if self.input_position < 0:
+            raise InvalidRouteStopError(
+                f"stop {self.id!r}: input_position must be >= 0, got {self.input_position}"
             )
 
         object.__setattr__(
