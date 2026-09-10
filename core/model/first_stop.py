@@ -78,7 +78,9 @@ class RecommendationStatus(str, Enum):
     """Outcome of the recommendation computation, including why nothing could be recommended."""
 
     RECOMMENDED = "recommended"
-    NO_FEASIBLE_FIRST_STOP = "no_feasible_first_stop"
+    #: No candidate produces a completely feasible route (v2 section 14). RoutePilot must not
+    #: label an infeasible candidate as a valid recommended route.
+    NO_FULLY_FEASIBLE_ROUTE = "no_fully_feasible_route"
     NO_ACTIVE_STOPS = "no_active_stops"
     EMPTY_PLAN = "empty_plan"
 
@@ -97,16 +99,17 @@ def _coerce(enum_type: type[Enum], value: object, field_name: str) -> Enum:
 
 @dataclass(frozen=True)
 class FirstStopIntent:
-    """The driver's persisted decision about the first service stop (D11).
+    """The driver's persisted decision about the first service stop (D11, v2 sections 4-5).
 
-    Valid states:
+    Exactly two valid states:
 
-    * nothing chosen yet - ``selected_stop_id is None``, ``selection_source is None``,
-      ``pinned = False`` (this is the state the driver starts in, in both modes);
-    * chosen - ``selected_stop_id`` set, ``selection_source`` records how, ``pinned`` defaults to
-      ``True`` ("once the driver selects the first service stop, it is pinned by default").
-      A driver may explicitly leave it unlocked (``pinned = False``), which means "chosen, but the
-      optimizer may move it"; the exact behaviour of that state is a Stage 2 decision.
+    * **unresolved** - ``selected_stop_id is None``, ``selection_source is None``,
+      ``pinned = False``. This is where the driver starts, in both modes;
+    * **selected** - ``selected_stop_id`` set, ``selection_source`` records how the driver chose,
+      and ``pinned = True``.
+
+    A selected-but-not-pinned first stop is **invalid**: "a selected first stop is always
+    considered committed and pinned" (v2 section 5). There is no unlocked selection state.
     """
 
     mode: FirstStopMode = FirstStopMode.RECOMMEND
@@ -141,6 +144,12 @@ class FirstStopIntent:
                 "a selected first stop must record how the driver chose it "
                 "(accepted_recommendation or manual_choice) - D6"
             )
+        if not self.pinned:
+            raise InvalidRoutePlanError(
+                "a selected first stop is always pinned: 'selected_stop_id is not None and "
+                "pinned is False' is invalid (v2 section 5). Cancel the selection instead of "
+                "leaving it unlocked."
+            )
         if (
             self.mode is FirstStopMode.MANUAL
             and self.selection_source is not SelectionSource.MANUAL_CHOICE
@@ -162,13 +171,13 @@ class FirstStopIntent:
         return cls(FirstStopMode.MANUAL)
 
     @classmethod
-    def accepted_recommendation(cls, stop_id: StopId, *, pinned: bool = True) -> "FirstStopIntent":
+    def accepted_recommendation(cls, stop_id: StopId) -> "FirstStopIntent":
         """The driver pressed "start from this stop" on the recommended candidate."""
         return cls(
             FirstStopMode.RECOMMEND,
             stop_id,
             SelectionSource.ACCEPTED_RECOMMENDATION,
-            pinned,
+            True,
         )
 
     @classmethod
@@ -177,10 +186,9 @@ class FirstStopIntent:
         stop_id: StopId,
         *,
         mode: FirstStopMode = FirstStopMode.RECOMMEND,
-        pinned: bool = True,
     ) -> "FirstStopIntent":
         """The driver chose a stop themselves (another alternative, or directly in MANUAL mode)."""
-        return cls(mode, stop_id, SelectionSource.MANUAL_CHOICE, pinned)
+        return cls(mode, stop_id, SelectionSource.MANUAL_CHOICE, True)
 
     # ---- queries ------------------------------------------------------- #
     @property
@@ -204,10 +212,9 @@ class FirstStopIntent:
     def describe(self) -> str:
         if not self.has_selection:
             return f"{self.mode.value}: awaiting first stop choice"
-        lock = "pinned" if self.pinned else "chosen, not locked"
         return (
             f"{self.mode.value}: {self.selected_stop_id} "
-            f"({self.selection_source.value}, {lock})"  # type: ignore[union-attr]
+            f"({self.selection_source.value}, pinned)"  # type: ignore[union-attr]
         )
 
 

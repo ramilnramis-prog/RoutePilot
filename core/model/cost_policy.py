@@ -58,7 +58,7 @@ class CostComponent(str, Enum):
 
 
 class ComponentStatus(str, Enum):
-    """Whether a component can actually be computed today (D16)."""
+    """Whether a component can actually be computed today (D16, v2 section 23)."""
 
     #: Computed by implemented engine code; safe to weight.
     IMPLEMENTED = "implemented"
@@ -66,6 +66,8 @@ class ComponentStatus(str, Enum):
     PLANNED = "planned"
     #: Impossible without data the domain does not have (road geometry, direction, traffic).
     REQUIRES_PROVIDER = "requires_provider"
+    #: Not a real RoutePilot feature at all - never presented as working, never weightable.
+    UNSUPPORTED = "unsupported"
 
 
 @dataclass(frozen=True)

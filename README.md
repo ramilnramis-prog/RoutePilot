@@ -9,7 +9,10 @@ stops, where and when the driver starts, where the driver must finish, what cons
 each stop carries, and to produce a practical visiting order with a deterministic
 explanation of why that order was chosen — while leaving the driver in control.
 
-The product specification is the Source of Truth: [`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md).
+The current product specification is [`docs/PRODUCT_SPEC_v2.md`](docs/PRODUCT_SPEC_v2.md)
+(Source of Truth). [`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md) is the historical v1, kept
+unchanged for traceability. Core product principle since v2: **RoutePilot recommends, the driver
+decides.**
 
 ## Status: Stage 1 (foundation + demo scenario)
 
@@ -94,7 +97,8 @@ storage/  SQLite persistence (later, proposal only)
 api/      transport layer: stdlib http.server now, FastAPI later (later)
 web/      HTML/CSS/JS frontend with Leaflet + OSM tiles (later)
 tools/    doctor and other developer utilities
-docs/     PRODUCT_SPEC.md, ARCHITECTURE.md, DECISIONS.md, STORAGE_SCHEMA.md
+docs/     PRODUCT_SPEC_v2.md (current), PRODUCT_SPEC.md (historical v1), ARCHITECTURE.md,
+          DECISIONS.md, STORAGE_SCHEMA.md
 tests/    deterministic offline unittest suite
 ```
 

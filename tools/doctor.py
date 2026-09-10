@@ -54,12 +54,13 @@ MIN_PYTHON = (3, 11)
 #: used by the strict-DST test suite.
 REQUIRED_ZONES = ("UTC", "Europe/Moscow", "Europe/Berlin")
 
-#: Governance files required by decision D27 / spec section 28.
+#: Governance files required by decision D27 / spec sections 28 and 37.
 REQUIRED_FILES = (
     "README.md",
     ".gitignore",
     ".env.example",
     "docs/PRODUCT_SPEC.md",
+    "docs/PRODUCT_SPEC_v2.md",
     "docs/DECISIONS.md",
     "docs/ARCHITECTURE.md",
     "docs/STORAGE_SCHEMA.md",

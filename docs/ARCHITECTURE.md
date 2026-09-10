@@ -1,12 +1,16 @@
 # RoutePilot — Architecture
 
 This document explains **how** the product implements the decisions in
-[`DECISIONS.md`](DECISIONS.md) under the requirements of [`PRODUCT_SPEC.md`](PRODUCT_SPEC.md).
-Where this document and the registry disagree, the registry wins.
+[`DECISIONS.md`](DECISIONS.md) under the requirements of
+[`PRODUCT_SPEC_v2.md`](PRODUCT_SPEC_v2.md) (the current Source of Truth;
+[`PRODUCT_SPEC.md`](PRODUCT_SPEC.md) v1 is historical and unchanged).
 
-Stage 0 implements the foundation only: domain skeleton, time layer, timeline arithmetic, error
-taxonomy, `doctor`, tests, and a storage schema **proposal**. No optimizer, UI, storage code or
-demo dataset exists yet.
+Precedence when documents disagree (v2 section 37): the **current product specification** plus
+**explicitly approved later decisions** in the registry control future implementation. Where this
+document and the registry disagree, the registry wins.
+
+Stages 0, 1 and 1.5 implement the foundation, the demo scenario and the semantic migration to
+RECOMMEND / MANUAL. Stage 2 (complete-route optimizer and recommendation) is not started.
 
 ---
 
@@ -170,16 +174,18 @@ Validated combinations (D6):
 | chose directly | `manual` | `manual_choice` | `true` | `first_stop_selected` |
 
 Model rules: a selection requires provenance (`selection_source`), provenance requires a selection,
-nothing selected cannot be pinned, and MANUAL mode only accepts `manual_choice`. A choice may be
-explicitly left unlocked (`pinned = false`); what the optimizer does with an unlocked choice is a
-Stage 2 decision (open item).
+nothing selected cannot be pinned, MANUAL mode only accepts `manual_choice`, and **a selected first
+stop is always pinned** - `selected_stop_id != None` with `pinned = false` is invalid (v2 §5).
+Cancelling the selection returns to `awaiting_first_stop_choice` (v2 §6); the domain never chooses a
+stop on the driver's behalf.
 
 `pinned_via` and the old `auto_recommendation` / `driver` values are gone: with no automatic
 application there is no "Lock" action left for them to describe.
 
 Plan-level states (derived, never stored): `awaiting_first_stop_choice`, `first_stop_selected`,
 `no_active_stops`, `empty_plan`. Recommendation outcomes (D9, distinct reasons rather than a bare
-`None`): `recommended`, `no_feasible_first_stop`, `no_active_stops`, `empty_plan` (+ diagnostics).
+`None`): `recommended`, `no_fully_feasible_route` (v2 §14), `no_active_stops`, `empty_plan`
+(+ diagnostics and, from Stage 2, the rejected candidates with their violating stops and reasons).
 
 ### 3.5 Order overrides (D21)
 

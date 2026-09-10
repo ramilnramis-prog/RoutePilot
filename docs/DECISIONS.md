@@ -1,11 +1,14 @@
 # RoutePilot — Decision Registry
 
 This file is the **only** place where a decision counts as settled. Chat/session history is
-not a decision log. The product specification ([`PRODUCT_SPEC.md`](PRODUCT_SPEC.md)) is the
-Source of Truth for *what* the product must do; this registry records *how* we decided to do it.
+not a decision log. The current Source of Truth for *what* the product must do is
+[`PRODUCT_SPEC_v2.md`](PRODUCT_SPEC_v2.md); [`PRODUCT_SPEC.md`](PRODUCT_SPEC.md) v1 is historical
+and unchanged. Precedence (v2 section 37): the current specification plus explicitly approved later
+decisions in this registry control future implementation; this registry records *how* we decided to
+do it.
 
 - Registry revision: **D1–D32**, approved 2026-09-11 (Stage 0, extended during Stage 1; D4–D11
-  amended when the AUTO semantics were revoked).
+  amended when the AUTO semantics were revoked; D5/D9/D16 aligned with v2 sections 5, 14 and 23).
 - Status values: `approved` (settled), `amended` (settled with a recorded change), `deferred` (recorded, not implemented).
 
 ---
@@ -66,9 +69,11 @@ Source of Truth for *what* the product must do; this registry records *how* we d
 ## D5 — Pinning follows an explicit driver choice *(amended)*
 
 - `pinned = true` arises **only** from an explicit driver selection of the first service stop.
-- Selecting the first service stop pins it by default; the optimizer must never silently change it.
+- Selecting the first service stop **always pins it**: `selected_stop_id != None` with
+  `pinned = false` is invalid (v2 §5). There is no "chosen but unlocked" state; the driver cancels
+  the selection instead. The optimizer must never silently change a selected first stop.
 - Nothing automatic produces a selection at all, so nothing automatic can produce `pinned = true`.
-- Status: `amended`. Spec: §3, §4, §18.
+- Status: `amended`. Spec: §3, §4, §18; v2 §4, §5.
 
 ## D6 — Choice provenance *(amended)*
 
@@ -113,7 +118,7 @@ Source of Truth for *what* the product must do; this registry records *how* we d
   chooses. A fake `StopId` is never substituted.
 - Distinct states are distinguished, not collapsed into one `None`:
   `awaiting_first_stop_choice`, `unresolved_empty_plan`, `no_active_stops`,
-  `no_feasible_first_stop`; after a choice the state is `first_stop_selected`.
+  `no_fully_feasible_route`; after a choice the state is `first_stop_selected`.
 - `recommended_stop_id` is a **separate** field with a separate lifecycle. This is valid:
 
   ```
@@ -122,7 +127,8 @@ Source of Truth for *what* the product must do; this registry records *how* we d
   status              = awaiting_first_stop_choice
   ```
 
-- `no_feasible_first_stop` must carry diagnostics (which stop, which constraint, why rejected).
+- `no_fully_feasible_route` (v2 §14) must carry diagnostics: which stops violate which hard window,
+  and why. An infeasible candidate is never labelled a valid recommended route.
 - Status: `amended`. Spec: §6, §7, §10.
 
 ## D10 — Model invariants *(amended)*
@@ -208,8 +214,10 @@ Source of Truth for *what* the product must do; this registry records *how* we d
 
 ## D16 — Capability honesty
 
-- Every cost component, route mode and provider feature declares its implementation status.
-- Unimplemented functionality is never presented as working.
+- Every cost component, route mode and provider feature declares its implementation status, with
+  exactly four values (v2 §23): `implemented`, `planned`, `requires_provider`, `unsupported`.
+- Unimplemented functionality is never presented as working, and an `unsupported` capability is
+  never weightable.
 - Side-of-road logic is never inferred from latitude/longitude; real side-of-road logic requires
   road geometry, direction and routing-provider data.
 - Status: `approved`. Spec: §11, §19, §29.
@@ -414,25 +422,53 @@ Source of Truth for *what* the product must do; this registry records *how* we d
 
 ## Open items (recorded, not decided)
 
-1. **Overnight service windows** (`end_local <= start_local`, e.g. 22:00–02:00) are not supported in
-   Stage 0: such a window is rejected as `InvalidServiceWindowError` rather than silently interpreted
-   as a next-day close. Needs a decision before real customers with night hours are imported.
+1. **Overnight service windows** (`end_local <= start_local`, e.g. 22:00–02:00) are not supported:
+   such a window is rejected as `InvalidServiceWindowError` rather than silently interpreted as a
+   next-day close. Needs a decision before real customers with night hours are imported.
 2. **Soft / preferred windows** — lateness penalties may only be introduced together with an explicit
-   soft-window concept (see D13 amendment).
-3. **Storage of order overrides** in SQLite (normalized table vs JSON column) — to be settled with the
-   storage schema review.
-4. **`algorithm_baseline` definition** (which heuristic, which tie-breaking) — Stage 2.
-5. **Active-leg protection** implementation — Stage 5.
-6. **`PRODUCT_SPEC.md` still describes AUTO.** The Source of Truth is stored verbatim and is never
-   rewritten (D27), so spec §3 conflicts with D4. **Decided:** a **separate v2 specification
-   document** will be published verbatim once its text is supplied; v1 stays untouched.
-7. **Unlocked choice semantics.** A driver may explicitly leave the chosen first stop unlocked
-   (`pinned = False`). What the optimizer does with a chosen-but-unlocked stop (treat it as a soft
-   preference, or refuse the combination) is still to be decided — Stage 2.
-8. **Recommendation fingerprint vs route fingerprint.** `RoutePlan.inputs_fingerprint()` now
-   deliberately excludes the driver's decision, so choosing a stop cannot make the recommendation
-   look stale. Stage 2 must add a separate fingerprint for the committed route, which *does* depend
-   on the selection.
+   soft-window concept (D13 amendment, v2 §11).
+3. **`algorithm_baseline` definition** (which heuristic, which tie-breaking) — Stage 2, v2 §30.
+4. **Active-leg protection** implementation — Stage 5, v2 §18.
+5. **Which capabilities are genuinely `unsupported`** rather than `requires_provider` — e.g. whether
+   any future component is expected never to exist. Decide when the component is first requested.
+
+*Resolved since the last revision:* the AUTO semantics (revoked, D4); `pinned_via` (removed, D6);
+the unlocked-choice question (v2 §5 makes that state invalid, so D5 now says a selection is always
+pinned); order-override persistence (D30, versioned JSON); the specification conflict (v2 published
+as the current Source of Truth, v1 kept unchanged as history).
+
+## Stage 2 change set — required by v2, not yet implemented
+
+Recorded so nothing is silently dropped; each item is a real model or engine change:
+
+1. **Complete-route candidate metrics** (v2 §12): first-leg travel, first-stop ETA, waiting and
+   service start, complete travel time, complete waiting time, total service time, complete route
+   duration, estimated final arrival at FINISH, hard-window violations, objective breakdown. This
+   also changes `feasible` from first-leg feasibility to **complete-route** feasibility (v2 §14).
+2. **`no_fully_feasible_route`** must be produced with the rejected candidates and their violating
+   stops and reasons (v2 §14). The status exists in the domain already; the engine does not yet
+   compute complete routes, so nothing produces it.
+3. **Route fingerprint** (v2 §7, §35): `RoutePlan.inputs_fingerprint()` deliberately excludes the
+   driver's decision; the committed route needs its own fingerprint that *does* depend on the
+   selected first stop. Add it to the plan/run model and to `route_optimization_runs`.
+4. **`input_position` on `RouteStop`** (v2 §25, §30): the USER baseline is defined as the stops in
+   their exact original input position order, so the position must live on the stop rather than being
+   implied by tuple order.
+5. **Objective model** (v2 §16): the real model is elapsed time (travel + waiting + service), with
+   any preference for less idle waiting expressed as a configurable soft preference rather than a
+   universal multiplier. The provisional `travel_time = 1 / waiting_time = 2` demo policy stays
+   marked provisional until then.
+6. **Exhaustive candidate evaluation with measured performance** (v2 §20): evaluate the complete route
+   for **every** feasible candidate, with no fixed K prefilter, and a deterministic benchmark harness.
+   Targets for ~100 stops: ≤ ~3 s preferred, ≤ ~5 s acceptable. If the budget is exceeded: measure
+   the bottleneck, improve caching/reuse/algorithm, benchmark again, and only then propose
+   prefiltering or approximation as an explicit decision.
+7. **Optimizer guarantees** (v2 §21): START fixed, FINISH fixed, driver-selected first stop fixed,
+   every enabled stop exactly once, disabled stops excluded, hard-window feasibility explicit, no
+   accepted local-search move may worsen the accepted objective, deterministic tie-breaking.
+8. **Three baselines** (v2 §30): USER (`input_position` order), OPTIMIZED (around the driver's
+   selection), ALGORITHM (greedy seed before local improvement). Keep the algorithm baseline out of
+   user-facing BEFORE/AFTER.
 
 ## Environment notes (machine-specific, not product decisions)
 

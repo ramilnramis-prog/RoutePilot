@@ -112,10 +112,14 @@ class FirstStopIntentTests(unittest.TestCase):
         with self.assertRaises(InvalidRoutePlanError):
             FirstStopIntent(FirstStopMode.RECOMMEND, None, None, True)
 
-    def test_a_choice_may_explicitly_be_left_unlocked(self) -> None:
-        intent = FirstStopIntent.manual_choice("S73", pinned=False)
-        self.assertTrue(intent.has_selection)
-        self.assertFalse(intent.pinned)
+    def test_a_selection_is_always_pinned(self) -> None:
+        # v2 section 5: selected_stop_id != None with pinned = false is INVALID.
+        with self.assertRaises(InvalidRoutePlanError):
+            FirstStopIntent(
+                FirstStopMode.RECOMMEND, "S73", SelectionSource.MANUAL_CHOICE, False
+            )
+        self.assertTrue(FirstStopIntent.manual_choice("S73").pinned)
+        self.assertTrue(FirstStopIntent.accepted_recommendation("S73").pinned)
 
     def test_clearing_returns_to_awaiting_choice_and_keeps_the_mode(self) -> None:
         cleared = FirstStopIntent.manual_choice("S73", mode=FirstStopMode.MANUAL).cleared()
@@ -191,7 +195,7 @@ class RecommendationTests(unittest.TestCase):
 
     def test_no_recommendation_states_never_carry_a_placeholder_stop(self) -> None:
         for status in (
-            RecommendationStatus.NO_FEASIBLE_FIRST_STOP,
+            RecommendationStatus.NO_FULLY_FEASIBLE_ROUTE,
             RecommendationStatus.NO_ACTIVE_STOPS,
             RecommendationStatus.EMPTY_PLAN,
         ):
@@ -202,7 +206,7 @@ class RecommendationTests(unittest.TestCase):
                 self.assertEqual(recommendation.ranked, ())
         with self.assertRaises(InvalidRoutePlanError):
             FirstStopRecommendation(
-                RecommendationStatus.NO_FEASIBLE_FIRST_STOP, "S73"
+                RecommendationStatus.NO_FULLY_FEASIBLE_ROUTE, "S73"
             )
         with self.assertRaises(InvalidRoutePlanError):
             FirstStopRecommendation(
@@ -211,7 +215,7 @@ class RecommendationTests(unittest.TestCase):
 
     def test_no_feasible_candidate_carries_diagnostics(self) -> None:
         recommendation = FirstStopRecommendation.none(
-            RecommendationStatus.NO_FEASIBLE_FIRST_STOP,
+            RecommendationStatus.NO_FULLY_FEASIBLE_ROUTE,
             diagnostics=(
                 CandidateDiagnostic(
                     stop_id="S06",

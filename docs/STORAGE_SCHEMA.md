@@ -168,7 +168,8 @@ Immutable history: one row per optimize/reoptimize execution.
 | `run_kind` | TEXT | NOT NULL, CHECK in (`optimize`,`reoptimize`,`preview`) |
 | `algorithm` | TEXT | NOT NULL, e.g. `greedy_seed+2opt` |
 | `algorithm_version` | TEXT | NOT NULL |
-| `inputs_fingerprint` | TEXT | NOT NULL |
+| `inputs_fingerprint` | TEXT | NOT NULL — fingerprint of the recommendation inputs (v2 §7). Excludes the driver's decision |
+| `route_fingerprint` | TEXT | NOT NULL — fingerprint of the committed route, which **does** depend on the selected first stop (v2 §7, §35) |
 | `tzdata_version` | TEXT | NULL — IANA data version used (D2) |
 | `cost_policy_json` | TEXT | NOT NULL — policy actually used by this run |
 | `data_provenance` | TEXT | NOT NULL, CHECK in (`DEMO_SYNTHETIC`,`REAL_ROUTING`) |
