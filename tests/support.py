@@ -143,15 +143,20 @@ def build_plan(
     default_service_duration: int | None = None,
     first_service_stop=None,
     order_overrides=None,
+    cost_policy=None,
+    window_end_policy=None,
 ) -> RoutePlan:
     """Build a plan whose START is a warehouse at 04:00 Moscow by default."""
     from core.model.first_stop import FirstStopIntent  # local import keeps the fixture light
+    from core.model.service_window import DEFAULT_WINDOW_END_POLICY
 
     kwargs = {}
     if first_service_stop is not None:
         kwargs["first_service_stop"] = first_service_stop
     if order_overrides is not None:
         kwargs["order_overrides"] = order_overrides
+    if cost_policy is not None:
+        kwargs["cost_policy"] = cost_policy
     return RoutePlan(
         id=PlanId(plan_id),
         timezone=timezone_name,
@@ -160,5 +165,8 @@ def build_plan(
         finish=finish or place("Depot", 55.70, 37.55),
         stops=tuple(stops),
         default_service_duration=default_service_duration,
+        window_end_policy=(
+            window_end_policy if window_end_policy is not None else DEFAULT_WINDOW_END_POLICY
+        ),
         **kwargs,
     )

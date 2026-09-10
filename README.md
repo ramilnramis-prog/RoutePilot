@@ -11,21 +11,30 @@ explanation of why that order was chosen — while leaving the driver in control
 
 The product specification is the Source of Truth: [`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md).
 
-## Status: Stage 0 (foundation)
+## Status: Stage 1 (foundation + demo scenario)
 
-Implemented in Stage 0:
+Implemented so far:
 
-- domain skeleton (value objects, `RouteStop`, `RoutePlan`, `ServiceWindow`,
-  first-stop intent/resolution, cost policy declarations, route modes, order overrides);
+- domain skeleton (value objects, `RouteStop`, `RoutePlan`, `ServiceWindow` with an explicit
+  `window_kind` and `window_end_policy`, first-stop intent/resolution, cost policy, route modes,
+  order overrides);
 - time layer: UTC storage, explicit IANA time zone per plan, **strict DST validation**;
-- timeline arithmetic: ETA, waiting time, service start, estimated departure, lateness;
-- error taxonomy, split from violations (errors = invalid input, violations = infeasible outcome);
-- `tools/doctor.py` environment check, including tzdata WARN/FAIL handling;
-- deterministic, offline `unittest` coverage;
+- timeline arithmetic: ETA, waiting time, service start, estimated departure, lateness and the
+  `service_finish_before_end` / `service_start_before_end` window-end policies;
+- **cost scoring** over the implemented components only (`travel_time`, `waiting_time`, `distance`),
+  with a capability gate that refuses weights for anything unimplemented;
+- **first-stop candidate evaluation**: every possible first stop timed and priced, feasible ones
+  ranked deterministically, infeasible ones reported explicitly;
+- **deterministic demo scenario**: ~30 synthetic stops, departure 04:00, customers opening 08:00,
+  and a numeric report (`python -m demo.report`);
+- error taxonomy split from violations, `tools/doctor.py`, and a deterministic offline test suite;
 - [`docs/STORAGE_SCHEMA.md`](docs/STORAGE_SCHEMA.md) — **proposal only**, no storage code.
 
-Not implemented yet (by design): optimizer, first-stop selector, cost weights, demo dataset,
-SQLite storage, API, web UI. See the roadmap at the end of this file.
+Not implemented yet (by design): optimizer / route selection, pinning and AUTO recomputation, web
+UI, SQLite persistence, map and routing providers, traffic, side-of-road logic.
+
+**Every travel time and distance in the demo is synthetic** and is labelled as such. It is not road
+routing and must never be shown as such.
 
 ## Requirements
 
@@ -60,16 +69,27 @@ python tools/doctor.py                  # dev mode: reports environment, WARN on
 python tools/doctor.py --mode strict    # release/CI mode: missing tzdata is a FAIL (exit 1)
 
 python -m unittest discover -s tests -t . -v
+
+python -m demo.report                   # the demo scenario with candidate costs
 ```
 
 Tests are deterministic and require no network, no browser and no external service.
 
+`python -m demo.report` needs a time zone database. On an offline machine where `tzdata` cannot be
+installed, either set `PYTHONTZPATH` (see above) or use the explicit development flag, which prints
+a warning:
+
+```bash
+python -m demo.report --allow-system-tzdata
+```
+
 ## Layout
 
 ```
-core/     domain model, time layer, (later) engine — no HTTP, no UI, no storage, no network
-demo/     deterministic demo dataset and synthetic travel matrix (later)
-storage/  SQLite persistence (later)
+core/     domain model, time layer, engine (cost scoring, first-stop evaluation) — no HTTP, no UI,
+          no storage, no network
+demo/     deterministic demo dataset, synthetic travel matrix, numeric report
+storage/  SQLite persistence (later, proposal only)
 api/      transport layer: stdlib http.server now, FastAPI later (later)
 web/      HTML/CSS/JS frontend with Leaflet + OSM tiles (later)
 tools/    doctor and other developer utilities
@@ -100,9 +120,9 @@ tests/    deterministic offline unittest suite
 
 | Stage | Scope |
 |---|---|
-| 0 | foundation: docs, domain skeleton, time layer, strict DST, error taxonomy, doctor, tests, storage schema proposal |
-| 1 | cost policy weights + deterministic demo dataset (~30 stops) + synthetic matrix + the 04:00 / 08:00 scenario |
-| 2 | first-stop selector (AUTO/MANUAL, provenance, pinning, fingerprint recompute) + optimizer + top-K explanation |
+| 0 ✅ | foundation: docs, domain skeleton, time layer, strict DST, error taxonomy, doctor, tests, storage schema proposal |
+| 1 ✅ | cost scoring over implemented components, deterministic demo dataset (~30 stops), synthetic matrix, 04:00 / 08:00 scenario, candidate evaluation, numeric demo report |
+| 2 | first-stop selection (AUTO/MANUAL provenance, pinning, `inputs_fingerprint` recomputation) + optimizer + remaining-route term + top-K explanation |
 | 3 | SQLite storage + schema implementation + round-trip tests |
 | 4 | API + web UI (map, timeline panel, route summary, top-K, override) |
 | 5 | reoptimization after each served stop + active-leg protection groundwork |

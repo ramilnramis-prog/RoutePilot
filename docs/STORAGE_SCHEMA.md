@@ -1,7 +1,7 @@
 # RoutePilot — Storage Schema (PROPOSAL ONLY)
 
-> **Status: proposal.** Per D14 and the approved Stage 0 scope, **no SQLite code may be written
-> until this document is reviewed and explicitly approved.** Nothing here is implemented.
+> **Status: proposal, refined during Stage 1.** Per D14, **no SQLite code may be written until this
+> document is reviewed and explicitly approved.** Nothing here is implemented.
 
 Target: SQLite, stdlib `sqlite3` (no ORM). Storage lives in `storage/` and depends on `core/`;
 `core/` never imports storage. Repository interfaces are defined as Protocols in `core/` and
@@ -54,7 +54,8 @@ order, never edited after release, never destructive by default.
 | `first_stop_mode` | TEXT | NOT NULL, CHECK in (`auto`,`manual`) |
 | `first_stop_pinned` | INTEGER | NOT NULL DEFAULT 0 |
 | `first_stop_pinned_stop_id` | TEXT | NULL, FK → `route_stops(id)` |
-| `order_overrides_json` | TEXT | NOT NULL DEFAULT `'[]'` — generic constraints (D21) |
+| `window_end_policy` | TEXT | NOT NULL DEFAULT `'service_finish_before_end'`, CHECK in (`service_start_before_end`,`service_finish_before_end`) — what the end of a fixed window means for this plan (D29) |
+| `order_overrides_json` | TEXT | NOT NULL DEFAULT `'{"version": 1, "constraints": []}'` — **versioned** envelope of user ordering constraints (D21/D30) |
 | `cost_policy_json` | TEXT | NOT NULL — policy in force for the plan |
 | `default_service_duration_sec` | INTEGER | NULL — used when a stop's duration is unknown |
 | `inputs_fingerprint` | TEXT | NULL — fingerprint of the last computed solution (D4) |
@@ -74,6 +75,29 @@ Notes:
 
 Indexes: none beyond the PK (plans are few).
 
+### 3.1 Versioned order-override envelope (D30)
+
+For the MVP, general order overrides are stored as a structured, **versioned** JSON envelope rather
+than a normalized table, because only first-stop pinning is implemented and the final constraint
+vocabulary for arbitrary drag/reorder is not known yet:
+
+```json
+{
+  "version": 1,
+  "constraints": [
+    {"kind": "first_stop", "stop_id": "S07", "position": null}
+  ]
+}
+```
+
+Rules:
+
+- `version` is mandatory; readers reject an unknown version instead of guessing;
+- the envelope is validated by the domain on load, and a `first_stop` constraint must agree with
+  `first_stop_pinned_stop_id` (one source of truth, D21);
+- because the format is versioned, it can migrate to a normalized `route_stop_order_constraints`
+  table later **without changing the core domain model**.
+
 ## 4. `route_stops`
 
 | column | type | notes |
@@ -91,6 +115,7 @@ Indexes: none beyond the PK (plans are few).
 | `service_window_kind` | TEXT | NOT NULL, CHECK in (`fixed`,`unrestricted`,`unknown`) |
 | `service_window_start` | TEXT | NULL — local `HH:MM:SS` |
 | `service_window_end` | TEXT | NULL — local `HH:MM:SS` |
+| `window_end_policy` | TEXT | NULL — per-stop override; NULL = inherit the plan default (D29) |
 | `service_duration_sec` | INTEGER | NULL — NULL means unknown, never invented |
 | `priority` | INTEGER | NULL |
 | `service_status` | TEXT | NOT NULL DEFAULT `'pending'`, CHECK in (`pending`,`in_progress`,`served`,`failed`,`skipped`) |
@@ -117,6 +142,8 @@ CHECK (
 )
 -- a fixed customer window implies a resolved customer location
 CHECK (service_window_kind <> 'fixed' OR latitude IS NOT NULL)
+-- only a fixed window has an end whose meaning can be chosen (D29)
+CHECK (window_end_policy IS NULL OR service_window_kind = 'fixed')
 ```
 
 Indexes:
@@ -203,9 +230,8 @@ producing a half-valid plan.
 
 ## 9. Open questions for the schema review
 
-1. **Order overrides**: normalized `route_stop_order_constraints` table vs `order_overrides_json` on
-   the plan. Proposal: JSON now (only `first_stop` is implemented), normalized table when drag/reorder
-   and position constraints appear.
+1. ~~**Order overrides**: normalized table vs JSON.~~ **Resolved (D30):** versioned JSON envelope
+   now; a normalized table only when drag/reorder and position constraints actually appear.
 2. **Timeline snapshot for audit**: store per-run timelines (JSON) or rely on recomputation with the
    run's `inputs_fingerprint` + `cost_policy_json` + `tzdata_version`? Proposal: recompute; add a
    snapshot only if audit requirements demand it.
@@ -214,3 +240,10 @@ producing a half-valid plan.
 4. **Settings scope**: global `app_settings` now; per-user/per-organization later.
 5. **Retention**: how many optimization runs to keep per plan (proposal: keep all in the demo, add a
    retention policy when real volumes appear).
+
+## 10. Implementation status
+
+This document is a **design proposal only**. Per D14, no SQLite code exists and none will be written
+until this schema is explicitly approved. The Stage 1 refinements recorded above — the window end
+policy on the plan and per stop (D29) and the versioned order-override envelope (D30) — are part of
+the proposal, not of an implementation.

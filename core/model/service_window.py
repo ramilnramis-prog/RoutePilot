@@ -1,4 +1,4 @@
-"""Service window value object (decision D28, spec sections 7 and 17).
+"""Service window value object (decisions D28 and D29, spec sections 7 and 17).
 
 A customer's business hours are never invented. The window is therefore an explicit
 discriminated value object:
@@ -10,6 +10,11 @@ discriminated value object:
 
 ``unrestricted`` and ``unknown`` are deliberately *different* states even though they
 compute identically: one states a fact about access, the other admits missing information.
+
+The meaning of the window **end** is an explicit choice, not a hidden assumption (D29):
+``window_end_policy`` says whether service must *begin* or *finish* before closing. A stop may
+carry its own policy (``None`` means "inherit the plan default"), which is how a specific
+customer or provider can opt into the looser interpretation later without a redesign.
 
 Local times here are wall-clock values **without** a timezone. They are resolved to
 absolute instants per service date, under strict DST validation, by :mod:`core.time.tz`.
@@ -23,7 +28,12 @@ from enum import Enum
 
 from core.validation.errors import InvalidServiceWindowError
 
-__all__ = ["ServiceWindow", "WindowKind"]
+__all__ = [
+    "DEFAULT_WINDOW_END_POLICY",
+    "ServiceWindow",
+    "WindowEndPolicy",
+    "WindowKind",
+]
 
 
 class WindowKind(str, Enum):
@@ -32,6 +42,23 @@ class WindowKind(str, Enum):
     FIXED = "fixed"
     UNRESTRICTED = "unrestricted"
     UNKNOWN = "unknown"
+
+
+class WindowEndPolicy(str, Enum):
+    """What the end of a service window means (D29).
+
+    * ``SERVICE_START_BEFORE_END`` - it is enough that service *begins* before closing. Service
+      that runs past closing time is recorded as ``finish_overtime`` but is not infeasible.
+    * ``SERVICE_FINISH_BEFORE_END`` - service must *finish* before closing. The conservative
+      interpretation and the default for the MVP and the demo.
+    """
+
+    SERVICE_START_BEFORE_END = "service_start_before_end"
+    SERVICE_FINISH_BEFORE_END = "service_finish_before_end"
+
+
+#: The conservative default: the customer closes at ``end_local``, so service must be over by then.
+DEFAULT_WINDOW_END_POLICY = WindowEndPolicy.SERVICE_FINISH_BEFORE_END
 
 
 def _write_hhmm(value: time) -> str:
@@ -49,6 +76,8 @@ class ServiceWindow:
     window_kind: WindowKind
     start_local: time | None = None
     end_local: time | None = None
+    #: ``None`` means "inherit the plan's default policy" (D29).
+    window_end_policy: WindowEndPolicy | None = None
 
     def __post_init__(self) -> None:
         kind = self.window_kind
@@ -61,6 +90,19 @@ class ServiceWindow:
                     f"expected one of {[k.value for k in WindowKind]}"
                 ) from None
             object.__setattr__(self, "window_kind", kind)
+
+        if self.window_end_policy is not None and not isinstance(
+            self.window_end_policy, WindowEndPolicy
+        ):
+            try:
+                object.__setattr__(
+                    self, "window_end_policy", WindowEndPolicy(self.window_end_policy)
+                )
+            except ValueError:
+                raise InvalidServiceWindowError(
+                    f"unknown window_end_policy {self.window_end_policy!r}; expected one of "
+                    f"{[policy.value for policy in WindowEndPolicy]}"
+                ) from None
 
         if kind is WindowKind.FIXED:
             if self.start_local is None or self.end_local is None:
@@ -93,14 +135,28 @@ class ServiceWindow:
                     f"window_kind={kind.value!r} must not carry start_local/end_local: "
                     "hours are not known and RoutePilot does not invent them"
                 )
+            if self.window_end_policy is not None:
+                raise InvalidServiceWindowError(
+                    f"window_kind={kind.value!r} has no end to interpret, so it must not carry "
+                    "window_end_policy (D29)"
+                )
 
     # ------------------------------------------------------------------ #
     # constructors
     # ------------------------------------------------------------------ #
     @classmethod
-    def fixed(cls, start_local: time, end_local: time) -> "ServiceWindow":
-        """A known opening window, e.g. 08:00-18:00 local time."""
-        return cls(WindowKind.FIXED, start_local, end_local)
+    def fixed(
+        cls,
+        start_local: time,
+        end_local: time,
+        *,
+        window_end_policy: WindowEndPolicy | None = None,
+    ) -> "ServiceWindow":
+        """A known opening window, e.g. 08:00-18:00 local time.
+
+        ``window_end_policy`` overrides the plan default for this customer only (D29).
+        """
+        return cls(WindowKind.FIXED, start_local, end_local, window_end_policy)
 
     @classmethod
     def unrestricted(cls) -> "ServiceWindow":
@@ -131,3 +187,19 @@ class ServiceWindow:
         if self.window_kind is WindowKind.UNRESTRICTED:
             return "always accessible"
         return "hours unknown"
+
+    def effective_end_policy(self, plan_default: WindowEndPolicy) -> WindowEndPolicy:
+        """The policy that applies to this window: the stop's own override, else the plan default.
+
+        Only fixed windows have an end to interpret, so the result is only meaningful then.
+        """
+        if self.window_end_policy is not None:
+            return self.window_end_policy
+        return plan_default
+
+    def describe_end_policy(self, plan_default: WindowEndPolicy) -> str:
+        policy = self.effective_end_policy(plan_default)
+        origin = "stop override" if self.window_end_policy is not None else "plan default"
+        if policy is WindowEndPolicy.SERVICE_FINISH_BEFORE_END:
+            return f"service must finish before closing ({origin})"
+        return f"service must start before closing ({origin})"

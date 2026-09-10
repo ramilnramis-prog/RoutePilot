@@ -17,7 +17,7 @@ from enum import Enum
 
 from core.model.first_stop import FirstStopCandidate, FirstStopResolution
 from core.model.ids import StopId
-from core.model.service_window import WindowKind
+from core.model.service_window import WindowEndPolicy, WindowKind
 from core.model.value_objects import DataProvenance, DurationSec, Instant, ensure_utc
 from core.validation.errors import InvalidRoutePlanError
 
@@ -98,9 +98,17 @@ class Violation:
 class StopTimeline:
     """Timeline of one service stop (spec section 7).
 
-    ``lateness > 0`` means exactly one thing: service cannot begin inside the permitted window.
-    ``overtime`` is informational - service started in time but finished after closing, which is
-    not an infeasibility while soft windows do not exist (D13 amendment).
+    The meaning of the window end is explicit (D29). ``lateness`` is the miss measured under the
+    applied ``window_end_policy``, and ``lateness > 0`` means exactly one thing: the stop cannot
+    be served within its permitted window.
+
+    * ``service_finish_before_end`` (default) - service must be over by closing, so
+      ``lateness`` equals ``finish_overtime``;
+    * ``service_start_before_end`` - beginning service before closing is enough, so ``lateness``
+      is the start miss and ``finish_overtime`` is informational only.
+
+    Soft windows do not exist yet, so a missed hard window is always an explicit Violation and
+    never a numeric penalty (D13 amendment).
     """
 
     stop_id: StopId
@@ -113,10 +121,11 @@ class StopTimeline:
     service_duration: DurationSec
     estimated_departure: Instant
     lateness: DurationSec
-    overtime: DurationSec
+    finish_overtime: DurationSec
     feasibility: Feasibility
     service_window_start: Instant | None = None
     service_window_end: Instant | None = None
+    window_end_policy: WindowEndPolicy | None = None
     flags: tuple[TimelineFlag, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -138,9 +147,15 @@ class StopTimeline:
             object.__setattr__(self, "window_kind", WindowKind(self.window_kind))
         if not isinstance(self.feasibility, Feasibility):
             object.__setattr__(self, "feasibility", Feasibility(self.feasibility))
+        if self.window_end_policy is not None and not isinstance(
+            self.window_end_policy, WindowEndPolicy
+        ):
+            object.__setattr__(
+                self, "window_end_policy", WindowEndPolicy(self.window_end_policy)
+            )
         object.__setattr__(self, "flags", tuple(self.flags))
 
-        for field_name in ("travel_time", "waiting_time", "lateness", "overtime"):
+        for field_name in ("travel_time", "waiting_time", "lateness", "finish_overtime"):
             if getattr(self, field_name) < 0:
                 raise InvalidRoutePlanError(f"{field_name} must be >= 0")
         if self.service_duration <= 0:
@@ -152,10 +167,21 @@ class StopTimeline:
                     "a fixed window timeline needs both service_window_start and "
                     "service_window_end"
                 )
-        elif self.service_window_start is not None or self.service_window_end is not None:
-            raise InvalidRoutePlanError(
-                f"window_kind={self.window_kind.value!r} must not carry window instants"
-            )
+            if self.window_end_policy is None:
+                raise InvalidRoutePlanError(
+                    "a fixed window timeline must state which window_end_policy was applied, so "
+                    "that infeasibility is never an implicit assumption (D29)"
+                )
+        else:
+            if self.service_window_start is not None or self.service_window_end is not None:
+                raise InvalidRoutePlanError(
+                    f"window_kind={self.window_kind.value!r} must not carry window instants"
+                )
+            if self.window_end_policy is not None:
+                raise InvalidRoutePlanError(
+                    f"window_kind={self.window_kind.value!r} has no window end to interpret, so "
+                    "it must not carry a window_end_policy"
+                )
 
         if self.estimated_arrival != self.departure_from_previous + timedelta(
             seconds=self.travel_time
@@ -174,11 +200,50 @@ class StopTimeline:
             raise InvalidRoutePlanError(
                 "estimated_departure must equal service_start + service_duration"
             )
+
+        if self.window_kind is WindowKind.FIXED:
+            assert self.service_window_end is not None
+            expected_finish_overtime = max(
+                0, int((self.estimated_departure - self.service_window_end).total_seconds())
+            )
+            if self.finish_overtime != expected_finish_overtime:
+                raise InvalidRoutePlanError(
+                    "finish_overtime must equal how long service runs past the window end"
+                )
+            if self.window_end_policy is WindowEndPolicy.SERVICE_FINISH_BEFORE_END:
+                expected_lateness = self.finish_overtime
+            else:
+                expected_lateness = self.start_lateness
+            if self.lateness != expected_lateness:
+                raise InvalidRoutePlanError(
+                    f"lateness must be the miss measured under window_end_policy="
+                    f"{self.window_end_policy.value!r}: expected {expected_lateness}s, got "
+                    f"{self.lateness}s (D29)"
+                )
+        else:
+            if self.finish_overtime != 0 or self.lateness != 0:
+                raise InvalidRoutePlanError(
+                    "a stop without a window end cannot be late or run overtime"
+                )
+
         if (self.lateness > 0) != (self.feasibility is Feasibility.INFEASIBLE):
             raise InvalidRoutePlanError(
-                "lateness > 0 and feasibility='infeasible' must agree: lateness means service "
-                "cannot begin inside the permitted window (D13 amendment)"
+                "lateness > 0 and feasibility='infeasible' must agree: lateness is the miss "
+                "measured under the applied window_end_policy, so it means the stop cannot be "
+                "served within its permitted window (D29, D13 amendment)"
             )
+
+    @property
+    def start_lateness(self) -> DurationSec:
+        """How late service would begin relative to the window end (0 without a fixed window)."""
+        if self.service_window_end is None:
+            return 0
+        return max(0, int((self.service_start - self.service_window_end).total_seconds()))
+
+    @property
+    def starts_before_end(self) -> bool:
+        """Whether service begins inside the window, regardless of the applied end policy."""
+        return self.start_lateness == 0
 
     @property
     def is_infeasible(self) -> bool:

@@ -4,7 +4,7 @@ This file is the **only** place where a decision counts as settled. Chat/session
 not a decision log. The product specification ([`PRODUCT_SPEC.md`](PRODUCT_SPEC.md)) is the
 Source of Truth for *what* the product must do; this registry records *how* we decided to do it.
 
-- Registry revision: **D1–D28**, approved 2026-09-11 (Stage 0).
+- Registry revision: **D1–D31**, approved 2026-09-11 (Stage 0, extended during Stage 1).
 - Status values: `approved` (settled), `amended` (settled with a recorded change), `deferred` (recorded, not implemented).
 
 ---
@@ -153,7 +153,10 @@ Source of Truth for *what* the product must do; this registry records *how* we d
 - Entities to plan for: route plans, route stops, route optimization runs, application settings.
 - The exact schema is **proposed before implementation** and implemented only after approval.
 - Storage code never leaks into optimization logic; `core/` never imports storage.
-- Status: `approved` (schema proposal pending approval). Spec: §26.
+- Storage implementation is **deferred**: the schema refinements of D29 (window end policy on the
+  plan and per stop) and D30 (versioned order-override JSON) are recorded in the proposal, but no
+  SQLite code exists yet.
+- Status: `approved` (proposal reviewed and refined; implementation still deferred). Spec: §26.
 
 ## D15 — Providers and map configuration
 
@@ -294,6 +297,52 @@ Source of Truth for *what* the product must do; this registry records *how* we d
 - Persistence may later flatten this into `window_kind` + `service_window_start` +
   `service_window_end` (see `docs/STORAGE_SCHEMA.md`).
 - Status: `approved`. Spec: §7, §17.
+
+---
+
+## D29 — Window end semantics
+
+- What the **end** of a service window means is an explicit concept, never a hidden global
+  assumption:
+
+  | `window_end_policy` | Meaning |
+  |---|---|
+  | `service_finish_before_end` | service must **finish** before closing (conservative; MVP/demo default) |
+  | `service_start_before_end` | it is enough that service **begins** before closing |
+
+- Resolution order: a stop-level override on `ServiceWindow`, otherwise the plan-level default.
+  This is what lets a specific customer or provider opt into the looser interpretation later
+  without redesigning anything.
+- The default and the demo behaviour is `service_finish_before_end`. Example: window 08:00-18:00,
+  `service_duration` 30m, service start 17:50 -> **infeasible**, because service would finish at
+  18:20.
+- Timeline terminology (updated with this decision):
+  - `lateness` = the miss measured under the **applied** policy; `lateness > 0` means the stop
+    cannot be served within its permitted window, and that is exactly when it is infeasible;
+  - `finish_overtime` = how long service runs past the closing instant (always recorded);
+  - `start_lateness` = the start miss, available as a diagnostic.
+- Status: `approved`. Spec: §7, §10.
+
+## D30 — Order overrides are persisted as versioned JSON
+
+- For the MVP, a plan's general order overrides are persisted as a **structured, versioned JSON
+  envelope** (`{"version": 1, "constraints": [...]}`), not as a normalized order-constraints table.
+- Reason: the MVP implements only first-stop pinning and the final constraint vocabulary for
+  arbitrary drag/reorder is not known yet.
+- The version field exists so the format can migrate to a normalized table later **without
+  changing the core domain model**.
+- Status: `approved`. Storage implementation remains deferred (see D14). Spec: §18.
+
+## D31 — Provisional demo weights
+
+- The only weighted policy in the project is `demo_provisional_v1`
+  (`travel_time = 1`, `waiting_time = 2`), marked `provisional` in code and in every report.
+- These numbers are **not product truth**: they exist to demonstrate the architecture. The demo
+  report shows their sensitivity, including the degenerate 1:1 case where every candidate that
+  arrives before opening ties exactly and the tie-break hands the choice to the nearest stop.
+- The capability gate still applies: a weight may only be set for a component whose status is
+  `implemented`, so nothing unimplemented can be scored silently.
+- Status: `approved`. Spec: §10, §24.
 
 ---
 

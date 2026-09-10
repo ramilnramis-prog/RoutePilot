@@ -5,7 +5,12 @@ from __future__ import annotations
 import unittest
 from datetime import time, timezone
 
-from core.model.service_window import ServiceWindow, WindowKind
+from core.model.service_window import (
+    DEFAULT_WINDOW_END_POLICY,
+    ServiceWindow,
+    WindowEndPolicy,
+    WindowKind,
+)
 from core.validation.errors import InvalidServiceWindowError
 
 
@@ -65,6 +70,49 @@ class ServiceWindowTests(unittest.TestCase):
     def test_wall_clock_times_must_not_carry_tzinfo(self) -> None:
         with self.assertRaises(InvalidServiceWindowError):
             ServiceWindow.fixed(time(8, 0, tzinfo=timezone.utc), time(18, 0))
+
+
+class WindowEndPolicyTests(unittest.TestCase):
+    """D29: what the end of a window means is explicit, and a stop may override the plan default."""
+
+    def test_default_policy_is_the_conservative_one(self) -> None:
+        self.assertIs(
+            DEFAULT_WINDOW_END_POLICY, WindowEndPolicy.SERVICE_FINISH_BEFORE_END
+        )
+
+    def test_stop_without_an_override_inherits_the_plan_default(self) -> None:
+        window = ServiceWindow.fixed(time(8, 0), time(18, 0))
+        self.assertIsNone(window.window_end_policy)
+        self.assertIs(
+            window.effective_end_policy(DEFAULT_WINDOW_END_POLICY), DEFAULT_WINDOW_END_POLICY
+        )
+
+    def test_stop_override_wins_over_the_plan_default(self) -> None:
+        window = ServiceWindow.fixed(
+            time(8, 0),
+            time(18, 0),
+            window_end_policy=WindowEndPolicy.SERVICE_START_BEFORE_END,
+        )
+        self.assertIs(
+            window.effective_end_policy(DEFAULT_WINDOW_END_POLICY),
+            WindowEndPolicy.SERVICE_START_BEFORE_END,
+        )
+        self.assertIn("stop override", window.describe_end_policy(DEFAULT_WINDOW_END_POLICY))
+
+    def test_policy_is_coerced_from_a_string(self) -> None:
+        window = ServiceWindow.fixed(
+            time(8, 0), time(18, 0), window_end_policy="service_start_before_end"
+        )
+        self.assertIs(window.window_end_policy, WindowEndPolicy.SERVICE_START_BEFORE_END)
+
+    def test_unknown_policy_is_rejected(self) -> None:
+        with self.assertRaises(InvalidServiceWindowError):
+            ServiceWindow.fixed(time(8, 0), time(18, 0), window_end_policy="whenever")
+
+    def test_windows_without_an_end_must_not_carry_a_policy(self) -> None:
+        for kind in (WindowKind.UNKNOWN, WindowKind.UNRESTRICTED):
+            with self.assertRaises(InvalidServiceWindowError):
+                ServiceWindow(kind, None, None, WindowEndPolicy.SERVICE_START_BEFORE_END)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ from core.model.ids import PlanId, StopId
 from core.model.order_override import OrderOverrides
 from core.model.route_mode import DEFAULT_ROUTE_MODE, RouteMode
 from core.model.route_stop import RouteStop
+from core.model.service_window import DEFAULT_WINDOW_END_POLICY, WindowEndPolicy
 from core.model.value_objects import DurationSec, GeoPoint, Instant, PlaceRef, ensure_utc
 from core.time import tzdata
 from core.validation.errors import InvalidOrderError, InvalidRoutePlanError
@@ -46,6 +47,8 @@ class RoutePlan:
     stops: tuple[RouteStop, ...] = field(default_factory=tuple)
     cost_policy: RouteCostPolicy = field(default_factory=empty_cost_policy)
     route_mode: RouteMode = DEFAULT_ROUTE_MODE
+    #: Default interpretation of a fixed window's end; a stop may override it (D29).
+    window_end_policy: WindowEndPolicy = DEFAULT_WINDOW_END_POLICY
     first_service_stop: FirstStopIntent = field(default_factory=FirstStopIntent.auto)
     order_overrides: OrderOverrides = field(default_factory=OrderOverrides.empty)
     default_service_duration: DurationSec | None = None
@@ -89,6 +92,10 @@ class RoutePlan:
 
         if not isinstance(self.route_mode, RouteMode):
             object.__setattr__(self, "route_mode", RouteMode(self.route_mode))
+        if not isinstance(self.window_end_policy, WindowEndPolicy):
+            object.__setattr__(
+                self, "window_end_policy", WindowEndPolicy(self.window_end_policy)
+            )
 
         if not isinstance(self.first_service_stop, FirstStopIntent):
             raise InvalidRoutePlanError("first_service_stop must be a FirstStopIntent")
@@ -231,6 +238,9 @@ class RoutePlan:
                 "longitude": self.finish.point.longitude,
             },
             "route_mode": self.route_mode.value,
+            # Interpreting a window end differently changes feasibility, so it must be able to
+            # invalidate a cached AUTO recommendation (D4/D29).
+            "window_end_policy": self.window_end_policy.value,
             "first_service_stop": {
                 "mode": self.first_service_stop.mode.value,
                 "pinned": self.first_service_stop.pinned,
@@ -261,6 +271,11 @@ class RoutePlan:
                     "window_kind": stop.service_window.window_kind.value,
                     "window_start": _iso_or_none(stop.service_window.start_local),
                     "window_end": _iso_or_none(stop.service_window.end_local),
+                    "window_end_policy": (
+                        stop.service_window.window_end_policy.value
+                        if stop.service_window.window_end_policy is not None
+                        else None
+                    ),
                     "service_duration": stop.service_duration,
                     "priority": stop.priority,
                     "enabled": stop.enabled,

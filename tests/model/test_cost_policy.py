@@ -5,10 +5,12 @@ from __future__ import annotations
 import unittest
 
 from core.model.cost_policy import (
+    DEMO_PROVISIONAL_POLICY_NAME,
     ComponentStatus,
     CostComponent,
     CostComponentDeclaration,
     RouteCostPolicy,
+    demo_provisional_policy,
     empty_cost_policy,
 )
 from core.validation.errors import InvalidCostPolicyError, UnsupportedFeatureError
@@ -18,6 +20,7 @@ class CostPolicyTests(unittest.TestCase):
     def test_stage0_policy_declares_every_component_and_no_weights(self) -> None:
         policy = empty_cost_policy()
         self.assertFalse(policy.is_weighted())
+        self.assertFalse(policy.provisional)
         self.assertEqual(policy.weights, {})
         self.assertIn("no weights configured yet", policy.describe())
         for component in CostComponent:
@@ -37,12 +40,42 @@ class CostPolicyTests(unittest.TestCase):
             )
 
     def test_weight_requires_an_implemented_component(self) -> None:
-        # Nothing is implemented in Stage 0, so a weight must be refused, not quietly accepted.
+        # Priority weighting is only meaningful once a product decision defines its value, and the
+        # component is declared 'planned', so a weight must be refused rather than quietly accepted.
         with self.assertRaises(UnsupportedFeatureError):
             RouteCostPolicy(
                 name="premature",
-                weights={CostComponent.TRAVEL_TIME: 1.0},
+                weights={CostComponent.PRIORITY_PENALTY: 1.0},
             )
+
+    def test_implemented_components_can_be_weighted(self) -> None:
+        policy = RouteCostPolicy(
+            name="stage1",
+            weights={CostComponent.TRAVEL_TIME: 1.0, CostComponent.WAITING_TIME: 2.0},
+        )
+        self.assertTrue(policy.is_weighted())
+        self.assertEqual(policy.weight(CostComponent.TRAVEL_TIME), 1.0)
+        self.assertEqual(policy.weight(CostComponent.WAITING_TIME), 2.0)
+        self.assertEqual(policy.weight(CostComponent.DISTANCE), 0.0)
+        self.assertIn("travel_time=1", policy.describe())
+
+    def test_demo_policy_is_marked_provisional(self) -> None:
+        policy = demo_provisional_policy()
+        self.assertTrue(policy.provisional)
+        self.assertEqual(policy.name, DEMO_PROVISIONAL_POLICY_NAME)
+        self.assertTrue(policy.notes)
+        self.assertIn("PROVISIONAL", policy.describe())
+
+    def test_remaining_route_weight_is_not_part_of_the_demo_policy(self) -> None:
+        # Spec section 8 is not implemented yet, so the policy must not pretend to score it.
+        policy = demo_provisional_policy()
+        self.assertEqual(
+            policy.weight(CostComponent.FIRST_STOP_REMAINING_ROUTE_WEIGHT), 0.0
+        )
+        self.assertIs(
+            policy.declaration(CostComponent.FIRST_STOP_REMAINING_ROUTE_WEIGHT).status,
+            ComponentStatus.PLANNED,
+        )
 
     def test_provider_dependent_components_cannot_be_scored(self) -> None:
         policy = empty_cost_policy()

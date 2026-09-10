@@ -1,13 +1,15 @@
-"""Route cost policy (decision D13, amended).
+"""Route cost policy (decision D13, amended; D16 capability honesty; D31 demo weights).
 
 The policy names every component the product will eventually score, and records its
-**implementation status**. Two rules make the policy honest rather than aspirational:
+**implementation status**. Three rules keep it honest rather than aspirational:
 
-1. no arbitrary weights are hardcoded at early stages - a policy with no weights is valid and
-   is the Stage 0 default;
-2. a weight may only be assigned to a component whose status is ``implemented``. Claiming to
-   score side-of-road or U-turns without road geometry is therefore impossible by construction
-   (D16, spec section 11).
+1. no arbitrary weights are hardcoded as product truth - the default policy carries no weights
+   at all;
+2. a weight may only be assigned to a component whose status is ``implemented``, so claiming to
+   score side-of-road or U-turns without road geometry is impossible by construction;
+3. the only weighted policy shipped at this stage is
+   :func:`demo_provisional_policy`, which is marked ``provisional`` and exists purely to
+   demonstrate the architecture on the demo scenario. Its numbers are **not** product decisions.
 
 The D13 amendment is encoded in the declarations: a **hard** service-window miss is an explicit
 ``Violation``, never a penalty. ``time_window_violation_penalty`` is declared as applying only to
@@ -27,9 +29,13 @@ __all__ = [
     "ComponentStatus",
     "CostComponent",
     "CostComponentDeclaration",
+    "DEFAULT_COMPONENT_DECLARATIONS",
+    "DEMO_PROVISIONAL_POLICY_NAME",
+    "DEMO_TRAVEL_TIME_WEIGHT",
+    "DEMO_WAITING_TIME_WEIGHT",
     "RouteCostPolicy",
-    "STAGE0_COMPONENT_DECLARATIONS",
     "default_component_declarations",
+    "demo_provisional_policy",
     "empty_cost_policy",
 ]
 
@@ -89,30 +95,29 @@ def _declaration(
     return CostComponentDeclaration(component, status, requires, note)
 
 
-#: Stage 0 capability table. Nothing is implemented yet, so nothing may be weighted.
-STAGE0_COMPONENT_DECLARATIONS: tuple[CostComponentDeclaration, ...] = (
+#: Capability table. "implemented" means engine code computes and scores it today.
+DEFAULT_COMPONENT_DECLARATIONS: tuple[CostComponentDeclaration, ...] = (
     _declaration(
         CostComponent.TRAVEL_TIME,
-        ComponentStatus.PLANNED,
-        "travel time is computed per leg in the timeline; using it as an objective term is "
-        "part of the optimizer stage",
+        ComponentStatus.IMPLEMENTED,
+        "computed per leg by core.time.timeline and scored by core.engine.cost",
     ),
     _declaration(
         CostComponent.DISTANCE,
-        ComponentStatus.PLANNED,
-        "distance comes from the travel matrix; using it as an objective term is part of the "
-        "optimizer stage",
+        ComponentStatus.IMPLEMENTED,
+        "provided by the travel matrix and carried in the cost breakdown; the demo policy "
+        "leaves its weight at 0",
     ),
     _declaration(
         CostComponent.WAITING_TIME,
-        ComponentStatus.PLANNED,
-        "waiting time is computed per stop in the timeline; scoring it is an optimizer concern",
+        ComponentStatus.IMPLEMENTED,
+        "computed per stop by core.time.timeline and scored by core.engine.cost",
     ),
     _declaration(
         CostComponent.EARLY_ARRIVAL_PENALTY,
         ComponentStatus.PLANNED,
-        "early arrival is allowed and normally shows up as waiting_time; a separate penalty "
-        "needs an explicit product decision",
+        "early arrival already shows up as waiting_time; a separate penalty needs an explicit "
+        "product decision",
     ),
     _declaration(
         CostComponent.LATE_ARRIVAL_PENALTY,
@@ -148,34 +153,35 @@ STAGE0_COMPONENT_DECLARATIONS: tuple[CostComponentDeclaration, ...] = (
     _declaration(
         CostComponent.PRIORITY_PENALTY,
         ComponentStatus.PLANNED,
-        "priority is stored on the stop; turning it into an objective term is an optimizer "
-        "concern with configurable weights",
+        "priority is stored on the stop; turning it into an objective term needs an explicit "
+        "product decision about how much a priority is worth",
     ),
     _declaration(
         CostComponent.FINISH_DIRECTION_PENALTY,
         ComponentStatus.PLANNED,
-        "direction relative to FINISH is computable from the matrix once the optimizer exists",
+        "needs the remaining route relative to FINISH, which arrives with the optimizer",
     ),
     _declaration(
         CostComponent.FIRST_STOP_REMAINING_ROUTE_WEIGHT,
         ComponentStatus.PLANNED,
-        "the quality of a first-stop candidate must include the route after it (spec section 8); "
-        "implemented with the first-stop selector",
+        "spec section 8 requires candidate quality to include the route AFTER the candidate; on "
+        "the first leg alone every candidate arriving before opening scores identically, so this "
+        "term is what makes the choice structural rather than a weight-tuning artefact",
     ),
 )
 
 
 def default_component_declarations() -> dict[CostComponent, CostComponentDeclaration]:
-    """Stage 0 capability table as a fresh mapping."""
-    return {declaration.component: declaration for declaration in STAGE0_COMPONENT_DECLARATIONS}
+    """Capability table as a fresh mapping."""
+    return {declaration.component: declaration for declaration in DEFAULT_COMPONENT_DECLARATIONS}
 
 
 @dataclass(frozen=True)
 class RouteCostPolicy:
     """Configurable scoring policy.
 
-    Stage 0 ships **no weights**: an empty policy is honest, whereas invented numbers would
-    silently become product truth (spec section 10).
+    ``provisional`` marks weight sets that exist to demonstrate the architecture and must not be
+    read as product truth (D31).
     """
 
     name: str
@@ -183,6 +189,8 @@ class RouteCostPolicy:
     declarations: Mapping[CostComponent, CostComponentDeclaration] = field(
         default_factory=default_component_declarations
     )
+    provisional: bool = False
+    notes: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -257,12 +265,57 @@ class RouteCostPolicy:
     def describe(self) -> str:
         if not self.weights:
             return f"{self.name} (no weights configured yet)"
-        parts = [f"{component.value}={weight:g}" for component, weight in sorted(
-            self.weights.items(), key=lambda item: item[0].value
-        )]
-        return f"{self.name} ({', '.join(parts)})"
+        parts = [
+            f"{component.value}={weight:g}"
+            for component, weight in sorted(self.weights.items(), key=lambda item: item[0].value)
+        ]
+        suffix = " - PROVISIONAL DEMO WEIGHTS, not product truth" if self.provisional else ""
+        return f"{self.name} ({', '.join(parts)}){suffix}"
 
 
-def empty_cost_policy(name: str = "stage0_no_weights") -> RouteCostPolicy:
-    """A policy with the Stage 0 capability table and no weights."""
+def empty_cost_policy(name: str = "default_no_weights") -> RouteCostPolicy:
+    """A policy with the capability table and no weights."""
     return RouteCostPolicy(name=name)
+
+
+#: Name of the only weighted policy in the project at this stage.
+DEMO_PROVISIONAL_POLICY_NAME = "demo_provisional_v1"
+
+#: Relative cost of driving one second (the base unit of the demo objective).
+DEMO_TRAVEL_TIME_WEIGHT = 1.0
+
+#: Relative cost of one second of waiting, in demo units.
+#:
+#: PROVISIONAL. A ratio is unavoidable here: for any stop that arrives before opening,
+#: ``travel + waiting`` is constant (both equal "time from departure until the window opens"), so
+#: at a 1:1 ratio every such candidate scores identically and the ranking degenerates into a
+#: tie-break. That degeneracy is exactly why spec section 8 requires candidate quality to include
+#: the remaining route, which arrives with the optimizer. Until then the demo uses a clearly
+#: marked ratio to separate candidates, and the demo report shows the sensitivity to it.
+DEMO_WAITING_TIME_WEIGHT = 2.0
+
+
+def demo_provisional_policy(
+    *,
+    travel_time_weight: float = DEMO_TRAVEL_TIME_WEIGHT,
+    waiting_time_weight: float = DEMO_WAITING_TIME_WEIGHT,
+) -> RouteCostPolicy:
+    """The demo objective: driving time plus waiting time, weighted.
+
+    PROVISIONAL AND NOT PRODUCT TRUTH (D31). It exists so that the demo can separate first-stop
+    candidates and show that waiting time affects route cost. ``distance``, priorities and the
+    remaining-route weight are deliberately not part of it.
+    """
+    return RouteCostPolicy(
+        name=DEMO_PROVISIONAL_POLICY_NAME,
+        weights={
+            CostComponent.TRAVEL_TIME: travel_time_weight,
+            CostComponent.WAITING_TIME: waiting_time_weight,
+        },
+        provisional=True,
+        notes=(
+            "Provisional demo objective. Weights are illustrative, chosen to demonstrate the "
+            "architecture, and are expected to change once the remaining-route term (spec "
+            "section 8) and real routing data exist."
+        ),
+    )

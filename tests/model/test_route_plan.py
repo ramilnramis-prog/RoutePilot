@@ -19,7 +19,7 @@ from core.model.order_override import (
 )
 from core.model.route_plan import RoutePlan
 from core.model.route_stop import RouteStop
-from core.model.service_window import ServiceWindow
+from core.model.service_window import ServiceWindow, WindowEndPolicy
 from core.model.value_objects import GeoPoint, PlaceRef
 from core.time import tzdata
 from core.validation.errors import (
@@ -257,6 +257,33 @@ class FingerprintTests(unittest.TestCase):
             self.fingerprint(plan),
             self.fingerprint(plan, matrix_fingerprint="traffic-v2"),
         )
+
+    def test_window_end_policy_changes_fingerprint(self) -> None:
+        # Interpreting 'closes at' differently changes feasibility, so AUTO must re-evaluate.
+        base = sample_plan()
+        relaxed = build_plan(
+            stop(ENABLED, 55.80, 37.70, priority=1),
+            stop(ENABLED2, 55.90, 37.80),
+            stop(DISABLED, 55.85, 37.75, enabled=False),
+            window_end_policy=WindowEndPolicy.SERVICE_START_BEFORE_END,
+        )
+        self.assertNotEqual(self.fingerprint(base), self.fingerprint(relaxed))
+
+    def test_stop_level_window_end_policy_changes_fingerprint(self) -> None:
+        base = sample_plan()
+        with_override = build_plan(
+            dataclasses.replace(
+                stop(ENABLED, 55.80, 37.70, priority=1),
+                service_window=ServiceWindow.fixed(
+                    time(8, 0),
+                    time(18, 0),
+                    window_end_policy=WindowEndPolicy.SERVICE_START_BEFORE_END,
+                ),
+            ),
+            stop(ENABLED2, 55.90, 37.80),
+            stop(DISABLED, 55.85, 37.75, enabled=False),
+        )
+        self.assertNotEqual(self.fingerprint(base), self.fingerprint(with_override))
 
 
 if __name__ == "__main__":

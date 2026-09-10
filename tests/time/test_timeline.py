@@ -11,7 +11,7 @@ import unittest
 from datetime import time, timedelta
 
 from core.model.ids import StopId
-from core.model.service_window import ServiceWindow
+from core.model.service_window import ServiceWindow, WindowEndPolicy
 from core.model.solution import Feasibility, TimelineFlag, ViolationKind
 from core.time.timeline import compute_timeline, resolve_service_duration
 from core.validation.errors import (
@@ -128,11 +128,129 @@ class ScenarioTests(TimelineTestCase):
         self.assertEqual(timelines[1].departure_from_previous, timelines[0].estimated_departure)
 
 
+class WindowEndPolicyTests(TimelineTestCase):
+    """D29: 'closes at' is an explicit choice, not an implicit assumption."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Arrives 08:50, 20 minutes of service -> finishes 09:10 against a 09:00 closing time.
+        self.stop = stop_after(
+            4 * T + 50 * M,
+            "overtime",
+            window=ServiceWindow.fixed(time(8, 0), time(9, 0)),
+            service_duration=20 * M,
+        )
+
+    def test_finishing_after_closing_is_infeasible_under_the_default_finish_policy(self) -> None:
+        plan = build_plan(self.stop)
+        self.assertIs(
+            plan.window_end_policy, WindowEndPolicy.SERVICE_FINISH_BEFORE_END
+        )
+        result = self.timeline_for(plan, "overtime")
+        timeline = result.timelines[0]
+        self.assertEqual(timeline.service_start, utc(2026, 9, 11, 5, 50))  # 08:50
+        self.assertEqual(timeline.finish_overtime, 10 * M)
+        self.assertEqual(timeline.lateness, 10 * M)  # lateness == finish miss under this policy
+        self.assertIs(timeline.feasibility, Feasibility.INFEASIBLE)
+        self.assertTrue(result.has_infeasible_windows)
+
+    def test_finishing_after_closing_is_informational_under_the_start_policy(self) -> None:
+        plan = build_plan(
+            self.stop, window_end_policy=WindowEndPolicy.SERVICE_START_BEFORE_END
+        )
+        result = self.timeline_for(plan, "overtime")
+        timeline = result.timelines[0]
+        self.assertEqual(timeline.lateness, 0)  # starting inside the window is enough
+        self.assertEqual(timeline.finish_overtime, 10 * M)  # still recorded as information
+        self.assertIs(timeline.feasibility, Feasibility.FEASIBLE)
+        self.assertFalse(result.has_infeasible_windows)
+
+    def test_starting_at_the_closing_minute_is_infeasible_under_the_default_policy(self) -> None:
+        # Service starts exactly at 08:30 but would finish at 08:40, after closing.
+        plan = build_plan(
+            stop_after(4 * T + 30 * M, "edge", window=ServiceWindow.fixed(time(8, 0), time(8, 30)))
+        )
+        timeline = self.timeline_for(plan, "edge").timelines[0]
+        self.assertEqual(timeline.start_lateness, 0)
+        self.assertEqual(timeline.finish_overtime, 10 * M)
+        self.assertIs(timeline.feasibility, Feasibility.INFEASIBLE)
+
+    def test_starting_at_the_closing_minute_is_feasible_under_the_start_policy(self) -> None:
+        plan = build_plan(
+            stop_after(4 * T + 30 * M, "edge", window=ServiceWindow.fixed(time(8, 0), time(8, 30))),
+            window_end_policy=WindowEndPolicy.SERVICE_START_BEFORE_END,
+        )
+        timeline = self.timeline_for(plan, "edge").timelines[0]
+        self.assertEqual(timeline.lateness, 0)
+        self.assertEqual(timeline.finish_overtime, 10 * M)
+        self.assertIs(timeline.feasibility, Feasibility.FEASIBLE)
+
+    def test_a_stop_override_beats_the_plan_default(self) -> None:
+        window = ServiceWindow.fixed(
+            time(8, 0),
+            time(9, 0),
+            window_end_policy=WindowEndPolicy.SERVICE_START_BEFORE_END,
+        )
+        plan = build_plan(
+            stop_after(
+                4 * T + 50 * M, "override", window=window, service_duration=20 * M
+            )
+        )
+        self.assertIs(plan.window_end_policy, WindowEndPolicy.SERVICE_FINISH_BEFORE_END)
+        timeline = self.timeline_for(plan, "override").timelines[0]
+        self.assertIs(timeline.window_end_policy, WindowEndPolicy.SERVICE_START_BEFORE_END)
+        self.assertIs(timeline.feasibility, Feasibility.FEASIBLE)
+
+    def test_plan_default_applies_when_a_stop_has_no_override(self) -> None:
+        plan = build_plan(
+            self.stop, window_end_policy=WindowEndPolicy.SERVICE_START_BEFORE_END
+        )
+        self.assertIsNone(plan.stops[0].service_window.window_end_policy)
+        timeline = self.timeline_for(plan, "overtime").timelines[0]
+        self.assertIs(timeline.window_end_policy, WindowEndPolicy.SERVICE_START_BEFORE_END)
+
+    def test_specification_example_17_50_start_with_30_minutes_of_service(self) -> None:
+        # window 08:00-18:00, service 30m, service start 17:50 -> finishes 18:20.
+        # 13h50m of driving from 04:00 puts the ETA exactly at 17:50.
+        def plan_with(policy: WindowEndPolicy):
+            return build_plan(
+                stop_after(
+                    13 * T + 50 * M,
+                    "late-day",
+                    window=ServiceWindow.fixed(time(8, 0), time(18, 0)),
+                    service_duration=30 * M,
+                ),
+                window_end_policy=policy,
+            )
+
+        finish_plan = plan_with(WindowEndPolicy.SERVICE_FINISH_BEFORE_END)
+        finish_timeline = self.timeline_for(finish_plan, "late-day").timelines[0]
+        self.assertEqual(finish_timeline.service_start, utc(2026, 9, 11, 14, 50))  # 17:50
+        self.assertEqual(finish_timeline.estimated_departure, utc(2026, 9, 11, 15, 20))  # 18:20
+        self.assertEqual(finish_timeline.lateness, 20 * M)
+        self.assertIs(finish_timeline.feasibility, Feasibility.INFEASIBLE)
+
+        start_plan = plan_with(WindowEndPolicy.SERVICE_START_BEFORE_END)
+        start_timeline = self.timeline_for(start_plan, "late-day").timelines[0]
+        self.assertEqual(start_timeline.lateness, 0)
+        self.assertEqual(start_timeline.finish_overtime, 20 * M)
+        self.assertIs(start_timeline.feasibility, Feasibility.FEASIBLE)
+
+    def test_free_windows_carry_no_end_policy(self) -> None:
+        for window in (ServiceWindow.unrestricted(), ServiceWindow.unknown()):
+            plan = build_plan(stop_after(45 * M, "free", window=window))
+            timeline = self.timeline_for(plan, "free").timelines[0]
+            self.assertIsNone(timeline.window_end_policy)
+            self.assertEqual(timeline.lateness, 0)
+            self.assertEqual(timeline.finish_overtime, 0)
+
+
 class InfeasibilityTests(TimelineTestCase):
     """A hard window miss is an explicit violation, never a hidden penalty (D13 amendment)."""
 
     def test_late_arrival_is_an_explicit_violation(self) -> None:
-        # Window 08:00-08:30, five hours of driving: earliest service start is 09:00.
+        # Window 08:00-08:30, five hours of driving, 10 minutes of service:
+        # earliest service start is 09:00 and it would finish 09:10, i.e. 40 minutes after closing.
         plan = build_plan(
             stop_after(5 * T, "tight", window=ServiceWindow.fixed(time(8, 0), time(8, 30)))
         )
@@ -140,40 +258,36 @@ class InfeasibilityTests(TimelineTestCase):
         timeline = result.timelines[0]
 
         self.assertEqual(timeline.estimated_arrival, utc(2026, 9, 11, 6, 0))  # 09:00 Moscow
-        self.assertEqual(timeline.lateness, 30 * M)
+        self.assertEqual(timeline.finish_overtime, 40 * M)
+        self.assertEqual(timeline.lateness, 40 * M)
         self.assertIs(timeline.feasibility, Feasibility.INFEASIBLE)
         self.assertTrue(result.has_infeasible_windows)
         self.assertEqual(result.infeasible_stop_ids, ("tight",))
         self.assertEqual(len(result.violations), 1)
         self.assertIs(result.violations[0].kind, ViolationKind.TIME_WINDOW_INFEASIBLE)
-        self.assertIn("cannot begin within the permitted window", result.violations[0].message)
+        self.assertIn("cannot be served within the permitted window", result.violations[0].message)
 
-    def test_service_starting_at_the_closing_minute_is_not_infeasible(self) -> None:
-        # Starting exactly at the last permitted minute is inside the window.
+    def test_violation_message_names_the_applied_policy(self) -> None:
         plan = build_plan(
-            stop_after(4 * T + 30 * M, "edge", window=ServiceWindow.fixed(time(8, 0), time(8, 30)))
+            stop_after(5 * T, "tight", window=ServiceWindow.fixed(time(8, 0), time(8, 30)))
         )
-        timeline = self.timeline_for(plan, "edge").timelines[0]
-        self.assertEqual(timeline.lateness, 0)
-        self.assertIs(timeline.feasibility, Feasibility.FEASIBLE)
+        message = self.timeline_for(plan, "tight").violations[0].message
+        self.assertIn(WindowEndPolicy.SERVICE_FINISH_BEFORE_END.value, message)
 
-    def test_service_finishing_after_closing_is_information_not_infeasibility(self) -> None:
-        # Window 08:00-09:00, arrive 08:50, 20 minutes of service -> overtime only.
-        plan = build_plan(
-            stop_after(
-                4 * T + 50 * M,
-                "overtime",
-                window=ServiceWindow.fixed(time(8, 0), time(9, 0)),
-                service_duration=20 * M,
-            )
+        reverse_plan = build_plan(
+            stop_after(5 * T, "tight", window=ServiceWindow.fixed(time(8, 0), time(8, 30))),
+            window_end_policy=WindowEndPolicy.SERVICE_START_BEFORE_END,
         )
-        result = self.timeline_for(plan, "overtime")
-        timeline = result.timelines[0]
-        self.assertEqual(timeline.service_start, utc(2026, 9, 11, 5, 50))
-        self.assertEqual(timeline.lateness, 0)
-        self.assertEqual(timeline.overtime, 10 * M)
-        self.assertIs(timeline.feasibility, Feasibility.FEASIBLE)
-        self.assertFalse(result.has_infeasible_windows)
+        reverse_message = self.timeline_for(reverse_plan, "tight").violations[0].message
+        self.assertIn(WindowEndPolicy.SERVICE_START_BEFORE_END.value, reverse_message)
+
+    def test_explicit_violation_is_never_a_score(self) -> None:
+        # The timeline reports infeasibility as a Violation object; there is no penalty field.
+        plan = build_plan(
+            stop_after(5 * T, "tight", window=ServiceWindow.fixed(time(8, 0), time(8, 30)))
+        )
+        timeline = self.timeline_for(plan, "tight").timelines[0]
+        self.assertFalse(hasattr(timeline, "penalty"))
 
 
 class WindowKindTests(TimelineTestCase):

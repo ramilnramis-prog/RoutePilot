@@ -38,7 +38,7 @@ core/
   model/
     ids.py             StopId, PlanId, RunId
     value_objects.py   Instant, DurationSec, GeoPoint, PlaceRef, DataProvenance
-    service_window.py  WindowKind, ServiceWindow (value object, D28)
+    service_window.py  WindowKind, WindowEndPolicy, ServiceWindow (value object, D28/D29)
     route_stop.py      GeocodeStatus, ServiceStatus, RouteStop
     route_plan.py      RoutePlan + invariant validation + order validation
     order_override.py  OrderConstraint, OrderOverrides (generic, D21)
@@ -54,10 +54,22 @@ core/
     timeline.py        ETA / waiting / service start / departure / lateness (spec §7)
   engine/
     providers.py       TravelMatrix / RoutingProvider / GeocodingProvider Protocols
-                       + capability records (D15/D16)  -- interfaces only in Stage 0
+                       + capability records (D15/D16)
+    cost.py            weighted scoring over implemented components (D13, D31)
+    first_stop/
+      evaluation.py    first-stop candidate timing, cost breakdown, deterministic ranking
   validation/
     errors.py          error taxonomy (D26)
+
+demo/
+  dataset.py           deterministic ~30-stop demo plan (DEMO/SYNTHETIC, spec section 24)
+  synthetic_matrix.py  deterministic synthetic travel matrix (DEMO/SYNTHETIC)
+  report.py            numeric demo report: `python -m demo.report`
 ```
+
+Stage status: `core/model`, `core/time`, `core/validation` and `core/engine/providers.py` are
+Stage 0; `core/engine/cost.py`, `core/engine/first_stop/evaluation.py` and `demo/` are Stage 1.
+There is still no optimizer, no storage code, no API and no UI.
 
 ## 3. Domain model
 
@@ -76,6 +88,8 @@ core/
 
 - `fixed` → `start_local` and `end_local` both required, and `start_local < end_local`;
 - `unrestricted` / `unknown` → both are `None`;
+- `window_end_policy` may only be set on a `fixed` window; `None` means "inherit the plan default"
+  (D29);
 - any other combination raises `InvalidServiceWindowError`.
 
 `unknown` and `unrestricted` both mean "no waiting, no lateness, no invented hours", but they are
@@ -101,8 +115,9 @@ half-modelled).
 
 ```
 id, timezone (IANA), departure (PlaceRef START), departure_time (Instant),
-finish (PlaceRef FINISH), route_mode, first_service_stop (FirstStopIntent),
-order_overrides (OrderOverrides), cost_policy, stops, default_service_duration
+finish (PlaceRef FINISH), route_mode, window_end_policy (D29),
+first_service_stop (FirstStopIntent), order_overrides (OrderOverrides),
+cost_policy, stops, default_service_duration
 ```
 
 Structural invariants (D10):
@@ -161,17 +176,25 @@ No constraint solver is built at Stage 0.
 ### 3.6 Cost policy (D13, amended)
 
 `RouteCostPolicy` = name + `weights: Mapping[CostComponent, float]` + per-component
-`ComponentStatus`. Stage 0 ships **no weights**: an empty policy is honest, whereas default numbers
-would become product truth by accident.
+`ComponentStatus` + a `provisional` marker. The default policy ships **no weights**: an empty
+policy is honest, whereas invented numbers would become product truth by accident.
 
 Component statuses make capability honesty machine-checkable (D16):
 
-- `implemented` — safe to use today;
-- `planned` — declared in the spec, not implemented;
+- `implemented` — engine code computes and scores it today: `travel_time`, `waiting_time`,
+  `distance`;
+- `planned` — declared in the spec, not implemented: early/late penalties, soft-window violation
+  penalty, priority, finish direction, and `first_stop_remaining_route_weight`;
 - `requires_provider` — cannot be computed without information the domain does not have.
   `wrong_side_penalty`, `u_turn_penalty`, `backtracking_penalty` are `requires_provider`
   (road geometry / direction), which is what prevents fake side-of-road logic from creeping into
   the objective (spec §11).
+
+A weight may only be assigned to an `implemented` component; anything else raises
+`UnsupportedFeatureError`. The only weighted policy is `demo_provisional_v1`
+(`travel_time = 1`, `waiting_time = 2`, marked `provisional`), whose numbers are explicitly not
+product truth (D31). Scoring itself is one function, `core.engine.cost.score_breakdown`, so the
+objective stays visible and testable.
 
 ## 4. Time model
 
@@ -197,7 +220,7 @@ resolve_local(window_local_time, service_date, tz):
 - Overnight windows (`end_local <= start_local`) are rejected in Stage 0 (Open item 1 in
   `DECISIONS.md`).
 
-## 5. Timeline semantics (spec §7)
+## 5. Timeline semantics (spec §7, D29)
 
 For each stop, in order, starting from `departure_time` at the departure location:
 
@@ -209,20 +232,61 @@ fixed window:  waiting_time = max(0, window_start - estimated_arrival)
 unrestricted/unknown: waiting_time = 0, service_start = estimated_arrival
 service_duration     = stop.service_duration or plan.default_service_duration (else error)
 estimated_departure  = service_start + service_duration
-lateness             = max(0, service_start - window_end)     # > 0  <=> cannot begin inside window
-overtime             = max(0, estimated_departure - window_end)  # informational only
+start_lateness       = max(0, service_start - window_end)
+finish_overtime      = max(0, estimated_departure - window_end)
+lateness             = finish_overtime                     # under service_finish_before_end
+                     | start_lateness                      # under service_start_before_end
 feasibility          = infeasible iff lateness > 0, else feasible
 ```
 
-Key semantics, decided in D13's amendment:
+The arithmetic lives in `compute_stop_timeline`, used both by the chained `compute_timeline` and by
+first-stop candidate evaluation, so a candidate's first leg and a real route leg cannot drift apart.
 
-- a **hard** fixed window is met or violated — never "penalised a bit";
-- `lateness > 0` produces an explicit `Violation(kind='time_window_infeasible')` attached to the
-  stop **and** to the solution, whose status becomes `has_infeasible_windows`;
-- service finishing after closing time records `overtime` as information; it is not an
-  infeasibility and not a weight, because soft windows do not exist yet;
+Key semantics:
+
+- the meaning of the window **end** is explicit (D29): with the default `service_finish_before_end`
+  a stop that would finish after closing is infeasible; with `service_start_before_end` beginning
+  service in time is enough and the overrun is recorded as `finish_overtime` information only;
+- `lateness` is the miss measured under the applied policy, so `lateness > 0` always means the same
+  thing: the stop cannot be served within its permitted window;
+- a **hard** window miss produces an explicit `Violation(kind='time_window_infeasible')` attached to
+  the stop and to the solution, whose status becomes `has_infeasible_windows` (D13 amendment);
 - `window_kind='unknown'` raises no violation — it raises a timeline flag (`window_unknown`) so the
   driver sees "hours unknown" instead of silently treated-as-open.
+
+### 5.1 First-stop candidate evaluation (Stage 1)
+
+`core.engine.first_stop.evaluate_first_stop_candidates` times and prices **every** possible first
+stop with the same per-leg arithmetic as a real route leg, and returns a
+`FirstStopEvaluationReport`:
+
+- `ranked` — feasible candidates ordered by `(score, travel_time, stop_id)`. The explicit tie-break
+  keeps results reproducible even when a weight set cannot separate candidates;
+- `infeasible` — candidates whose hard window cannot be met, each with its explicit `Violation`.
+  They are **never** ranked and never become the preferred stop, even when their score is the
+  lowest of all candidates;
+- `disabled_stop_ids` — excluded stops, reported rather than silently dropped.
+
+What this deliberately is **not**: it does not select, pin, persist or explain a decision. Those
+belong to Stage 2, together with `inputs_fingerprint`-driven recomputation. Spec §8 requires
+candidate quality to include the route *after* the candidate; that term is declared `planned`, and
+`remaining_route_estimate` is `None` rather than approximated. The reason is measurable: for every
+candidate arriving before opening, `travel + waiting` is fixed by the opening time, so at a 1:1
+weight ratio they tie exactly. The demo report shows that degeneracy explicitly, which is why the
+demo weights are marked provisional (D31).
+
+### 5.2 Demo data and provenance (Stage 1)
+
+`demo/dataset.py` builds a deterministic, ~30-stop demo plan (departure 04:00, many customers
+opening 08:00, mixed window kinds, priorities, one disabled stop, one stop without a service
+duration). `demo/synthetic_matrix.py` provides a deterministic synthetic matrix (1 coordinate
+degree = 1 hour) carrying `DataProvenance.DEMO_SYNTHETIC` and **empty** provider capabilities.
+
+`demo/report.py` (`python -m demo.report`) prints the whole numeric story: input order, notable
+first-leg timelines, all candidate costs, the top 5, why the winner is neither nearest nor
+farthest, the departure-time sweep, waiting-weight sensitivity, the window-end-policy comparison
+and the unknown-hours caveat. Synthetic data is labelled everywhere and the report never presents
+it as road routing.
 
 ## 6. Errors vs violations (D26)
 
@@ -275,14 +339,14 @@ visible attribution; `core/` never references them.
 | 1, 2 | `tests/model/test_route_plan.py` (model invariants), timeline tests |
 | 3, 4, 17 | `validate_order` tests (exactly-once, no disabled, no loss/duplication) |
 | 5, 6 | `tests/model/test_first_stop.py` (pinned first stop; Lock keeps provenance) |
-| 7–10 | Stage 2 (selector) — intent/resolution semantics already covered by model tests |
+| 7–10 | `tests/engine/test_first_stop_evaluation.py` (A/B/C criteria), `tests/demo/test_report.py` (sweep) |
 | 11–14 | `tests/time/test_timeline.py` |
 | 15, 16 | `tests/time/test_tz_strict_validation.py` |
 | 18 | Stage 2 (local search monotonicity) |
 | 19 | Stage 2/5 |
-| 20 | Stage 1/2 (golden demo route) |
+| 20 | `tests/demo/test_report.py` (report determinism, sweep determinism) |
 | 21 | Stage 3 (SQLite round-trip) |
-| — | `tests/test_core_isolation.py` (D1/§22), `tests/tools/test_doctor.py` (D12) |
+| — | `tests/test_core_isolation.py` (D1/§22), `tests/tools/test_doctor.py` (D12), `tests/engine/test_cost.py` (D13/D31), `tests/demo/*` (spec §24) |
 
 - The suite prints a warning and uses a detected system TZif tree when `tzdata` is unavailable, so
   the DST tests are meaningful on an offline machine; the real fix remains `pip install tzdata`.
@@ -291,14 +355,14 @@ visible attribution; `core/` never references them.
 
 | Stage | Extension |
 |---|---|
-| 1 | cost weights, demo dataset (~30 stops), synthetic matrix, 04:00/08:00 scenario |
-| 2 | first-stop selector (candidates → scoring → selection), optimizer (seed + local search), top-K explanation |
-| 3 | SQLite repositories behind the schema proposal |
+| 1 (done) | cost scoring over implemented components, demo dataset, synthetic matrix, 04:00/08:00 scenario, candidate evaluation, numeric demo report |
+| 2 | first-stop selection + provenance/pinning + `inputs_fingerprint` recomputation, optimizer (seed + local search), remaining-route term, top-K explanation |
+| 3 | SQLite repositories behind the approved schema |
 | 4 | API transport + web UI (map, timeline panel, summary, override controls) |
 | 5 | reoptimization after each served stop, active-leg protection groundwork |
 
-## 10. Explicit Stage 0 non-goals
+## 10. Explicit non-goals of the current stages
 
-No optimizer, no scoring, no cost weights, no first-stop selection, no demo dataset, no SQLite
-code, no API, no UI, no geocoding, no routing, no traffic, no side-of-road logic, no active-leg
-handling, no LLM integration.
+Stage 0 and Stage 1 deliberately contain no optimizer, no route selection, no pinning, no demo UI,
+no SQLite code, no API, no geocoding, no routing provider, no traffic, no side-of-road logic, no
+active-leg handling and no LLM integration.

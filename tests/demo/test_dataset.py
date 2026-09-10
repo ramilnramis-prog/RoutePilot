@@ -1,0 +1,100 @@
+"""Deterministic demo dataset (spec section 24)."""
+
+from __future__ import annotations
+
+import unittest
+
+from core.model.route_stop import GeocodeStatus
+from core.time import tzdata, tz
+from demo.dataset import (
+    DEMO_DEFAULT_SERVICE_DURATION,
+    DEMO_DEPARTURE_TIME,
+    DEMO_TIMEZONE,
+    DEMO_WARNING,
+    HEADLINE_STOP_IDS,
+    build_demo_plan,
+    demo_departure_time_at,
+    demo_warning_text,
+)
+
+
+class DemoDatasetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.plan = build_demo_plan()
+
+    def test_dataset_has_about_thirty_service_stops(self) -> None:
+        self.assertGreaterEqual(len(self.plan.stops), 30)
+
+    def test_exactly_one_stop_is_disabled_and_excluded(self) -> None:
+        self.assertEqual(len(self.plan.disabled_stops()), 1)
+        self.assertEqual(self.plan.disabled_stops()[0].id, HEADLINE_STOP_IDS["disabled"])
+        self.assertNotIn(
+            HEADLINE_STOP_IDS["disabled"],
+            [stop.id for stop in self.plan.active_stops()],
+        )
+
+    def test_departure_is_four_in_the_morning_local_time(self) -> None:
+        self.assertEqual(self.plan.departure_time, DEMO_DEPARTURE_TIME)
+        zone = tzdata.load_timezone(DEMO_TIMEZONE)
+        local = tz.to_local(self.plan.departure_time, zone)
+        self.assertEqual((local.hour, local.minute), (4, 0))
+
+    def test_local_departure_helper_matches_the_dataset(self) -> None:
+        self.assertEqual(demo_departure_time_at(4), DEMO_DEPARTURE_TIME)
+        self.assertNotEqual(demo_departure_time_at(7), DEMO_DEPARTURE_TIME)
+
+    def test_every_enabled_stop_is_geocoded_and_located(self) -> None:
+        for stop in self.plan.active_stops():
+            self.assertIs(stop.geocode_status, GeocodeStatus.RESOLVED)
+            self.assertIsNotNone(stop.location)
+
+    def test_several_customers_open_at_eight(self) -> None:
+        opening_at_eight = [
+            stop
+            for stop in self.plan.active_stops()
+            if stop.service_window.is_fixed
+            and stop.service_window.describe().startswith("08:00-")
+        ]
+        self.assertGreaterEqual(len(opening_at_eight), 5)
+
+    def test_dataset_covers_every_window_kind(self) -> None:
+        kinds = {stop.service_window.window_kind.value for stop in self.plan.stops}
+        self.assertEqual(kinds, {"fixed", "unrestricted", "unknown"})
+
+    def test_dataset_contains_priorities_and_an_unknown_duration(self) -> None:
+        self.assertTrue(any(stop.priority is not None for stop in self.plan.stops))
+        self.assertTrue(any(stop.service_duration is None for stop in self.plan.stops))
+        self.assertEqual(self.plan.default_service_duration, DEMO_DEFAULT_SERVICE_DURATION)
+
+    def test_headline_stops_exist(self) -> None:
+        ids = {stop.id for stop in self.plan.stops}
+        for role, stop_id in HEADLINE_STOP_IDS.items():
+            with self.subTest(role=role):
+                self.assertIn(stop_id, ids)
+
+    def test_build_is_deterministic(self) -> None:
+        first = build_demo_plan()
+        second = build_demo_plan()
+        self.assertEqual(first, second)
+        self.assertEqual(first.inputs_fingerprint(), second.inputs_fingerprint())
+
+    def test_departure_time_change_produces_a_different_fingerprint(self) -> None:
+        shifted = build_demo_plan(departure_time=demo_departure_time_at(7))
+        self.assertNotEqual(
+            self.plan.inputs_fingerprint(), shifted.inputs_fingerprint()
+        )
+
+    def test_data_is_labelled_as_synthetic(self) -> None:
+        self.assertIn("DEMO", DEMO_WARNING)
+        self.assertIn("SYNTHETIC", DEMO_WARNING)
+        self.assertIn("not real routing", DEMO_WARNING)
+        self.assertEqual(demo_warning_text(), DEMO_WARNING)
+
+    def test_start_and_finish_are_not_service_stops(self) -> None:
+        stop_ids = {stop.id for stop in self.plan.stops}
+        self.assertNotIn(self.plan.departure.label, stop_ids)
+        self.assertNotIn(self.plan.finish.label, stop_ids)
+
+
+if __name__ == "__main__":
+    unittest.main()
