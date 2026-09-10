@@ -253,23 +253,56 @@ class StopTimeline:
 
 @dataclass(frozen=True)
 class RouteMetrics:
-    """Distance/duration summary of one route variant (D22).
+    """Complete-route summary of one route variant (v2 sections 12 and 15, D22).
 
-    ``duration_sec`` is the whole working duration: driving + waiting + service.
+    A **complete route** is ``START -> all enabled service stops -> FINISH``, and the final leg
+    from the last service stop to FINISH is **included** (v2 section 15). So ``travel_sec``
+    covers every driving leg, ``finish_arrival`` is when the driver actually arrives at FINISH,
+    and ``duration_sec`` is the whole working duration: driving + waiting + service.
+
+    ``duration_sec == travel_sec + waiting_sec + service_sec`` always holds. A missed hard
+    window is never folded into this figure as a numeric penalty: it is an explicit
+    :class:`Violation` and puts ``feasible`` at ``False`` (D13 amendment).
     """
 
     distance_m: float
     duration_sec: DurationSec
     waiting_sec: DurationSec
+    travel_sec: DurationSec
+    service_sec: DurationSec
+    finish_arrival: Instant
     feasible: bool
     baseline_kind: BaselineKind | None = None
 
     def __post_init__(self) -> None:
         if self.distance_m < 0:
             raise InvalidRoutePlanError("distance_m must be >= 0")
-        for field_name in ("duration_sec", "waiting_sec"):
-            if getattr(self, field_name) < 0:
+        for field_name in ("duration_sec", "waiting_sec", "travel_sec", "service_sec"):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise InvalidRoutePlanError(
+                    f"{field_name} must be whole seconds, got {value!r}"
+                )
+            if value < 0:
                 raise InvalidRoutePlanError(f"{field_name} must be >= 0")
+        if self.finish_arrival.tzinfo is None or self.finish_arrival.tzinfo.utcoffset(
+            self.finish_arrival
+        ) is None:
+            raise InvalidRoutePlanError(
+                "finish_arrival must be a timezone-aware instant (UTC in RoutePilot storage); a "
+                "naive datetime is a silent time-zone bug, not a guess (D2)"
+            )
+        object.__setattr__(
+            self,
+            "finish_arrival",
+            ensure_utc(self.finish_arrival, field_name="finish_arrival"),
+        )
+        if self.duration_sec != self.travel_sec + self.waiting_sec + self.service_sec:
+            raise InvalidRoutePlanError(
+                "duration_sec must equal travel_sec + waiting_sec + service_sec over the whole "
+                "route, FINISH leg included: elapsed time is the objective and infeasibility is "
+                "never hidden in it (v2 sections 12/15, D13 amendment)"
+            )
         if self.baseline_kind is not None and not isinstance(self.baseline_kind, BaselineKind):
             object.__setattr__(self, "baseline_kind", BaselineKind(self.baseline_kind))
 
