@@ -32,10 +32,34 @@ from core.engine.optimizer.route_problem import (
     RouteProblem,
     fast_evaluate,
 )
-from core.engine.optimizer.seed import greedy_seed
+from core.engine.optimizer.seed import SeedResult, build_seed
 from core.model.ids import StopId
 
-__all__ = ["OptimizedRoute", "optimize"]
+__all__ = ["OptimizationEvidence", "OptimizedRoute", "optimize"]
+
+
+@dataclass(frozen=True)
+class OptimizationEvidence:
+    """What one optimization run cost, phase by phase (v2 section 20 step 1: measure first).
+
+    ``seed_evaluations`` counts the candidate stops the seed priced, ``search_evaluations`` the
+    complete-route objective evaluations the local search verified, and ``screened_moves`` the
+    moves of the full neighbourhood its travel-delta ranking priced. All three are fixed counts, so
+    a repeated run reports identical evidence on any machine and at any speed; wall-clock time is
+    deliberately not part of it. Whether the search's deterministic evaluation bound cut a pass
+    short before the whole neighbourhood was evaluated is reported by
+    :attr:`LocalSearchResult.budget_exhausted`, never assumed away.
+    """
+
+    seed_evaluations: int
+    search_evaluations: int
+    screened_moves: int
+
+    def describe(self) -> str:
+        return (
+            f"seed priced {self.seed_evaluations} candidates; local search verified "
+            f"{self.search_evaluations} objectives after screening {self.screened_moves} moves"
+        )
 
 
 @dataclass(frozen=True)
@@ -45,7 +69,8 @@ class OptimizedRoute:
     ``evaluation`` is authoritative (v2 section 15 metrics, explicit violations).
     ``algorithm_evaluation`` is the greedy seed evaluated the same way: the ALGORITHM BASELINE of
     v2 section 30, kept for optimizer-quality diagnostics and never shown as the user's BEFORE
-    route (D22). ``local_search`` reports the accepted moves and the bounded evaluation count.
+    route (D22). ``local_search`` reports the accepted moves and the bounded evaluation count,
+    ``seed`` the seed's own evaluation count, and ``evidence`` both together.
     """
 
     order: tuple[StopId, ...]
@@ -53,6 +78,8 @@ class OptimizedRoute:
     algorithm_evaluation: RouteEvaluation
     local_search: LocalSearchResult
     cache_stats: CacheStats
+    seed: SeedResult = SeedResult(order=())
+    evidence: OptimizationEvidence = OptimizationEvidence(0, 0, 0)
 
     def __post_init__(self) -> None:
         order = tuple(self.order)
@@ -80,10 +107,11 @@ def optimize(problem: RouteProblem) -> OptimizedRoute:
     """Run the whole deterministic pipeline on a prepared problem.
 
     Deterministic: no wall-clock, no randomness and no network are involved, so an identical
-    :class:`RouteProblem` always produces an identical route, identical metrics and identical
-    accepted moves.
+    :class:`RouteProblem` always produces an identical route, identical metrics, identical
+    accepted moves and identical evaluation counts.
     """
-    seed_order: tuple[StopId, ...] = greedy_seed(problem) if problem.stop_count else ()
+    seed: SeedResult = build_seed(problem) if problem.stop_count else SeedResult(order=())
+    seed_order: tuple[StopId, ...] = seed.order
     seed_fast = fast_evaluate(problem, seed_order)
     search = improve(problem, seed_order)
     final_fast = fast_evaluate(problem, search.order)
@@ -103,6 +131,12 @@ def optimize(problem: RouteProblem) -> OptimizedRoute:
         algorithm_evaluation=algorithm_evaluation,
         local_search=search,
         cache_stats=problem.cache_stats,
+        seed=seed,
+        evidence=OptimizationEvidence(
+            seed_evaluations=seed.evaluations,
+            search_evaluations=search.evaluations,
+            screened_moves=search.screened_moves,
+        ),
     )
 
 

@@ -7,9 +7,9 @@ and unchanged. Precedence (v2 section 37): the current specification plus explic
 decisions in this registry control future implementation; this registry records *how* we decided to
 do it.
 
-- Registry revision: **D1–D33**, approved 2026-09-11 (Stage 0, extended during Stage 1; D4–D11
+- Registry revision: **D1–D34**, approved 2026-09-11 (Stage 0, extended during Stage 1; D4–D11
   amended when the AUTO semantics were revoked; D5/D9/D16 aligned with v2 sections 5, 14 and 23;
-  D33 added for `input_position`).
+  D33 added for `input_position`; D34 records the owner-accepted interim ~100-stop latency).
 - Status values: `approved` (settled), `amended` (settled with a recorded change), `deferred` (recorded, not implemented).
 
 ---
@@ -427,6 +427,28 @@ do it.
   the recommendation as stale (the recommendation does not depend on arrival order — v2 §7).
 - Status: `approved`. v2 §25, §30.
 
+## D34 — Interim ~100-stop exhaustive-latency limitation (owner decision)
+
+- **Owner decision (governing).** The measured latency of the exhaustive first-stop candidate loop
+  at ~100 stops (measured warm **~63–76 s** at **97 enabled stops**) is **accepted as an explicit,
+  recorded interim limitation**.
+- The v2 section 20 targets (preferred ≤ ~3 s, acceptable ≤ ~5 s for ~100 stops) are **not** met at
+  that scale. They remain *reported* engineering targets — v2 section 20 calls them **"engineering
+  targets, not correctness rules"** — and are never asserted as satisfied by the shipped loop.
+- **Search quality was deliberately preferred over the time target.** The full U2 neighbourhood and
+  the restored search quality stay: no approximation, **no candidate prefilter, no neighbourhood
+  span cut, no shortlist, no weight tuning**.
+- The **candidate set stays exhaustive**: the complete route of **every** eligible first-stop
+  candidate is evaluated, with no fixed-K prefilter. The per-candidate local search keeps its
+  **deterministic evaluation ceiling** (`max_evaluations` / `budget_exhausted`), which binds at
+  ~100 stops and truncates pass 1; a truncated pass is **reported** and is never claimed as
+  exhaustive verification of the search.
+- The 30-stop product demo stays inside the ≤ ~5 s acceptable target.
+- **Scheduled follow-up:** a dedicated later Stage 2 work unit builds an **incremental / delta
+  complete-route evaluator** to remove the ~100-stop latency. This decision is superseded when that
+  unit lands and the loop is re-benchmarked; meanwhile the interim latency is the accepted state.
+- Status: `approved`. Spec: §20.
+
 ---
 
 ## Stage gates
@@ -482,6 +504,10 @@ Recorded so nothing is silently dropped; each item is a real model or engine cha
    Targets for ~100 stops: ≤ ~3 s preferred, ≤ ~5 s acceptable. If the budget is exceeded: measure
    the bottleneck, improve caching/reuse/algorithm, benchmark again, and only then propose
    prefiltering or approximation as an explicit decision.
+   The ~100-stop loop currently exceeds that budget and is **accepted as an interim limitation**
+   (D34); removing the latency is scheduled to a dedicated later Stage 2 unit that builds an
+   incremental / delta complete-route evaluator. No prefilter or approximation is authorized
+   meanwhile.
 7. **Optimizer guarantees** (v2 §21): START fixed, FINISH fixed, driver-selected first stop fixed,
    every enabled stop exactly once, disabled stops excluded, hard-window feasibility explicit, no
    accepted local-search move may worsen the accepted objective, deterministic tie-breaking.

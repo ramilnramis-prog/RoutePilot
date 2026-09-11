@@ -149,5 +149,16 @@ class LegCache:
         self._hits = 0
         self._misses = 0
 
+    def reset_stats(self) -> None:
+        """Keep every memoized leg but restart the hit and miss counters.
+
+        This is how a benchmark measures *one phase* of a warm run (v2 section 20 step 1: measure
+        the bottleneck) without throwing away the warmed legs: the entries stay, so the phase still
+        gets the reuse the real caller gets, while its hits and misses describe that phase alone.
+        Deterministic: the counters are whole numbers that only ever move by a recorded question.
+        """
+        self._hits = 0
+        self._misses = 0
+
     def describe(self) -> str:
         return self.stats.describe()

@@ -324,6 +324,132 @@ class FastPathAgreementTests(unittest.TestCase):
         self.assertEqual(fast.violations, 0)
 
 
+class PreparedTravelTableTests(unittest.TestCase):
+    """The prepared travel tables hold real legs, and no pass reads a stale value (U3 fix 4).
+
+    The wider table the route passes read adds START's and FINISH's rows to the stop-to-stop
+    snapshot. FINISH's row used to be filled with a repeated FINISH-to-START leg - a fabricated
+    constant that was not the leg of the destination it sat under. These tests pin the two things
+    that must hold instead: every cell of the wider table is the leg the shared cache answers for
+    that pair (so FINISH's row is FINISH's own legs), and building the wider table never changes
+    what the stop-to-stop accessors return (so no reader gets a cell at the wrong stride).
+    """
+
+    def line_plan(self):
+        """Four enabled stops plus a disabled one, on the fixed synthetic matrix."""
+        return simple_plan(first_service_stop=chosen(STOP_A))
+
+    def prepare(self):
+        problem = problem_for(self.line_plan(), first=STOP_A)
+        return problem, len(problem.stop_ids)
+
+    def points_for(self, problem):
+        """The GeoPoint of every index of the wider table, in table order."""
+        points = list(problem.locations)
+        points.append(problem.departure_point)
+        points.append(problem.finish_point)
+        return points
+
+    def legs_through_cache(self, problem, origin: int, destination: int) -> int:
+        points = self.points_for(problem)
+        return problem.legs.travel_time_seconds(points[origin], points[destination])
+
+    def test_the_finish_row_holds_the_real_finish_legs_not_one_copied_leg(self) -> None:
+        problem, count = self.prepare()
+        table = problem._extended_travel_table()
+        sizes = count + 2
+        finish = problem.finish_index
+
+        row = tuple(table[finish * sizes + destination] for destination in range(sizes))
+        expected = tuple(
+            self.legs_through_cache(problem, finish, destination)
+            for destination in range(sizes)
+        )
+        self.assertEqual(
+            row,
+            expected,
+            "FINISH's row must be FINISH's own leg to each destination, asked of the shared cache",
+        )
+        # The old row was a single value repeated: a copy of FINISH -> START under every column.
+        start = problem.start_index
+        copied = self.legs_through_cache(problem, finish, start)
+        self.assertEqual(row[start], copied)
+        self.assertGreater(
+            len(set(row)),
+            1,
+            "FINISH's row is again a constant copied leg instead of the real legs",
+        )
+        self.assertNotEqual(
+            row[problem.stop_index[StopId("D")]],
+            copied,
+            "FINISH -> D must be its own leg, not FINISH -> START repeated",
+        )
+
+    def test_every_cell_of_the_wider_table_is_the_leg_the_shared_cache_answers(self) -> None:
+        problem, count = self.prepare()
+        table = problem._extended_travel_table()
+        sizes = count + 2
+
+        self.assertEqual(len(table), sizes * sizes)
+        for origin in range(sizes):
+            for destination in range(sizes):
+                with self.subTest(origin=origin, destination=destination):
+                    self.assertEqual(
+                        table[origin * sizes + destination],
+                        self.legs_through_cache(problem, origin, destination),
+                        "a route pass may read any cell of this table, so no cell may be "
+                        "fabricated, stale or copied from an unrelated leg",
+                    )
+
+    def test_building_the_wider_table_does_not_stale_the_stop_to_stop_accessors(self) -> None:
+        problem, count = self.prepare()
+        points = problem.locations
+
+        before = tuple(
+            problem.travel_between_indices(origin, destination)
+            for origin in range(count)
+            for destination in range(count)
+        )
+        # Build the wider table exactly as a route pass does.
+        problem._extended_travel_table()
+        after = tuple(
+            problem.travel_between_indices(origin, destination)
+            for origin in range(count)
+            for destination in range(count)
+        )
+
+        self.assertEqual(
+            len(problem.travel_time_table),
+            count * count,
+            "the stop-to-stop table must keep its own stride, not the wider table's",
+        )
+        self.assertEqual(before, after, "the wider table must not change the shorter one")
+        for origin in range(count):
+            for destination in range(count):
+                with self.subTest(origin=origin, destination=destination):
+                    self.assertEqual(
+                        problem.travel_between_indices(origin, destination),
+                        problem.legs.travel_time_seconds(
+                            points[origin], points[destination]
+                        ),
+                    )
+
+    def test_a_route_pass_agrees_with_the_authoritative_evaluation_after_the_wider_table(self) -> None:
+        # The end-to-end form of the same claim: the values a route pass reads out of the prepared
+        # tables produce the route the authoritative engine computes, FINISH leg included.
+        plan = self.line_plan()
+        problem = problem_for(plan, first=STOP_A)
+        seed = greedy_seed(problem)
+        result = improve(problem, seed)
+
+        fast = fast_evaluate(problem, result.order)
+        authoritative = evaluate_order(plan=plan, travel_matrix=problem.legs, order=result.order)
+
+        self.assertEqual(fast.finish_elapsed_sec, authoritative.metrics.duration_sec)
+        self.assertEqual(fast.travel_sec, authoritative.metrics.travel_sec)
+        self.assertEqual(fast.violations, len(authoritative.violations))
+
+
 class WindowPreparationTests(unittest.TestCase):
     """Preparing a problem never resolves a time the route cannot use (v2 section 21, D3/D29).
 
@@ -503,18 +629,35 @@ class SeedTests(unittest.TestCase):
         )
 
         # At 04:00 the 3h leg to FAR arrives exactly at its 08:00 opening, while NEAR costs 1h of
-        # driving plus 6h of waiting, so the complete-route objective picks the *farther* stop.
+        # driving plus 6h of waiting, so the waiting-aware objective picks the *farther* stop.
         early = greedy_seed(problem_for(waiting_plan(departure_hour=4), first=hub))
         self.assertEqual(early, (hub, far, near))
 
-        # Leaving at 06:00 the two choices tie exactly on the complete-route objective: driving to
-        # FAR now costs the same as waiting at NEAR and driving later. The deterministic tie-break
-        # then hands the choice to the earlier input_position, so the route follows the objective
-        # and never depends on scan order.
+        # Leaving at 06:00 there is no tie at all: the complete route the seed compares at that
+        # step - HUB, NEAR, FINISH - finishes at 21948 s against HUB, FAR, FINISH at 22548 s, so
+        # the seed chooses NEAR, the stop waiting decides for, not the longer next leg.
         late = greedy_seed(problem_for(waiting_plan(departure_hour=6), first=hub))
         self.assertEqual(late, (hub, near, far))
+        self.assertNotEqual(
+            early,
+            (hub, near, far),
+            "at 04:00 the seed must avoid the stop that costs hours of waiting",
+        )
 
-        self.assertNotEqual(early, late)
+    def test_waiting_aware_choice_beats_the_nearest_choice(self) -> None:
+        # The seed's own criterion is still the better complete route, not merely a different one:
+        # the waiting-aware ordering finishes earlier than the nearest-first ordering.
+        hub = StopId("HUB")
+        near = StopId("NEAR")
+        far = StopId("FAR")
+        problem = problem_for(waiting_plan(departure_hour=4), first=hub)
+        seed = greedy_seed(problem)
+
+        self.assertEqual(seed, (hub, far, near))
+        self.assertLess(
+            fast_evaluate(problem, seed).finish_elapsed_sec,
+            fast_evaluate(problem, (hub, near, far)).finish_elapsed_sec,
+        )
 
     def test_seed_is_never_worse_than_the_best_route_it_could_have_chosen(self) -> None:
         # Exhaustive reference over all 720 orders of a 6-stop plan: the seed must be the best
