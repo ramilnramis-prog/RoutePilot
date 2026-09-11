@@ -926,16 +926,20 @@ class RecordedBenchmark:
 
 
 #: The last measurement taken on this development machine with
-#: ``python tools/benchmark_optimizer.py --stop-count 100`` (2026-09-11). Wall-clock figures are
+#: ``python tools/benchmark_optimizer.py`` (2026-09-11, after Stage 2.2 U7). Wall-clock figures are
 #: machine-dependent; every other number is deterministic (the benchmark proves it by repeating
 #: the loop and comparing the counters). Under D36 this fixture is the stress reference: the figure
-#: is reported honestly and is **not** an MVP performance gate.
+#: is reported honestly and is **not** an MVP performance gate. U7's exact incremental evaluator
+#: took the figure this fixture recorded before it (~74.8 s warm, measured on the same machine with
+#: the reference full-evaluation path) down by about 2.5x at this ~100-stop stress scale; the speedup
+#: is not flat across scales - the portfolio scale measured about 2.5x and the ~30-stop demo plan
+#: about 2.2x (D37).
 RECORDED_BENCHMARK = RecordedBenchmark(
-    measured_on="2026-09-11 (this development machine, `--stop-count 100`)",
+    measured_on="2026-09-11 (this development machine, after U7, `tools/benchmark_optimizer.py`)",
     stop_count=97,
     candidates=97,
-    total_seconds=78.66,
-    seconds_per_candidate=0.811,
+    total_seconds=29.88,
+    seconds_per_candidate=0.308,
     route_evaluations=1_940_000,
     accepted_moves=97,
     cache_hits=1_957_848,

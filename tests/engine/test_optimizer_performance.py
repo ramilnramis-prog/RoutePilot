@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import importlib
 import io
 import json
 import os
@@ -59,7 +60,9 @@ import sys
 import time as timer
 import unittest
 from datetime import time
+from unittest import mock
 
+from core.engine.first_stop.evaluation import evaluate_first_stop_candidates
 from core.engine.optimizer import (
     LegCache,
     OpenState,
@@ -74,11 +77,25 @@ from core.engine.optimizer import (
 )
 from core.engine.optimizer.local_search import (
     DEFAULT_MAX_EVALUATIONS,
+    DEFAULT_MAX_PASSES,
+    DEFAULT_MAX_SPAN,
+    IncrementalEvaluation,
     LocalSearchResult,
+    PreparedSearch,
+    _delta_with_edges,
     accepted,
     apply_move,
     candidate_moves,
+    move_divergence,
+    move_index_runs,
     move_travel_delta_sec,
+    prepare_prefix_states,
+    prepare_route,
+)
+from core.engine.optimizer.route_problem import (
+    RouteProblem,
+    _route_cost,
+    require_complete_route,
 )
 from core.model.first_stop import FirstStopIntent
 from core.model.ids import StopId
@@ -323,8 +340,9 @@ class ScaleOptimizerInvariantTests(unittest.TestCase):
         self.assertEqual(first.local_search, second.local_search)
         self.assertEqual(first.algorithm_evaluation.order, second.algorithm_evaluation.order)
         self.assertEqual(first.evidence, second.evidence)
-        # At ~100 stops the deterministic evaluation ceiling binds and truncates pass 1 (the whole
-        # neighbourhood is more moves than the bound allows). That is the interim limitation the
+        # At ~100 stops the deterministic evaluation ceiling binds and truncates the candidate's last
+        # pass (the whole neighbourhood is more moves than the bound allows); it already binds at the
+        # ~50-stop portfolio scale. That is the interim limitation the
         # owner accepted (D34), and the AGGREGATE SEARCH says so through ``budget_exhausted``
         # instead of claiming that every move of the neighbourhood was verified (U3 fix 2). The
         # candidate set itself stays exhaustive - see BenchmarkToolTests.
@@ -980,8 +998,9 @@ class BenchmarkToolTests(unittest.TestCase):
     def test_the_exhaustive_loop_stays_inside_the_owner_accepted_bound(self) -> None:
         # FIX 3 / D34: the ~100-stop exhaustive loop is asserted against the OWNER-ACCEPTED bound,
         # which is the named constant this project asserts at the stress scale (with headroom over
-        # the measured warm ~63-76 s at 97 enabled stops). Exceeding it fails here. The v2 section
-        # 20 <= 5 s acceptable target is printed as a REPORTED engineering target and is not
+        # the measured warm ~63-76 s at 97 enabled stops that the owner accepted; the shipped exact
+        # incremental evaluator of U7 now measures well under that). Exceeding it fails here. The v2
+        # section 20 <= 5 s acceptable target is printed as a REPORTED engineering target and is not
         # asserted at that scale: D36 makes ~100 stops an engineering stress reference, and failure
         # to meet <= 5 s at 100 stops does not block the portfolio MVP.
         code, output, payload = self.run_benchmark("--no-portfolio", "--no-demo", "--json")
@@ -1052,8 +1071,9 @@ class BenchmarkToolTests(unittest.TestCase):
     @slow_test
     def test_the_portfolio_measurement_is_guarded_by_a_generous_bound_and_reported(self) -> None:
         # DELIVERABLE 3: the heavy ~50-stop measurement is opt-in, and the primary MVP scale carries a
-        # real regression guard: the generous owner-accepted bound of D34 (~150 s, roughly seven times
-        # the measured ~21-22 s at 50 enabled stops). What is REPORTED rather than asserted is the v2
+        # real regression guard: the generous owner-accepted bound of D34 (~150 s, roughly eighteen
+        # times the measured ~8.1-8.5 s at 50 enabled stops after the U7 incremental evaluator). What is
+        # REPORTED rather than asserted is the v2
         # section 20 acceptable target, printed with its own honest verdict. That is exactly the
         # unit's rule - no fake claim, no flaky exact-second assertion, no quality-degrading
         # optimization to move the number (the U6b review fix).
@@ -1104,6 +1124,625 @@ class BenchmarkToolTests(unittest.TestCase):
             dataclasses.replace(measurement, profile=impossible).accepted_bound_met,
             "the portfolio bound must actually be compared with the measured loop, not ignored",
         )
+
+
+def candidate_metrics(problem, order) -> tuple:
+    """The reference full pass' whole metric breakdown of a complete order."""
+    return _route_cost(problem, order)
+
+
+def selected_problem_of(plan, index: int):
+    """A prepared problem and its greedy seed for one driver-selected first stop of a plan."""
+    active = plan.active_stops()
+    selected = StopId(active[min(index, len(active) - 1)].id)
+    problem = build_problem(
+        plan=dataclasses.replace(
+            plan, first_service_stop=FirstStopIntent.manual_choice(selected)
+        ),
+        travel_matrix=demo_matrix(),
+        first_stop_id=selected,
+    )
+    return problem, greedy_seed(problem)
+
+
+def search_trace(problem, seed, evaluator) -> tuple[LocalSearchResult, tuple]:
+    """Run the U7 search with an injected complete-route evaluator; return its trace.
+
+    The loop is :func:`improve`'s own - same neighbourhood, same travel-delta ranking, same
+    ``max_evaluations`` ceiling, same lexicographic acceptance and tie-break - with the one thing
+    under test replaced: how a candidate route is priced. ``evaluator(problem, context, base, runs,
+    divergence, states, current)`` is the shape of :meth:`PreparedSearch.finish_elapsed`, so a caller
+    can hand in the shipped incremental path or a reference path built on the untouched forward pass,
+    and the two traces can be compared bag for bag.
+
+    The trace records, per evaluated move, the travel delta it was ranked by, whether it was
+    *accepted* (better than the route the pass started from and not beaten by a better objective) and
+    the move's own deterministic sort key. It deliberately does **not** record the priced objective:
+    the incremental path may stop early on a candidate whose violations already exceed the current
+    route's, and that early exit is exactly the thing under test - the decision it feeds is what must
+    be identical, not the number it stopped at.
+    """
+    order = tuple(seed)
+    current = problem.route_objective_key(order, require_serviceable=False)
+    context = PreparedSearch(problem)
+    evaluations = 1
+    accepted_moves: list[RouteMove] = []
+    evaluated: list[tuple[int, bool, tuple[int, ...], RouteMove]] = []
+    passes = 0
+    budget_exhausted = False
+    while passes < 8 and evaluations < DEFAULT_MAX_EVALUATIONS:
+        passes += 1
+        route = prepare_route(problem, order)
+        base = [problem.index_of(stop_id) for stop_id in order]
+        states = prepare_prefix_states(problem, context, base)
+        ranked = []
+        for move in candidate_moves(len(order), max_span=None):
+            ranked.append((_delta_with_edges(route, move), move_divergence(move), move))
+        if not ranked:
+            break
+        if len(ranked) > DEFAULT_MAX_EVALUATIONS - evaluations:
+            ranked.sort(key=lambda entry: (entry[0], entry[2].sort_key))
+        best: tuple | None = None
+        best_move: RouteMove | None = None
+        for delta, divergence, move in ranked:
+            if evaluations >= DEFAULT_MAX_EVALUATIONS:
+                budget_exhausted = True
+                break
+            runs = move_index_runs(base, move)
+            objective = evaluator(
+                problem, context, base, runs, divergence, states, current
+            )
+            evaluations += 1
+            if objective is None or not accepted(objective, current):
+                evaluated.append((delta, False, (), move))
+                continue
+            if best is not None and objective > best[0]:
+                evaluated.append((delta, False, (), move))
+                continue
+            indices = list(base[:divergence])
+            for run in runs:
+                indices.extend(run)
+            evaluated.append((delta, True, tuple(indices), move))
+            key = (objective, tuple(indices), tuple(problem.stop_ids[i] for i in indices))
+            if best is None or key < best:
+                best = key
+                best_move = move
+        if best is None or best_move is None:
+            break
+        accepted_moves.append(best_move)
+        order = best[2]
+        current = best[0]
+    seed_key = problem.route_objective_key(seed, require_serviceable=False)
+    result = LocalSearchResult(
+        order=order,
+        seed_objective=seed_key[1],
+        final_objective=current[1],
+        accepted_moves=tuple(accepted_moves),
+        evaluations=evaluations,
+        seed_violations=seed_key[0],
+        final_violations=current[0],
+        passes=passes,
+        screened_moves=0,
+        budget_exhausted=budget_exhausted,
+    )
+    return result, tuple(evaluated)
+
+
+def trace_decision(entry: tuple) -> tuple:
+    """The decision a recorded evaluation carries: how it was ranked and what was decided."""
+    delta, accepted_flag, points, move = entry
+    return (delta, accepted_flag, points, move.sort_key)
+
+
+def incremental_evaluator(problem, context, base, runs, divergence, states, current):
+    """The shipped incremental path, in the injectable signature of :meth:`search_trace`."""
+    return context.finish_elapsed(runs, divergence, states, current)
+
+
+def reference_evaluator(problem, context, base, runs, divergence, states, current):
+    """The reference path: apply the move, then fully evaluate the complete route."""
+    permutation = list(base[:divergence])
+    for run in runs:
+        permutation.extend(run)
+    candidate = tuple(problem.stop_ids[index] for index in permutation)
+    return problem.route_objective_key(candidate, require_serviceable=False)
+
+
+#: The optimizer module the reference path substitutes, and the first-stop evaluation module whose
+#: ``optimize`` call is wrapped to record every candidate's own optimized route (U7 gate).
+_OPTIMIZE_MODULE = importlib.import_module("core.engine.optimizer.optimize")
+_FIRST_STOP_MODULE = importlib.import_module("core.engine.first_stop.evaluation")
+
+
+def improve_reference(
+    problem: RouteProblem,
+    order: tuple[StopId, ...],
+    *,
+    max_passes: int = DEFAULT_MAX_PASSES,
+    max_evaluations: int = DEFAULT_MAX_EVALUATIONS,
+    max_span: int | None = DEFAULT_MAX_SPAN,
+) -> LocalSearchResult:
+    """``improve`` as it priced every candidate with the untouched full forward pass.
+
+    This is the REFERENCE side of the U7 gate. It is the search the shipped :func:`improve` was
+    before the incremental evaluator: the same neighbourhood, the same exact travel-delta ranking,
+    the same deterministic evaluation ceiling, the same lexicographic acceptance and the same
+    tie-break, with the one thing U7 replaced put back - :func:`apply_move` followed by
+    :meth:`RouteProblem.route_objective_key`, the full O(n) forward pass per move. It is written
+    out here, in the test, so a change to the shipped search cannot quietly move the baseline it is
+    compared against.
+    """
+    sequence = tuple(order)
+    problem.plan.validate_order(sequence)
+    require_complete_route(problem, sequence)
+
+    current = problem.route_objective_key(sequence, require_serviceable=False)
+    seed_objective = current[1]
+    seed_violations = current[0]
+    accepted_moves: list[RouteMove] = []
+    evaluations = 1
+    passes = 0
+    screened_moves = 0
+    budget_exhausted = False
+
+    while passes < max_passes and evaluations < max_evaluations:
+        passes += 1
+        route = prepare_route(problem, sequence)
+        ranked: list[tuple[int, RouteMove]] = []
+        for move in candidate_moves(len(sequence), max_span=max_span):
+            screened_moves += 1
+            ranked.append((_delta_with_edges(route, move), move))
+        if not ranked:
+            break
+        if len(ranked) > max_evaluations - evaluations:
+            ranked.sort(key=lambda entry: (entry[0], entry[1].sort_key))
+
+        best_move: RouteMove | None = None
+        best_order: tuple[StopId, ...] | None = None
+        best_objective: tuple[int, int] | None = None
+        best_key: tuple[tuple[int, int], tuple[int, ...], tuple[StopId, ...]] | None = None
+        for _delta, move in ranked:
+            if evaluations >= max_evaluations:
+                budget_exhausted = True
+                break
+            candidate = apply_move(sequence, move)
+            objective = problem.route_objective_key(candidate, require_serviceable=False)
+            evaluations += 1
+            if not accepted(objective, current):
+                continue
+            points = tuple(problem.index_of(stop_id) for stop_id in candidate)
+            key = (objective, points, candidate)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_move = move
+                best_order = candidate
+                best_objective = objective
+
+        if best_move is None or best_order is None or best_objective is None:
+            break
+        sequence = best_order
+        current = best_objective
+        accepted_moves.append(best_move)
+
+    return LocalSearchResult(
+        order=sequence,
+        seed_objective=seed_objective,
+        final_objective=current[1],
+        accepted_moves=tuple(accepted_moves),
+        evaluations=evaluations,
+        seed_violations=seed_violations,
+        final_violations=current[0],
+        passes=passes,
+        screened_moves=screened_moves,
+        budget_exhausted=budget_exhausted,
+    )
+
+
+@contextlib.contextmanager
+def reference_local_search():
+    """The optimizer's local search replaced by the reference full-evaluation path."""
+    with mock.patch.object(_OPTIMIZE_MODULE, "improve", improve_reference):
+        yield
+
+
+def first_stop_runs(plan: RoutePlan, *, reference: bool):
+    """One pipeline run per enabled stop, with every candidate's own route and counters recorded.
+
+    The recording wrapper sits around ``optimize`` **as the first-stop evaluation calls it**, so the
+    report and the per-candidate routes come out of one and the same run instead of two: what the
+    U7 gate compares is the whole shipped pipeline, not a re-implementation of it. ``reference``
+    swaps the local search for :func:`improve_reference` and changes nothing else.
+    """
+    recorded: list[tuple] = []
+    real_optimize = _FIRST_STOP_MODULE.optimize
+
+    def recording(problem: RouteProblem):
+        optimized = real_optimize(problem)
+        evaluation = optimized.evaluation
+        search = optimized.local_search
+        recorded.append(
+            (
+                problem.first_stop_id,
+                optimized.order,
+                search.evaluations,
+                search.accepted_moves,
+                search.passes,
+                search.screened_moves,
+                search.budget_exhausted,
+                evaluation.metrics.duration_sec,
+                evaluation.metrics.travel_sec,
+                evaluation.metrics.waiting_sec,
+                evaluation.metrics.service_sec,
+                evaluation.metrics.distance_m,
+                evaluation.metrics.finish_arrival,
+                tuple(sorted(violation.stop_id for violation in evaluation.violations)),
+            )
+        )
+        return optimized
+
+    with mock.patch.object(_FIRST_STOP_MODULE, "optimize", recording):
+        with (reference_local_search() if reference else contextlib.nullcontext()):
+            report = evaluate_first_stop_candidates(plan=plan, travel_matrix=demo_matrix())
+    return report, tuple(recorded)
+
+
+class IncrementalEquivalenceTests(unittest.TestCase):
+    """Prefix reuse is exact: every priced move agrees with the reference full pass (U7).
+
+    The incremental / delta evaluator of U7 prices a candidate by resuming from the base route's own
+    evaluated state at the move's divergence and walking only the positions the move reorders. That
+    is only legitimate if the reused prefix is **bit-identical** to recomputing it, so the
+    equivalence is checked move by move rather than argued:
+
+    * :meth:`assert_incremental_matches_reference` prices **every** move of a generated neighbourhood
+      twice - once through :class:`PreparedSearch` (the shipped path) and once through the reference
+      full pass :func:`core.engine.optimizer.route_problem._route_cost` on the order
+      :func:`apply_move` produces - and compares the violation count, the finish elapsed time, the
+      travel/waiting/service breakdown, the distance and the acceptance key itself;
+    * the delivered hint is additionally checked against the reference route's **stop ids**, so an
+      incremental path that silently served different stops could not pass;
+    * :meth:`test_the_equivalence_check_can_fail` proves the check is not vacuous: a deliberately
+      corrupted prefix state must be rejected by the same comparison.
+
+    The comparison is cheap on small plans and stays in the default suite; the same comparison over
+    the demo and portfolio fixtures is gated behind ``ROUTEPILOT_SLOW_TESTS`` in
+    :class:`IncrementalSlowComparisonTests`.
+    """
+
+    def assert_incremental_matches_reference(self, problem, order, moves) -> int:
+        """Every move priced incrementally equals the reference full pass, field by field."""
+        context = PreparedSearch(problem)
+        base = [problem.index_of(stop_id) for stop_id in order]
+        states = prepare_prefix_states(problem, context, base)
+        checked = 0
+        for move in moves:
+            with self.subTest(move=move.describe()):
+                expected = candidate_metrics(problem, apply_move(order, move))
+                runs = move_index_runs(base, move)
+                divergence = move_divergence(move)
+                permutation = list(base[:divergence])
+                for run in runs:
+                    permutation.extend(run)
+                self.assertEqual(
+                    [problem.stop_ids[index] for index in permutation],
+                    list(apply_move(order, move)),
+                    "the incremental path does not price the order apply_move produces",
+                )
+                self.assertEqual(sorted(permutation), sorted(base))
+                self.assertEqual(len(set(permutation)), len(permutation))
+
+                evaluation = context.evaluate_segments(permutation, divergence, states)
+                self.assertIsInstance(evaluation, IncrementalEvaluation)
+                self.assertEqual(
+                    (
+                        evaluation.violations,
+                        evaluation.finish_elapsed_sec,
+                        evaluation.travel_sec,
+                        evaluation.waiting_sec,
+                        evaluation.distance_m,
+                        evaluation.service_sec,
+                    ),
+                    expected,
+                    "the incremental path priced this move differently",
+                )
+                self.assertEqual(
+                    context.finish_elapsed(runs, divergence, states, (expected[0], 0)),
+                    (expected[0], expected[1]),
+                    "the incremental path's acceptance key differs from the reference key",
+                )
+                checked += 1
+        return checked
+
+    def test_every_move_of_a_generated_neighbourhood_is_exact(self) -> None:
+        # The non-vacuous proof the unit asks for: a whole neighbourhood - every 2-opt reversal and
+        # every relocate - on a small plan, for several driver-selected first stops.
+        for stop_count, least in ((8, 90), (12, 250)):
+            for index in (0, 3):
+                plan = build_scale_plan(stop_count)
+                problem, seed = selected_problem_of(plan, index)
+                with self.subTest(size=stop_count, first=seed[0]):
+                    self.assertGreaterEqual(
+                        self.assert_incremental_matches_reference(
+                            problem, seed, candidate_moves(len(seed))
+                        ),
+                        least,
+                    )
+
+    def test_sampled_demo_plan_moves_are_exact(self) -> None:
+        # The default suite's fixture coverage, so the exactness of prefix reuse is proven on the
+        # real ~31-enabled-stop demo plan even when the heavy comparisons are not opted into: a
+        # fixed sample of its whole neighbourhood, for two driver-selected first stops. The demo
+        # plan's *whole* neighbourhood stays in the opt-in slow class below.
+        demo = build_demo_plan()
+        for index in (0, 4):
+            problem, seed = selected_problem_of(demo, index)
+            moves = list(candidate_moves(len(seed)))
+            sample = moves[:: max(1, len(moves) // 250)]
+            with self.subTest(fixture="demo", first=seed[0]):
+                self.assertGreaterEqual(
+                    self.assert_incremental_matches_reference(problem, seed, sample), 250
+                )
+
+    def test_the_shipped_search_is_the_reference_search(self) -> None:
+        # The whole-search gate on a small plan: the same ranked candidates, the same rejected
+        # candidates, the same top-K ordering, the same recommended stop and the same evaluation
+        # count, whether a candidate is priced incrementally or by the untouched forward pass.
+        plan = build_scale_plan(12)
+        for index in (0, 5):
+            problem, seed = selected_problem_of(plan, index)
+            with self.subTest(first=seed[0]):
+                shipped, shipped_moves = search_trace(problem, seed, incremental_evaluator)
+                reference, reference_moves = search_trace(problem, seed, reference_evaluator)
+                self.assertEqual(shipped.order, improve(problem, seed).order)
+                self.assertEqual(shipped.evaluations, improve(problem, seed).evaluations)
+                self.assertEqual(shipped.accepted_moves, improve(problem, seed).accepted_moves)
+                self.assertEqual(shipped.budget_exhausted, improve(problem, seed).budget_exhausted)
+                self.assertEqual(shipped.evaluations, reference.evaluations)
+                self.assertEqual(shipped.accepted_moves, reference.accepted_moves)
+                self.assertEqual(shipped.order, reference.order)
+                self.assertEqual(shipped.budget_exhausted, reference.budget_exhausted)
+                self.assertEqual(
+                    [trace_decision(entry) for entry in shipped_moves],
+                    [trace_decision(entry) for entry in reference_moves],
+                    "the incremental path changed which moves were evaluated, in which order, or "
+                    "which of them the search accepted",
+                )
+                top_k = sorted(
+                    (entry[1], entry[2], entry[3].sort_key)
+                    for entry in shipped_moves
+                    if entry[1]
+                )
+                self.assertEqual(
+                    top_k,
+                    sorted(
+                        (entry[1], entry[2], entry[3].sort_key)
+                        for entry in reference_moves
+                        if entry[1]
+                    ),
+                    "the top-K ordering of the recommended candidates differs",
+                )
+                self.assertEqual(
+                    [entry[3].sort_key for entry in shipped_moves if not entry[1]],
+                    [entry[3].sort_key for entry in reference_moves if not entry[1]],
+                    "the rejected candidate set differs",
+                )
+
+    def test_the_equivalence_check_can_fail(self) -> None:
+        # A green equivalence test proves nothing unless it can go red: a corrupted prefix state must
+        # be rejected by the same comparison, otherwise the tests above would be vacuous.
+        plan = build_scale_plan(12)
+        problem, seed = selected_problem_of(plan, 0)
+        context = PreparedSearch(problem)
+        base = [problem.index_of(stop_id) for stop_id in seed]
+        states = prepare_prefix_states(problem, context, base)
+        victim = len(states) // 2
+        corrupt = list(states)
+        corrupt[victim] = dataclasses.replace(
+            corrupt[victim], elapsed=corrupt[victim].elapsed + 600
+        )
+        differences = 0
+        checked = 0
+        for move in candidate_moves(len(seed)):
+            divergence = move_divergence(move)
+            if divergence > victim:
+                continue
+            runs = move_index_runs(base, move)
+            permutation = list(base[:divergence])
+            for run in runs:
+                permutation.extend(run)
+            expected = candidate_metrics(problem, apply_move(seed, move))
+            got = context.evaluate_segments(permutation, divergence, corrupt)
+            checked += 1
+            if (got.violations, got.finish_elapsed_sec, got.travel_sec, got.waiting_sec,
+                    got.distance_m, got.service_sec) != expected:
+                differences += 1
+        self.assertGreater(checked, 0, "the corruption check must inspect real moves")
+        self.assertGreater(
+            differences,
+            0,
+            "the incremental-versus-reference comparison accepted a deliberately corrupted prefix "
+            "state, so the equivalence tests above would be vacuous",
+        )
+
+
+@slow_test
+class IncrementalSlowComparisonTests(IncrementalEquivalenceTests):
+    """The same exactness proof over the deterministic fixtures, opt-in (U7).
+
+    Heavy by design, and therefore behind ``ROUTEPILOT_SLOW_TESTS``: the ~31-enabled-stop demo plan's
+    whole neighbourhood, the 50-enabled-stop portfolio fixture, and the whole-search comparison on
+    both of them plus a small plan.
+    """
+
+    def test_the_demo_and_portfolio_neighbourhoods_are_exact(self) -> None:
+        # Every move of the demo plan's neighbourhood, and a large sample of the 50-enabled-stop
+        # portfolio fixture's, against the reference full pass.
+        demo = build_demo_plan()
+        for index in (0, 5):
+            problem, seed = selected_problem_of(demo, index)
+            with self.subTest(fixture="demo", first=seed[0]):
+                self.assertGreaterEqual(
+                    self.assert_incremental_matches_reference(
+                        problem, seed, candidate_moves(len(seed))
+                    ),
+                    2_000,
+                )
+
+        portfolio = build_portfolio_plan()
+        problem, seed = selected_problem_of(portfolio, 0)
+        moves = list(candidate_moves(len(seed)))
+        self.assertGreaterEqual(
+            self.assert_incremental_matches_reference(
+                problem, seed, moves[:: max(1, len(moves) // 1_500)]
+            ),
+            1_000,
+        )
+
+    def test_the_shipped_search_matches_the_reference_search_on_the_fixtures(self) -> None:
+        for name, plan, indices in (
+            ("small", build_scale_plan(12), (0, 5)),
+            ("demo", build_demo_plan(), (0,)),
+            ("portfolio", build_portfolio_plan(), (0,)),
+        ):
+            for index in indices:
+                problem, seed = selected_problem_of(plan, index)
+                with self.subTest(fixture=name, first=seed[0]):
+                    shipped, shipped_moves = search_trace(problem, seed, incremental_evaluator)
+                    reference, reference_moves = search_trace(problem, seed, reference_evaluator)
+                    self.assertEqual(shipped.evaluations, reference.evaluations)
+                    self.assertEqual(shipped.accepted_moves, reference.accepted_moves)
+                    self.assertEqual(shipped.order, reference.order)
+                    self.assertEqual(shipped.budget_exhausted, reference.budget_exhausted)
+                    self.assertEqual(
+                        (shipped.final_violations, shipped.final_objective),
+                        (reference.final_violations, reference.final_objective),
+                    )
+                    self.assertEqual(
+                        [trace_decision(entry) for entry in shipped_moves],
+                        [trace_decision(entry) for entry in reference_moves],
+                        "the incremental path changed which moves were evaluated, in which order, "
+                        "or which of them the search accepted",
+                    )
+                    self.assertEqual(
+                        sorted(
+                            (entry[1], entry[2], entry[3].sort_key)
+                            for entry in shipped_moves
+                            if entry[1]
+                        ),
+                        sorted(
+                            (entry[1], entry[2], entry[3].sort_key)
+                            for entry in reference_moves
+                            if entry[1]
+                        ),
+                        "the top-K ordering of the recommended candidates differs",
+                    )
+                    self.assertEqual(
+                        [entry[3].sort_key for entry in shipped_moves if not entry[1]],
+                        [entry[3].sort_key for entry in reference_moves if not entry[1]],
+                        "the rejected candidate set differs",
+                    )
+                    # The committed route, its durations, violations and FINISH arrival, against the
+                    # authoritative engine and against the reference path.
+                    self.assertEqual(sorted(shipped.order), sorted(seed))
+                    self.assertEqual(len(set(shipped.order)), len(shipped.order))
+                    authoritative = evaluate_order(
+                        plan=problem.plan, travel_matrix=problem.legs, order=shipped.order
+                    )
+                    self.assertEqual(authoritative.metrics.duration_sec, shipped.final_objective)
+                    self.assertEqual(
+                        len(authoritative.violations), shipped.final_violations
+                    )
+                    reference_evaluation = evaluate_order(
+                        plan=problem.plan, travel_matrix=problem.legs, order=reference.order
+                    )
+                    self.assertEqual(
+                        tuple(sorted(v.stop_id for v in authoritative.violations)),
+                        tuple(sorted(v.stop_id for v in reference_evaluation.violations)),
+                    )
+                    self.assertEqual(
+                        authoritative.metrics.duration_sec,
+                        reference_evaluation.metrics.duration_sec,
+                    )
+
+    def test_the_whole_first_stop_recommendation_is_identical(self) -> None:
+        # The gate at the level the unit is about: the exhaustive FIRST-STOP recommendation, not
+        # one candidate's search. The whole pipeline runs twice per fixture - once with the shipped
+        # incremental evaluator, once with the reference full pass (``improve_reference``) - and the
+        # two outcomes must be the same recommendation, candidate for candidate and stop for stop:
+        # ranked and rejected candidate sets, top-K order, recommended stop, every candidate's
+        # complete elapsed duration and FINISH arrival, its violation count and violating stops, the
+        # per-candidate search counters, and no missing or duplicated stop in any candidate's route.
+        for name, plan in (
+            ("small", build_scale_plan(12)),
+            ("demo", build_demo_plan()),
+            ("portfolio", build_portfolio_plan()),
+        ):
+            with self.subTest(fixture=name):
+                shipped_report, shipped_runs = first_stop_runs(plan, reference=False)
+                reference_report, reference_runs = first_stop_runs(plan, reference=True)
+
+                enabled = tuple(stop.id for stop in plan.active_stops())
+                self.assertEqual(len(shipped_runs), len(enabled))
+                self.assertGreater(len(enabled), 10)
+                self.assertEqual(
+                    shipped_report.status, reference_report.status
+                )
+                self.assertEqual(
+                    shipped_report.recommended_stop_id, reference_report.recommended_stop_id
+                )
+                self.assertEqual(shipped_report.ranked_ids(), reference_report.ranked_ids())
+                self.assertEqual(shipped_report.rejected_ids(), reference_report.rejected_ids())
+                self.assertEqual(
+                    shipped_report.ranked, reference_report.ranked
+                )
+                self.assertEqual(
+                    shipped_report.rejected, reference_report.rejected
+                )
+                self.assertEqual(
+                    shipped_report.diagnostics, reference_report.diagnostics
+                )
+                self.assertEqual(
+                    shipped_report.candidates_evaluated, reference_report.candidates_evaluated
+                )
+                self.assertEqual(
+                    shipped_report.optimizer_runs, reference_report.optimizer_runs
+                )
+                # Every enabled stop is one candidate, exactly once, and every candidate's own
+                # optimized route serves every enabled stop exactly once - no missing, no duplicate.
+                self.assertEqual(
+                    sorted(shipped_report.ranked_ids() + shipped_report.rejected_ids()),
+                    sorted(enabled),
+                )
+                self.assertEqual(
+                    len(shipped_report.ranked) + len(shipped_report.rejected), len(enabled)
+                )
+                for stop_id, order, *rest in shipped_runs:
+                    self.assertEqual(order[0], stop_id)
+                    self.assertEqual(sorted(order), sorted(enabled))
+                    self.assertEqual(len(set(order)), len(order))
+                self.assertEqual(shipped_runs, reference_runs)
+                # The per-candidate complete-route figures, stated explicitly rather than left to
+                # the dataclass comparison above: duration, FINISH arrival and violated stops.
+                self.assertEqual(
+                    [
+                        (
+                            record[0],
+                            record[7],
+                            record[12],
+                            record[13],
+                        )
+                        for record in shipped_runs
+                    ],
+                    [
+                        (
+                            record[0],
+                            record[7],
+                            record[12],
+                            record[13],
+                        )
+                        for record in reference_runs
+                    ],
+                )
 
 
 class SingleOptimizeScaleTests(unittest.TestCase):

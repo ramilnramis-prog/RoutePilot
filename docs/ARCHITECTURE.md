@@ -12,12 +12,15 @@ document and the registry disagree, the registry wins.
 Stages 0, 1 and 1.5 implement the foundation, the demo scenario and the semantic migration to
 RECOMMEND / MANUAL. **Stage 2 is implemented** (complete-route evaluation and optimizer, exhaustive
 first-stop recommendation, fingerprints, leg cache, baselines, measured performance, the
-complete-route demo narrative, and the default objective of D35 - the complete elapsed route
-duration, ranked by the owner's deterministic 5-tuple). The **scale target is ~50 enabled service
+complete-route demo narrative, the default objective of D35 - the complete elapsed route
+duration, ranked by the owner's deterministic 5-tuple, and the exact incremental / delta
+complete-route evaluator of Stage 2.2 U7). The **scale target is ~50 enabled service
 stops** (D36): the exhaustive complete-route first-stop loop is performance-qualified at that scale,
-and ~100 stops is an **engineering stress reference that is not performance-qualified**. One Stage 2
-item is explicitly **deferred**: the incremental / delta complete-route evaluator that would remove
-the ~100-stop latency accepted in D34.
+and ~100 stops is an **engineering stress reference that is not performance-qualified**. The
+incremental evaluator that D34 deferred is **implemented** (U7): it prices each candidate from the
+base route's evaluated prefix, with identical results and about 2.5x lower latency at the portfolio
+and stress scales and about 2.2x on the ~30-stop demo plan - the speedup is **not flat across
+scales** (D37).
 
 ---
 
@@ -80,7 +83,8 @@ core/
       route_evaluation.py evaluate_order: THE compile of one order into a complete route,
                        FINISH leg included (v2 section 15); user_baseline_order; build_solution
       seed.py          constraint-aware greedy seed (complete-route criterion, D17)
-      local_search.py  deterministic 2-opt / Or-opt improvement, lexicographic acceptance
+      local_search.py  deterministic 2-opt / Or-opt improvement, lexicographic acceptance,
+                       exact incremental evaluate-from-the-divergence pricing (U7)
       optimize.py      RouteProblem -> seed -> improvement -> authoritative evaluation
       solve.py         solver boundary: optimize + commit with both baselines
       route_fingerprint.py the committed route's own digest (v2 section 7, D4)
@@ -388,10 +392,15 @@ build_problem(plan, travel_matrix, first_stop_id=candidate)   # frozen prepared 
   recommendation is not a selection (D4/D32/I5), and `recommended_stop_id`/`selected_stop_id` remain
   separate fields with separate lifecycles.
 
-**Deferred (recorded, not implemented):** the incremental / delta complete-route evaluator that
-would remove the ~100-stop latency accepted in D34. Until it lands, the measured latency is the
-accepted state and no prefilter or approximation is authorized. Under D36 this is an
-engineering-scale improvement, not a gate on the portfolio MVP.
+**Implemented (Stage 2.2 U7):** the incremental / delta complete-route evaluator that D34 deferred.
+It prices each candidate by resuming from the base route's own evaluated state at the move's
+divergence and walking only the runs the move reorders, plus the FINISH leg, so the reused prefix is
+bit-identical to recomputing it. It removes about 60% of the measured latency at the portfolio and
+stress scales and about 55% (about 2.2x, not 2.5x) on the ~30-stop demo plan
+(`core/engine/optimizer/local_search.py`: `PreparedSearch`, `prepare_prefix_states`,
+`move_divergence`, `move_index_runs`), and the reference full pass stays in place and is the
+comparison baseline the tests use. No prefilter and no approximation was authorized or introduced,
+and under D36 this is an engineering-scale improvement, not a gate on the portfolio MVP.
 
 ### 5.1.1 Scale and measured performance (D36, amending D34)
 
@@ -416,13 +425,19 @@ primary MVP scale included - while the reported v2 §20 targets are printed with
 so no scale is gated on a missed engineering target and none is left without a regression guard.
 `demo/report.py` prints a `SCALE AND PERFORMANCE` block covering the same three
 scales, with the owner's D36 statement verbatim, the enabled counts, and the portfolio fixture's
-**live measured** number - reported as it is. It is **outside** the ≤ ~5 s target (~19-25 s warm on
-this development machine, ~0.4-0.5 s per candidate, every candidate hitting the deterministic
-per-candidate evaluation ceiling); profiling locates the cost inside the complete-route evaluations
-themselves (one full route evaluation per candidate move), so closing the gap needs the deferred
-incremental / delta evaluator, not a prefilter, a shortlist, an approximate ranking or any
-quality-degrading cut - none of which is authorized. The ~50-stop scale decision introduces **no
-hard validation limit**: the domain and the generator stay able to evolve beyond 50 stops (D18).
+**live measured** number - reported as it is. It is **outside** the ≤ ~5 s target and just above the
+owner's ≤ ~8 s "good enough" target (~8.0-8.5 s warm on this development machine, ~0.17 s per
+candidate, every candidate hitting the deterministic per-candidate evaluation ceiling). Stage 2.2 U7
+replaced the per-move full re-evaluation with an exact incremental / delta evaluator (prefix reuse
+plus the FINISH leg, `PreparedSearch` in `core/engine/optimizer/local_search.py`), which made the
+portfolio and stress scales about **2.5x** faster and the smaller ~30-stop demo plan about **2.2x**
+faster (50 enabled stops: 21.1 s -> 8.0-8.5 s warm; 97 enabled stops:
+74.8 s -> 29.9-31.1 s; the 31-enabled-stop demo plan: 5.7 s -> 2.5-2.7 s, all measured on this machine
+with the same benchmark) without changing which routes are priced, in which order, or which one is
+accepted - so the remaining gap needs further work inside the complete-route evaluations themselves
+(one route pass per candidate move), not a prefilter, a shortlist, an approximate ranking or any
+quality-degrading cut - none of which is authorized. The ~50-stop scale decision introduces **no hard
+validation limit**: the domain and the generator stay able to evolve beyond 50 stops (D18).
 
 ### 5.2 Demo data, the demo narrative and its calibration (Stage 1 + Stage 2 U5)
 
@@ -578,6 +593,11 @@ visible attribution; `core/` never references them.
 
 - The suite prints a warning and uses a detected system TZif tree when `tzdata` is unavailable, so
   the DST tests are meaningful on an offline machine; the real fix remains `pip install tzdata`.
+- The incremental evaluator's exactness is proven twice: the default suite compares every move of a
+  whole generated neighbourhood (and the whole search's decisions) against the reference full pass,
+  and `tests/engine/test_optimizer_performance.py` gates the demo-plan and portfolio comparisons
+  behind `ROUTEPILOT_SLOW_TESTS`, alongside a deliberate corruption that must make the comparison
+  fail - so the equivalence gate cannot be vacuous.
 - The demo-scale exhaustive evaluation costs several seconds per plan. `demo/report.py` memoizes the
   evaluation, the departure sweep, the D35 objective-alignment evaluations, the D31
   weight-sensitivity policies, the recommendation preview and the ~50-stop portfolio evaluation, so
@@ -600,8 +620,8 @@ visible attribution; `core/` never references them.
 | 0 ✅ | foundation: docs, domain skeleton, time layer, strict DST, error taxonomy, doctor, tests, storage schema proposal |
 | 1 ✅ | cost scoring over implemented components, deterministic demo dataset (~30 stops), synthetic matrix, 04:00 / 08:00 scenario, candidate evaluation, numeric demo report |
 | 1.5 ✅ | semantics migration off the revoked AUTO model: RECOMMEND/MANUAL, recommendation vs driver decision, `awaiting_first_stop_choice` (D4–D11, D32) |
-| 2 ✅ | complete-route evaluation (FINISH leg included) + deterministic optimizer (greedy seed, 2-opt/Or-opt improvement, leg cache) + **exhaustive** complete-route first-stop recommendation with top-K and rejected-candidate diagnostics + recommendation and route fingerprints + the three baselines + the complete elapsed-duration default objective with the owner's deterministic 5-key ranking (D35) + the scale decision (**~50 enabled stops is the primary MVP target**, D36) with the portfolio fixture and the ~100-stop stress benchmark + the complete-route demo narrative (U1–U6, U6b) |
-| 2 (deferred) | incremental / delta complete-route evaluator to remove the ~100-stop latency the owner accepted in D34 (and, under D36, to close the gap at the ~50-stop primary target). Recorded, **not implemented**: no prefilter, no approximation and no shortcut may be introduced before it is benchmarked |
+| 2 ✅ | complete-route evaluation (FINISH leg included) + deterministic optimizer (greedy seed, 2-opt/Or-opt improvement, leg cache) + **exhaustive** complete-route first-stop recommendation with top-K and rejected-candidate diagnostics + recommendation and route fingerprints + the three baselines + the complete elapsed-duration default objective with the owner's deterministic 5-key ranking (D35) + the scale decision (**~50 enabled stops is the primary MVP target**, D36) with the portfolio fixture and the ~100-stop stress benchmark + the complete-route demo narrative (U1–U6, U6b) + the exact incremental complete-route evaluator (U7) |
+| 2.2 ✅ | the **exact incremental / delta complete-route evaluator** (U7): prefix reuse from the base route's evaluated state at the move's own divergence, plus the FINISH leg, with the reference full pass kept intact as the comparison baseline and an opt-in slow equivalence gate. Same moves, same order, same accept/reject decisions, same `evaluations` ceiling - about 2.5x lower latency at the portfolio and stress scales and about 2.2x on the ~30-stop demo plan (D37) |
 | 3 | SQLite repositories behind the approved schema |
 | 4 | API transport + web UI (map, timeline panel, summary, override controls) |
 | 5 | reoptimization after each served stop, active-leg protection groundwork |
@@ -610,7 +630,9 @@ visible attribution; `core/` never references them.
 
 Stages 0–2 deliberately contain no demo UI, no SQLite code, no API, no geocoding, no routing
 provider, no traffic, no side-of-road logic, no active-leg handling, no LLM integration, no
-automatic commitment of a recommendation, and no candidate prefilter or approximation. The
-incremental / delta evaluator is deferred (see §9) and must not be implemented as part of Stage 2.
+automatic commitment of a recommendation, and no candidate prefilter or approximation. The exact
+incremental / delta evaluator is implemented (§9, U7) and changes only *how* a route is priced: it
+introduces no prefilter, no shortlist and no approximation, and the reference full pass remains the
+comparison baseline.
 The D36 scale decision adds **no hard stop-count maximum** and no new validation limit: it changes a
 performance target, not the domain.

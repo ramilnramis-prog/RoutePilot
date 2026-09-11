@@ -49,9 +49,9 @@ Two different claims are kept apart on purpose (U3 owner-decided fix 2):
   complete-route optimization run, and no candidate is prefiltered, shortlisted or skipped
   (v2 section 20, no fixed-K prefilter);
 * each candidate's **local search** is the full U2 neighbourhood with a deterministic evaluation
-  ceiling (``max_evaluations`` / ``budget_exhausted``), which binds at ~100 stops and truncates
-  pass 1. ``candidates_at_ceiling`` reports how many runs were truncated, so the report never
-  claims exhaustive verification of a search that was truncated.
+  ceiling (``max_evaluations`` / ``budget_exhausted``), which binds from ~50 stops and truncates the
+  candidate's last pass. ``candidates_at_ceiling`` reports how many runs were truncated, so the
+  report never claims exhaustive verification of a search that was truncated.
 
 Exit status
 -----------
@@ -65,15 +65,16 @@ constant.
 
 The **portfolio** fixture (~50 enabled stops, the primary MVP scale target of D36) is asserted
 against the same **generous owner-accepted bound** (:data:`ACCEPTED_INTERIM_LOOP_LIMIT_SEC`, ~150 s,
-roughly seven times the measured ~21-22 s at 50 enabled stops): the primary MVP scale therefore has a
-real regression guard, and exceeding it fails the run. That bound is headroom, not the target: the
-shipped exact implementation still measures well over the v2 section 20 acceptable target at that
-scale, closing that gap needs a real algorithmic rewrite (the incremental / delta evaluator D34
-defers, which is out of scope here), and the unit's rule is that the ~50-stop figure is
-**reported - never faked, never asserted at a flaky second**. The v2 section 20 targets (preferred
-<= 3 s, acceptable <= 5 s) are therefore *reported* engineering targets at the portfolio scale, and
-the tool prints the measured number, that target and the honest verdict next to it - v2 section 20
-itself calls them "engineering targets, not correctness rules".
+roughly eighteen times the measured ~8.0-8.5 s at 50 enabled stops): the primary MVP scale therefore
+has a real regression guard, and exceeding it fails the run. That bound is headroom, not the target:
+the shipped exact implementation still measures over the v2 section 20 acceptable target at
+that scale even after the Stage 2.2 U7 incremental / delta evaluator made the portfolio and stress
+scales about 2.5x faster and the ~30-stop demo plan about 2.2x faster (D37 - the speedup is not flat
+across scales), and the unit's rule is that the ~50-stop figure is **reported - never faked,
+never asserted at a flaky second**. The v2 section 20 targets (preferred <= 3 s, acceptable <= 5 s)
+are therefore *reported* engineering targets at the portfolio scale, and the tool prints the measured
+number, that target and the honest verdict next to it - v2 section 20 itself calls them
+"engineering targets, not correctness rules".
 
 Determinism
 -----------
@@ -152,15 +153,16 @@ PREFERRED_BUDGET_SEC = 3.0
 ACCEPTABLE_BUDGET_SEC = 5.0
 
 #: The **owner-accepted** bound of the whole exhaustive first-stop loop, in seconds (decision D34).
-#: The owner accepted the measured warm ~63-76 s at 97 enabled stops as an interim limitation; this
-#: constant is that figure with headroom for a slower machine (about twice the worst accepted
-#: measurement), so exceeding it is a real regression rather than machine noise. It is the bound the
-#: **~100-stop stress fixture** and the **~50-enabled-stop portfolio fixture** are both asserted
-#: against - the primary MVP scale carries the same generous guard, roughly seven times its measured
-#: ~21-22 s - and it is deliberately **not** the v2 section 20 <= 5 s target at any scale: the owner
+#: The owner accepted the measured warm ~63-76 s at 97 enabled stops as an interim limitation (that
+#: figure was measured before Stage 2.2 U7, which made the portfolio and stress scales about 2.5x
+#: faster and the ~30-stop demo plan about 2.2x faster, D37); this constant
+#: is that figure with headroom for a slower machine (about twice the worst accepted measurement), so
+#: exceeding it is a real regression rather than machine noise. It is the bound the **~100-stop
+#: stress fixture** and the **~50-enabled-stop portfolio fixture** are both asserted against - the
+#: primary MVP scale carries the same generous guard, roughly eighteen times its measured ~8.0-8.5 s
+#: after U7 - and it is deliberately **not** the v2 section 20 <= 5 s target at any scale: the owner
 #: chose the full U2 neighbourhood and the restored search quality over that time target (D34), and
-#: D36 states explicitly that the ~5 s-at-100-stops requirement is **no longer an MVP gate**. A
-#: dedicated later unit will remove the latency with an incremental / delta complete-route evaluator.
+#: D36 states explicitly that the ~5 s-at-100-stops requirement is **no longer an MVP gate**.
 ACCEPTED_INTERIM_LOOP_LIMIT_SEC = 150.0
 
 #: The owner's Stage 2.1 scale decision, verbatim (D36), printed with every measurement so the
@@ -199,11 +201,12 @@ class DatasetProfile:
 
 #: The **primary MVP scale target** fixture: ~50 enabled stops (D36). Its v2 section 20 targets
 #: (preferred <= ~3 s, acceptable <= ~5 s) are **reported, never asserted**: the shipped exact
-#: implementation measures well over the acceptable target here, and closing that gap needs the
-#: deferred incremental / delta evaluator (a real algorithmic rewrite, out of scope). What *is*
+#: implementation measures over the acceptable target here, even after the Stage 2.2 U7
+#: incremental / delta evaluator made the portfolio and stress scales about 2.5x faster and the
+#: ~30-stop demo plan about 2.2x faster (D37 - not flat across scales). What *is*
 #: asserted at this scale is the **generous owner-accepted bound** of D34
-#: (:data:`ACCEPTED_INTERIM_LOOP_LIMIT_SEC`, ~150 s - about seven times the measured ~21-22 s at 50
-#: enabled stops), so the primary MVP scale carries a real regression guard while the reported
+#: (:data:`ACCEPTED_INTERIM_LOOP_LIMIT_SEC`, ~150 s - about eighteen times the measured ~8.0-8.5 s at
+#: 50 enabled stops), so the primary MVP scale carries a real regression guard while the reported
 #: <= 5 s target keeps its own honest verdict. That is the unit's rule: the ~50-stop figure is
 #: reported honestly, guarded generously, and never asserted at a flaky exact second.
 PORTFOLIO_PROFILE = DatasetProfile(
@@ -218,10 +221,11 @@ PORTFOLIO_PROFILE = DatasetProfile(
     asserted_bound_sec=ACCEPTED_INTERIM_LOOP_LIMIT_SEC,
     asserted_bound_note=(
         f"generous owner-accepted bound <= {ACCEPTED_INTERIM_LOOP_LIMIT_SEC:.0f}s (D34) with headroom "
-        "over the measured ~21-22 s at 50 enabled stops: it is the regression guard at the primary "
+        "over the measured ~8.0-8.5 s at 50 enabled stops (after the Stage 2.2 U7 incremental "
+        "evaluator): it is the regression guard at the primary "
         "MVP scale, not the "
         f"reported <= {ACCEPTABLE_BUDGET_SEC:.0f}s engineering target, which is printed with its "
-        "honest verdict because the gap needs the deferred incremental/delta evaluator rather than a "
+        "honest verdict because the gap is real rather than a "
         "shortcut or a flaky exact-second assertion (v2 section 20, D34, D36)"
     ),
 )
@@ -390,7 +394,7 @@ class DatasetMeasurement:
         Every profile carries an asserted bound, so no measured scale is unguarded: the **stress**
         fixture and the **demo** plan keep the owner-accepted interim bound of D34, and the
         **portfolio** fixture (the primary MVP scale) is asserted against that same generous
-        owner-accepted bound with headroom over its measured ~21-22 s - exceeding it is a genuine
+        owner-accepted bound with headroom over its measured ~8.0-8.5 s - exceeding it is a genuine
         regression, while its reported v2 section 20 <= 5 s target is printed with its own honest
         verdict and never gates the run (D36). This is the tool's exit-status guard, and it is
         deliberately a regression guard rather than an engineering target.
@@ -627,8 +631,8 @@ def format_report(measurements: Sequence[DatasetMeasurement]) -> str:
     lines.append(
         "NOTE: the ~50-stop portfolio fixture is the PRIMARY MVP scale target (D36) and its measured "
         f"number is REPORTED against the v2 section 20 acceptable <= {ACCEPTABLE_BUDGET_SEC:.1f}s "
-        "target, which it is not expected to meet - closing that gap needs the deferred "
-        "incremental/delta evaluator, not a prefilter, a shortlist or an approximate ranking. What "
+        "target, which it is not expected to meet - that gap is real, and it is not closed with a "
+        "prefilter, a shortlist or an approximate ranking. What "
         "that scale DOES assert is the same generous owner-accepted regression bound the other "
         f"scales use ({ACCEPTED_INTERIM_LOOP_LIMIT_SEC:.1f}s, D34). The "
         f"~100-stop stress scale asserts that bound too, is labelled NOT performance-qualified, and "

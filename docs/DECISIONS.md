@@ -7,12 +7,14 @@ and unchanged. Precedence (v2 section 37): the current specification plus explic
 decisions in this registry control future implementation; this registry records *how* we decided to
 do it.
 
-- Registry revision: **D1–D36**, approved 2026-09-11 (Stage 0, extended during Stage 1; D4–D11
+- Registry revision: **D1–D37**, approved 2026-09-11 (Stage 0, extended during Stage 1; D4–D11
   amended when the AUTO semantics were revoked; D5/D9/D16 aligned with v2 sections 5, 14 and 23;
   D33 added for `input_position`; D34 records the owner-accepted interim ~100-stop latency and is
   amended by D36, which moves the performance target to ~50 enabled stops; D35 settles the default
   SMART_ROUTE objective as the complete elapsed route duration with the owner's deterministic 5-key
-  ranking, and supersedes D31 for the default; D36 records the owner's Stage 2.1 scale decision).
+  ranking, and supersedes D31 for the default; D36 records the owner's Stage 2.1 scale decision;
+  D37 records the owner's Stage 2.2 sections 1–6 authorization of the bounded exact
+  incremental-evaluation performance follow-up that landed as U7).
 - Status values: `approved` (settled), `amended` (settled with a recorded change), `deferred` (recorded, not implemented).
 
 ---
@@ -453,7 +455,7 @@ do it.
   the recommendation as stale (the recommendation does not depend on arrival order — v2 §7).
 - Status: `approved`. v2 §25, §30.
 
-## D34 — Interim ~100-stop exhaustive-latency limitation (owner decision) *(amended by D36)*
+## D34 — Interim ~100-stop exhaustive-latency limitation (owner decision) *(amended by D36 and Stage 2.2 U7)*
 
 > **Amended 2026-09-11 (D36): this decision is restated under the new scale target and is no longer
 > an MVP performance gate at 100 stops.** The primary MVP performance target is now approximately
@@ -466,6 +468,27 @@ do it.
 > and the deterministic per-candidate evaluation ceiling all stay exactly as written below, and the
 > ~100-stop fixture and its tests stay in the repository. The deferred evaluator becomes an
 > engineering-scale improvement rather than a gate on the portfolio MVP.
+
+> **Amended 2026-09-11 (Stage 2.2 U7): the incremental / delta complete-route evaluator has landed,
+> so every "deferred" / "scheduled follow-up" statement in this entry is now historical.** Stage 2.2
+> unit U7 built exactly the evaluator this decision scheduled: each candidate move is priced by
+> resuming from the base route's evaluated prefix and recomputing only the region the move reorders,
+> plus the FINISH leg. It changes **only how a complete route is priced**, so all of D34's constraints
+> stay in force verbatim - the exhaustive candidate set with no candidate prefilter, no shortlist and
+> no approximation, the same moves in the same order, the same accept/reject decisions and the same
+> deterministic `max_evaluations` ceiling - and its ranking and feasibility results are identical to
+> the reference full-evaluation path, which stays intact and callable. Measured 2026-09-11 on this
+> machine, warm, with `tools/benchmark_optimizer.py`: the ~50-enabled-stop portfolio loop improved
+> from 21.133 s (pre-U7) to 8.319/8.404/8.535 s, the ~100-stop stress reference from 74.775 s to
+> 29.875/30.352/31.115 s and the ~30-stop demo plan from 5.669 s to 2.507/2.577/2.677 s - about
+> **2.5x** at the portfolio and stress scales and about **2.2x** on the ~30-stop demo plan, so the
+> speedup is **not** flat across scales (D37). The "deferred evaluator" wording above, in the
+> scheduled follow-up below and in this entry's Status line therefore describes history, not the
+> shipped code. The recorded pre-U7 latencies are superseded by these measurements; the accepted
+> interim-limitation status at ~100 stops, the owner-accepted regression bound
+> (`ACCEPTED_INTERIM_LOOP_LIMIT_SEC`, ~150 s), the exhaustive candidate set and the evaluation
+> ceiling are unchanged, and D36's restatement of this decision under the ~50-stop target is
+> unaffected.
 
 - **Owner decision (governing).** The measured latency of the exhaustive first-stop candidate loop
   at ~100 stops (measured warm **~63–76 s** at **97 enabled stops**) is **accepted as an explicit,
@@ -569,9 +592,9 @@ do it.
   engineering targets (v2 section 20), never correctness rules, and the benchmark prints the measured
   number with its honest verdict rather than guarding it by a flaky exact ≤ 5 s assertion. What the
   benchmark **does** assert at the primary MVP scale is the **same generous owner-accepted regression
-  bound D34 named** (`ACCEPTED_INTERIM_LOOP_LIMIT_SEC`, ~150 s - roughly seven times the measured
-  ~19–25 s at 50 enabled stops), so the primary MVP scale has a real regression guard and the stress
-  scale keeps the identical bound (U6b review fix).
+  bound D34 named** (`ACCEPTED_INTERIM_LOOP_LIMIT_SEC`, ~150 s - roughly eighteen times the measured
+  ~8.0-8.5 s at 50 enabled stops after U7), so the primary MVP scale has a real regression guard and the
+  stress scale keeps the identical bound (U6b review fix).
 - **The fixture.** `demo.scale_dataset.build_portfolio_plan` builds the deterministic portfolio
   fixture: `PORTFOLIO_STOP_COUNT = 55` stops of which `PORTFOLIO_DISABLED_STOP_COUNT = 5` are
   disabled by the fixture's own deterministic policy (every `PORTFOLIO_DISABLED_EVERY = 10`-th
@@ -581,20 +604,23 @@ do it.
   materially fewer enabled stops is never labelled a "50-stop" fixture without stating its enabled
   count.
 - **The measured number is reported, never faked.** Under the shipped exact implementation the
-  ~50-stop warm exhaustive loop on this development machine measures **~19–25 s** (about 0.39–0.49 s
-  per candidate, every candidate hitting the deterministic per-candidate evaluation ceiling), i.e.
-  it is **outside** the ≤ ~5 s acceptable target. That number is printed as it is by the demo report
-  and by `tools/benchmark_optimizer.py` (measured 2026-09-11: 50 enabled stops, 24.49 s warm,
-  489.89 ms per candidate; the ~100-stop stress reference measured 85.46 s in the same run). It was
-  **not** improved by a candidate prefilter, an approximate ranking, a quality-degrading shortlist, a
-  weight change or a shortened neighbourhood - all of which remain forbidden - and no figure is
-  estimated or borrowed from another scale. The asserted bound at this scale is the generous
-  owner-accepted regression bound of D34 (~150 s), not the ≤ ~5 s engineering target, and no
-  approximation was introduced. The profiling shows the cost is inside the complete-route
-  evaluations themselves (one full
-  `RouteProblem` evaluation per candidate move, one million evaluations for the 50-candidate loop),
-  i.e. it needs the **incremental / delta complete-route evaluator** that D34 already defers; that is
-  an algorithmic rewrite and is therefore out of scope here.
+  ~50-stop warm exhaustive loop on this development machine measured **~18–25 s** before the Stage 2.2
+  U7 incremental evaluator (about 0.39–0.49 s per candidate) and measures **~8.0-8.5 s** with it (about
+  0.17 s per candidate; measured 2026-09-11 on this machine, warm, with the same benchmark: 50 enabled
+  stops, 21.133 s before U7 and 8.319/8.404/8.535 s in three after-runs, about 2.5×; the ~100-stop
+  stress reference measured 74.775 s before and 29.875/30.352/31.115 s after (about 2.5×), and the
+  ~30-stop demo plan 5.669 s before and 2.507/2.577/2.677 s after (about 2.2×), all in the same
+  benchmark). It remains **outside** the ≤ ~5 s acceptable target and just above the owner's
+  ≤ ~8 s "good enough" target, so both are still reported rather than claimed as met.
+  U7 changed only *how* a complete route is priced - prefix reuse plus the FINISH leg, exactly - so
+  the same candidate set, the same moves in the same order, the same accept/reject decisions and the
+  same `evaluations` ceiling are preserved. No figure was improved by a candidate prefilter, an
+  approximate ranking, a quality-degrading shortlist, a weight change or a shortened neighbourhood -
+  all of which remain forbidden - and no figure is estimated or borrowed from another scale. The
+  asserted bound at this scale is the generous owner-accepted regression bound of D34 (~150 s), not
+  the ≤ ~5 s engineering target. What is left is the cost of the complete-route evaluations
+  themselves (one route pass per candidate move, one million evaluations for the 50-candidate loop),
+  plus the exact travel-delta ranking of the whole neighbourhood each pass.
 - **The architecture must not be redesigned around a hard 50-stop maximum.** The scale decision
   changes the *performance target*; it introduces **no new hard validation limit** and no hard
   maximum stop count. The domain, the optimizer and the fixture generator stay able to evolve to
@@ -607,6 +633,59 @@ do it.
   item 6 note, this entry, `docs/ARCHITECTURE.md`, `README.md`, the demo report's scale/performance
   block, the benchmark tool's per-fixture profiles and the scale tests.
 - Status: `approved`. Spec: §19, §20, §13 (D18). Owner authorization: Stage 2.1 sections A, E, F.
+
+## D37 — Stage 2.2: exact incremental-evaluation performance follow-up (owner decision)
+
+> **Authorization, by name.** This decision records the owner's **Stage 2.2 authorization, sections
+> 1–6**. It is the **bounded follow-up the owner authorized after choosing option B** (a performance
+> follow-up that may change only *how* a complete route is priced) instead of accepting the measured
+> **~18–25 s** warm portfolio latency (D36) as the shipped MVP state. Sections 1–6 set the exactness
+> constraint, the regression gate, the honest-reporting rule and the stop rule recorded below, and
+> Stage 2.2 unit U7 is the unit that ran under them.
+
+- **The exactness constraint (verbatim in substance).** No candidate prefiltering. No approximate
+  ranking. No candidate shortlist. No weaker local search. No changed route objective. No changed
+  service-window semantics. No hidden weighting. No reduced candidate set. **Every eligible candidate
+  is still evaluated**, and the ranking and feasibility results **must match the quality-correct
+  reference**. There is no exception clause: speed could not be bought with quality.
+- **The regression gate.** Deterministic fixtures are compared **old reference vs new** and must
+  agree on: the same feasible / infeasible candidates, the top-K order, the recommended stop, the
+  complete elapsed duration, the violations and the FINISH time, with **no missing and no duplicated
+  stops**. The **slow exhaustive comparison stays opt-in** (behind `ROUTEPILOT_SLOW_TESTS`,
+  `tests/engine/test_optimizer_performance.py:IncrementalSlowComparisonTests`), exactly as before
+  this unit; the default suite keeps the move-by-move equivalence check against the reference path
+  and a deliberate corruption that proves the comparison can fail.
+- **What landed in U7** (`core/engine/optimizer/local_search.py`): **exact prefix reuse resumed from
+  each move's own divergence point, plus the FINISH leg**, so a move is priced from the base route's
+  already-evaluated prefix instead of re-walking the whole route. The **same evaluated moves, in the
+  same order, with the same accept/reject decisions and the same `evaluations` ceiling** are
+  preserved, and the **reference full-evaluation path stays callable** - it is the comparison
+  baseline the gate uses. U7 changes only *how* a complete route is priced.
+- **Measured outcome and the honest verdict** (2026-09-11, this development machine, warm): portfolio
+  ~50 enabled stops **~21.1 s → ~8.0-8.5 s**, about **2.5x**; stress
+  ~97 enabled stops **~74.8 s → ~29.9-31.1 s**, about **2.5x**; demo plan ~31 enabled stops
+  **~5.7 s → ~2.5-2.7 s**, about **2.2x**. Every figure above is a real recorded run of the same
+  benchmark tool, and the ranges are that tool's after-runs against their own pre-U7 figures:
+  8.319/8.404/8.535 s against 21.133 s (portfolio), 29.875/30.352/31.115 s against 74.775 s (stress)
+  and 2.507/2.577/2.677 s against 5.669 s (demo). The Supervisor's independent before/after run on the
+  same machine measured **22.846 s → 8.208 s** (portfolio), **79.916 s → 31.340 s** (stress) and
+  **5.858 s → 2.672 s** (demo), all inside those bands. One additional *live* `demo.report` run of the
+  portfolio loop measured **7.96 s**, so the portfolio band is stated as **~8.0-8.5 s across recorded
+  runs** rather than as a single figure. The owner's targets are stated plainly: the preferred
+  **≤ 5 s** target is **NOT met**, and the **≤ 8 s** "good enough" target is **not reliably met** -
+  the benchmark after-runs sit at 8.05-8.54 s and only the one live run reached 7.96 s, so the target
+  is **straddled rather than reached** and is never claimed as met. Per the owner's own rule,
+  optimization **stopped** there and the best **exact** result is **reported** instead of being chased.
+- **The owner's stated consequence applies.** Because the **≤ 8 s** "good enough" target was not
+  reached, the remaining latency is **accepted as an explicit MVP limitation** and the work **moves on
+  to Stage 3**. Nothing in this decision, or in U7, claims the ≤ 5 s or the ≤ 8 s figure is met.
+- **No quality-degrading shortcut** was used, and none is authorized by this decision: the forbidden
+  list above stays forbidden, and D34's exhaustive candidate set, its deterministic `evaluations`
+  ceiling and its accepted interim bound (`ACCEPTED_INTERIM_LOOP_LIMIT_SEC`) remain in force. D34 is
+  amended by this decision only as to *how* a complete route is priced.
+- Status: `approved`. Spec: §20. Owner authorization: Stage 2.2, sections 1–6.
+
+---
 
 ## Stage gates
 
@@ -676,11 +755,16 @@ open is marked OPEN.
    **stress fixture** (97 enabled stops, **engineering stress reference, not performance-qualified**;
    the ≤ ~5 s target at that scale is not an MVP gate). The ~100-stop loop exceeds the ≤ ~5 s
    acceptable target and is **accepted as an interim limitation** (D34, amended by D36); the
-   ~50-stop loop is measured and reported honestly (warm ~19–21 s on this machine) rather than
-   optimized with any quality-degrading shortcut, because closing that gap needs the **incremental /
-   delta complete-route evaluator** - the one **DEFERRED** Stage 2 deliverable - and a real
-   algorithmic rewrite is out of scope for this unit. Until it lands, no prefilter, no shortlist and
-   no approximation is authorized, and the candidate set stays exhaustive at every scale.
+   ~50-stop loop is measured and reported honestly (warm ~8.0-8.5 s on this machine after the Stage 2.2
+   U7 incremental evaluator, down from ~18-25 s) rather than optimized with any quality-degrading
+   shortcut. Stage 2.2 U7 has since landed the **incremental / delta complete-route evaluator** that
+   D34 deferred: it prices each candidate by resuming from the base route's evaluated prefix and
+   walking only the positions the move reorders, with identical results (the same moves, the same
+   order, the same accept/reject decisions and the same `evaluations` ceiling), and it makes the
+   portfolio and stress scales about 2.5x faster and the ~30-stop demo plan about 2.2x faster, so the
+   speedup is not flat across scales (D37). That is still outside the ≤ ~5 s target and just above the
+   owner's ≤ ~8 s "good enough" target, so no prefilter, no shortlist and no
+   approximation is authorized, and the candidate set stays exhaustive at every scale.
 7. **Optimizer guarantees** (v2 §21): START fixed, FINISH fixed, driver-selected first stop fixed,
    every enabled stop exactly once, disabled stops excluded, hard-window feasibility explicit, no
    accepted local-search move may worsen the accepted objective, deterministic tie-breaking.

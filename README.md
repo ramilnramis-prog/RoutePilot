@@ -51,17 +51,21 @@ Implemented so far:
   the ~30-stop demo plan, the **~50-enabled-stop portfolio fixture** (the primary MVP target, with
   the preferred ≤ ~3 s / acceptable ≤ ~5 s targets reported) and the **~100-stop stress reference**,
   labelling each with its exact enabled count and DEMO/SYNTHETIC provenance. The measured
-  ~100-stop latency is an accepted interim limitation (D34) and the incremental/delta evaluator that
-  would remove it is deferred; the ~50-stop figure is measured and **reported honestly** as it is
-  (~19-25 s warm on the development machine, i.e. outside the ≤ ~5 s target), never improved with a
-  prefilter, a shortlist, an approximate ranking or any other quality-degrading shortcut, and never
+  ~100-stop latency is an accepted interim limitation (D34); the incremental/delta complete-route
+  evaluator is implemented (Stage 2.2 U7, `core.engine.optimizer.local_search`) and makes the
+  exhaustive loop about **2.5x** faster at the portfolio and stress scales and about **2.2x** faster
+  on the ~30-stop demo plan, with identical results, and
+  the ~50-stop figure is measured and **reported honestly** as it is (~8.0-8.5 s warm on the
+  development machine, i.e. outside the ≤ ~5 s target and just above the owner's ≤ ~8 s
+  "good enough" target), never improved with a prefilter, a
+  shortlist, an approximate ranking or any other quality-degrading shortcut, and never
   asserted at a `≤ ~5 s` wall-clock second - the asserted guard at every measured scale, the primary
   MVP scale included, is the generous owner-accepted regression bound of D34 (~150 s);
 - error taxonomy split from violations, `tools/doctor.py`, and a deterministic offline test suite;
 - [`docs/STORAGE_SCHEMA.md`](docs/STORAGE_SCHEMA.md) — **proposal only**, no storage code.
 
 Not implemented yet (by design): SQLite persistence, web UI, map and routing providers, traffic,
-side-of-road logic, active-leg protection, and the deferred incremental/delta evaluator.
+side-of-road logic and active-leg protection.
 
 **Every travel time and distance in the demo is synthetic** and is labelled as such. It is not road
 routing and must never be shown as such.
@@ -174,7 +178,7 @@ tests/    deterministic offline unittest suite
 | 1 ✅ | cost scoring over implemented components, deterministic demo dataset (~30 stops), synthetic matrix, 04:00 / 08:00 scenario, candidate evaluation, numeric demo report |
 | 1.5 ✅ | semantics migration off the revoked AUTO model: RECOMMEND/MANUAL, recommendation vs driver decision, `awaiting_first_stop_choice` (D4–D11, D32) |
 | 2 ✅ | complete-route evaluation (FINISH leg included), deterministic optimizer with a measured leg cache, **exhaustive** complete-route first-stop recommendation with top-K and rejected-candidate diagnostics, recommendation and route fingerprints, the three baselines, the **complete elapsed-duration default objective with the owner's deterministic 5-key ranking** (D35), the **scale decision: ~50 enabled stops is the primary MVP target** with its portfolio fixture and the ~100-stop stress benchmark (D36), and the complete-route demo narrative (U1–U6, U6b) |
-| 2 (deferred) | incremental / delta complete-route evaluator to remove the ~100-stop latency accepted in D34 (and, under D36, to close the gap at the ~50-stop primary target) — recorded, not implemented; no prefilter or approximation meanwhile |
+| 2.2 ✅ | the **exact incremental / delta complete-route evaluator** (U7): prefix reuse plus the FINISH leg, identical semantics, about 2.5x lower latency at the portfolio and stress scales and about 2.2x on the ~30-stop demo plan; the reference full pass stays the comparison baseline and the opt-in slow equivalence gate proves it move by move |
 | 3 | SQLite storage + schema implementation + round-trip tests |
 | 4 | API + web UI (map, timeline panel, route summary, top-K, override) |
 | 5 | reoptimization after each served stop + active-leg protection groundwork |

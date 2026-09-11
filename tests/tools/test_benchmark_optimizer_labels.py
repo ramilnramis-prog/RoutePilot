@@ -175,10 +175,10 @@ class PortfolioFixtureLabelTests(unittest.TestCase):
         self.assertTrue(dataset.profile.is_portfolio)
         self.assertTrue(dataset.profile.is_performance_qualified)
         # The primary target's v2 section 20 numbers are REPORTED, not asserted: the shipped exact
-        # implementation measures far outside the acceptable target at this scale, and closing that
-        # gap needs the deferred incremental/delta evaluator. What the primary MVP scale DOES carry
+        # implementation measures outside the acceptable target at this scale even after the Stage 2.2
+        # U7 incremental evaluator. What the primary MVP scale DOES carry
         # is the generous owner-accepted regression bound (D34) - the same ~150 s guard the other
-        # scales use and roughly seven times the measured ~21-22 s at 50 enabled stops - so the
+        # scales use and roughly eighteen times the measured ~8.1-8.5 s at 50 enabled stops - so the
         # primary MVP scale is not left without a bound while the reported <= 5 s target keeps its
         # own honest verdict (the U6b review fix).
         self.assertEqual(dataset.profile.asserted_bound_sec, ACCEPTED_INTERIM_LOOP_LIMIT_SEC)
