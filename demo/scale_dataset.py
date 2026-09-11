@@ -1,12 +1,20 @@
-"""Deterministic ~100-stop benchmark fixture (Stage 2 unit U3; v2 sections 19, 20, 21, D18).
+"""Deterministic scale benchmark fixtures (Stage 2 units U3 and U6b; v2 sections 19, 20, 21, D18).
 
-**DEMO / SYNTHETIC DATA - A BENCHMARK FIXTURE, NOT THE PRODUCT DEMO DATASET.**
+**DEMO / SYNTHETIC DATA - BENCHMARK FIXTURES, NOT THE PRODUCT DEMO DATASET.**
 
-This is not the demo plan of :mod:`demo.dataset` and it is not a customer scenario. It exists to
-answer one engineering question of v2 section 20: *is exhaustive complete-route optimization over
-every first-stop candidate affordable at approximately 100 service stops?* Everything here is
-invented and deterministic: fixed date, fixed time zone, fixed departure time, synthetic
-coordinates, synthetic windows.
+This is not the demo plan of :mod:`demo.dataset` and it is not a customer scenario. It answers one
+engineering question of v2 section 20: *is exhaustive complete-route optimization over every
+first-stop candidate affordable at this scale?* Everything here is invented and deterministic: fixed
+date, fixed time zone, fixed departure time, synthetic coordinates, synthetic windows.
+
+Two scales are built from the **same** deterministic generator, so the smaller one is a scale
+subset of the other and neither can drift into a different shape:
+
+* :data:`SCALE_DEFAULT_STOP_COUNT` (**100** stops) - the engineering stress reference. Since the
+  owner's Stage 2.1 scale decision (D36) 100 stops is *not* a hard MVP performance requirement; it
+  is retained as a stress/engineering reference that is **not performance-qualified**.
+* :data:`PORTFOLIO_STOP_COUNT` (**55** stops -> exactly :data:`PORTFOLIO_ENABLED_STOP_COUNT` = 50
+  **enabled** stops) - the primary MVP target: approximately 50 enabled service stops (D36).
 
 The plan is built to be representative of the shape an ENTERPRISE plan has at that scale
 (D18: dozens -> ~100 -> 100+ stops):
@@ -30,7 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 
-from core.model.cost_policy import RouteCostPolicy, demo_provisional_policy
+from core.model.cost_policy import RouteCostPolicy, smart_route_elapsed_policy
 from core.model.first_stop import FirstStopIntent
 from core.model.ids import PlanId
 from core.model.route_plan import RoutePlan
@@ -43,6 +51,11 @@ from core.model.service_window import (
 from core.model.value_objects import GeoPoint, PlaceRef
 
 __all__ = [
+    "PORTFOLIO_DISABLED_STOP_COUNT",
+    "PORTFOLIO_ENABLED_STOP_COUNT",
+    "PORTFOLIO_PLAN_ID",
+    "PORTFOLIO_STOP_COUNT",
+    "PORTFOLIO_WARNING",
     "SCALE_DEFAULT_SERVICE_DURATION",
     "SCALE_DEFAULT_STOP_COUNT",
     "SCALE_DEPARTURE_TIME",
@@ -52,7 +65,10 @@ __all__ = [
     "SCALE_WARNING",
     "FINISH_POINT",
     "WAREHOUSE_POINT",
+    "build_portfolio_plan",
     "build_scale_plan",
+    "build_scale_specs",
+    "portfolio_warning_text",
     "scale_warning_text",
 ]
 
@@ -65,6 +81,33 @@ SCALE_DEPARTURE_TIME = datetime(2026, 9, 11, 1, 0, tzinfo=timezone.utc)
 SCALE_PLAN_ID = "scale-benchmark-01"
 SCALE_DEFAULT_STOP_COUNT = 100
 SCALE_DEFAULT_SERVICE_DURATION = 900
+
+#: The owner's primary MVP scale target (D36): **approximately 50 enabled service stops**.
+#:
+#: The number below is not that target verbatim - it is the **total** stop count that makes the
+#: fixture contain exactly :data:`PORTFOLIO_ENABLED_STOP_COUNT` enabled stops once the deterministic
+#: disabled policy of :data:`PORTFOLIO_DISABLED_EVERY` is applied. Both numbers are recorded, and
+#: the plan's own counts are the single source of truth: the fixture is never labelled "50 stops"
+#: while holding a different number of enabled stops (see the guard in
+#: :func:`build_portfolio_plan`).
+PORTFOLIO_STOP_COUNT = 55
+
+#: Every ``PORTFOLIO_DISABLED_EVERY``-th stop of the portfolio fixture is disabled.
+PORTFOLIO_DISABLED_EVERY = 10
+
+#: The exact enabled-stop count of the portfolio fixture - and the primary MVP target (D36).
+PORTFOLIO_ENABLED_STOP_COUNT = 50
+
+#: The exact disabled-stop count of the portfolio fixture.
+PORTFOLIO_DISABLED_STOP_COUNT = 5
+
+PORTFOLIO_PLAN_ID = "portfolio-benchmark-01"
+
+PORTFOLIO_WARNING = (
+    "DEMO / SYNTHETIC PORTFOLIO FIXTURE (~50 enabled service stops, the MVP scale target of D36) - "
+    "invented stops, synthetic coordinates, not real addresses, not real opening hours, not real "
+    "routing"
+)
 
 SCALE_WARNING = (
     "DEMO / SYNTHETIC BENCHMARK FIXTURE - invented stops, synthetic coordinates, "
@@ -117,7 +160,10 @@ _ROTATION: tuple[tuple[ServiceWindow, int | None, int | None], ...] = (
     (_W_0900_1800, 2400, 2),
 )
 
-#: Every ``DISABLED_EVERY``-th stop is disabled, so the plan has a few excluded stops at any scale.
+#: Every ``DISABLED_EVERY``-th stop is disabled by default, so the ~100-stop stress fixture has a
+#: few excluded stops at any scale. The portfolio fixture passes its own policy
+#: (:data:`PORTFOLIO_DISABLED_EVERY`) instead of changing this one, so the ~100-stop fixture - and
+#: every number recorded from it - is byte-for-byte what it always was.
 _DISABLED_EVERY = 27
 
 
@@ -141,9 +187,9 @@ def _point_for_index(index: int) -> GeoPoint:
     )
 
 
-def _is_disabled(index: int) -> bool:
+def _is_disabled(index: int, disabled_every: int = _DISABLED_EVERY) -> bool:
     """A small, deterministic share of disabled stops (never the first one)."""
-    return index > 0 and index % _DISABLED_EVERY == 0
+    return index > 0 and index % disabled_every == 0
 
 
 @dataclass(frozen=True)
@@ -160,12 +206,28 @@ class ScaleStopSpec:
     input_position: int
 
 
-def build_scale_specs(stop_count: int = SCALE_DEFAULT_STOP_COUNT) -> tuple[ScaleStopSpec, ...]:
-    """The deterministic stop list of the fixture, in input order (v2 section 30, D33)."""
+def build_scale_specs(
+    stop_count: int = SCALE_DEFAULT_STOP_COUNT,
+    *,
+    disabled_every: int = _DISABLED_EVERY,
+) -> tuple[ScaleStopSpec, ...]:
+    """The deterministic stop list of a fixture, in input order (v2 section 30, D33).
+
+    ``disabled_every`` is the deterministic disabled policy: every ``disabled_every``-th stop
+    (never the first) is disabled, and everything else - the coordinate sequence, the window
+    rotation, the durations, the priorities and ``input_position`` - is independent of it. That is
+    what lets the portfolio fixture disable every 10th stop (D36) without moving the ~100-stop
+    stress fixture, which keeps the default policy of :data:`_DISABLED_EVERY`.
+    """
     if isinstance(stop_count, bool) or not isinstance(stop_count, int) or stop_count < 2:
         raise ValueError(
             "the scale benchmark needs a whole stop count of at least 2 (START plus FINISH "
             f"are not service stops), got {stop_count!r}"
+        )
+    if isinstance(disabled_every, bool) or not isinstance(disabled_every, int) or disabled_every < 2:
+        raise ValueError(
+            "the disabled policy needs a whole interval of at least 2, so the first stop is never "
+            f"disabled, got {disabled_every!r}"
         )
     specs: list[ScaleStopSpec] = []
     for index in range(stop_count):
@@ -178,7 +240,7 @@ def build_scale_specs(stop_count: int = SCALE_DEFAULT_STOP_COUNT) -> tuple[Scale
                 window=window,
                 service_duration=duration,
                 priority=priority,
-                enabled=not _is_disabled(index),
+                enabled=not _is_disabled(index, disabled_every),
                 input_position=index,
             )
         )
@@ -210,6 +272,7 @@ def build_scale_plan(
     window_end_policy: WindowEndPolicy = DEFAULT_WINDOW_END_POLICY,
     cost_policy: RouteCostPolicy | None = None,
     default_service_duration: int | None = SCALE_DEFAULT_SERVICE_DURATION,
+    disabled_every: int = _DISABLED_EVERY,
 ) -> RoutePlan:
     """Build the deterministic synthetic benchmark plan.
 
@@ -227,14 +290,69 @@ def build_scale_plan(
         departure=PlaceRef(WAREHOUSE_LABEL, WAREHOUSE_POINT),
         departure_time=departure_time if departure_time is not None else SCALE_DEPARTURE_TIME,
         finish=PlaceRef(FINISH_LABEL, FINISH_POINT),
-        stops=tuple(_build_stop(spec) for spec in build_scale_specs(stop_count)),
-        cost_policy=cost_policy if cost_policy is not None else demo_provisional_policy(),
+        stops=tuple(
+            _build_stop(spec)
+            for spec in build_scale_specs(stop_count, disabled_every=disabled_every)
+        ),
+        cost_policy=cost_policy if cost_policy is not None else smart_route_elapsed_policy(),
         window_end_policy=window_end_policy,
         default_service_duration=default_service_duration,
         first_service_stop=FirstStopIntent.recommend(),
     )
 
 
+def build_portfolio_plan(
+    *,
+    plan_id: str = PORTFOLIO_PLAN_ID,
+    departure_time: datetime | None = None,
+    timezone_name: str = SCALE_TIMEZONE,
+    window_end_policy: WindowEndPolicy = DEFAULT_WINDOW_END_POLICY,
+    cost_policy: RouteCostPolicy | None = None,
+    default_service_duration: int | None = SCALE_DEFAULT_SERVICE_DURATION,
+) -> RoutePlan:
+    """Build the **~50 enabled-stop portfolio fixture** - the primary MVP scale target (D36).
+
+    The owner's Stage 2.1 scale decision makes approximately 50 enabled service stops the primary
+    MVP target and demotes 100 stops to a stress/engineering reference. This fixture is that target,
+    built from the same deterministic generator as the stress fixture (same coordinates, windows,
+    durations, priorities and ``input_position`` sequence), with the portfolio's own deterministic
+    disabled policy so it holds exactly :data:`PORTFOLIO_ENABLED_STOP_COUNT` enabled stops out of
+    :data:`PORTFOLIO_STOP_COUNT` total.
+
+    The counts above are asserted against the built plan on every call: a fixture that drifted to a
+    materially different enabled count could not keep calling itself the ~50-stop fixture, and the
+    benchmark and report labels read the plan's own counts.
+    """
+    plan = build_scale_plan(
+        PORTFOLIO_STOP_COUNT,
+        plan_id=plan_id,
+        departure_time=departure_time,
+        timezone_name=timezone_name,
+        window_end_policy=window_end_policy,
+        cost_policy=cost_policy,
+        default_service_duration=default_service_duration,
+        disabled_every=PORTFOLIO_DISABLED_EVERY,
+    )
+    enabled = len(plan.active_stops())
+    if enabled != PORTFOLIO_ENABLED_STOP_COUNT or len(plan.disabled_stops()) != (
+        PORTFOLIO_DISABLED_STOP_COUNT
+    ):
+        raise AssertionError(
+            "the portfolio fixture must hold exactly "
+            f"{PORTFOLIO_ENABLED_STOP_COUNT} enabled stops out of {PORTFOLIO_STOP_COUNT} total "
+            f"({PORTFOLIO_DISABLED_STOP_COUNT} disabled), but it holds {enabled} enabled of "
+            f"{len(plan.stops)} total ({len(plan.disabled_stops())} disabled) - the deterministic "
+            "disabled policy and the declared counts have drifted apart, so no label that calls "
+            "this the ~50-stop fixture would be true (D36)"
+        )
+    return plan
+
+
 def scale_warning_text() -> str:
     """One-line provenance warning for reports and benchmarks."""
     return SCALE_WARNING
+
+
+def portfolio_warning_text() -> str:
+    """One-line provenance warning for the ~50-stop portfolio fixture (D36)."""
+    return PORTFOLIO_WARNING

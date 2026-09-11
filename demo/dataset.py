@@ -64,7 +64,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 
-from core.model.cost_policy import RouteCostPolicy, demo_provisional_policy
+from core.model.cost_policy import RouteCostPolicy, smart_route_elapsed_policy
 from core.model.first_stop import FirstStopIntent
 from core.model.ids import PlanId
 from core.model.route_plan import RoutePlan
@@ -278,7 +278,7 @@ def build_demo_plan(
         stops=tuple(
             _build_stop(spec, index) for index, spec in enumerate(work_list_order())
         ),
-        cost_policy=cost_policy if cost_policy is not None else demo_provisional_policy(),
+        cost_policy=cost_policy if cost_policy is not None else smart_route_elapsed_policy(),
         window_end_policy=window_end_policy,
         default_service_duration=DEMO_DEFAULT_SERVICE_DURATION,
         first_service_stop=FirstStopIntent.recommend(),

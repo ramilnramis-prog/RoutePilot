@@ -11,9 +11,17 @@ the narrative the report shows - and they pin the four claims of v2 section 33:
 They also pin the two claims the U5 review found unpinned and therefore false-or-fragile: the
 printed "least complete driving" comparison is derived from the ranking it claims to be about, and
 the rejected-candidate diagnostics the report prints (v2 section 14, D9) come from the real fixture.
+Since D35 they additionally pin the objective change: the default policy is the complete elapsed
+route duration (`smart_route_elapsed_v1`, not provisional), the ranking key is the owner's 5-tuple,
+and the OBJECTIVE-ALIGNMENT table reports the previous D31-provisional recommendation next to the
+new elapsed-duration one.
 
 The exhaustive demo-scale evaluation costs several seconds, so it is evaluated through the report's
-memoized helpers: every test in this module reads the same evaluation.
+memoized helpers: every test in this module reads the same evaluation. The **heavy** measurement -
+the ~50-enabled-stop portfolio fixture's exhaustive loop that the CLI runs for real (D36) - is
+opt-in behind ``ROUTEPILOT_SLOW_TESTS``, exactly like the heavy comparisons of
+``tests/engine/test_optimizer_performance.py``; the default suite pins labels, enabled counts and
+fixture determinism only and never asserts a wall-clock second.
 """
 
 from __future__ import annotations
@@ -21,18 +29,27 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import io
+import os
 import time as timer
 import unittest
 from datetime import time
 
 from core.engine.first_stop.evaluation import FirstStopEvaluationReport, score_of
+from core.model.cost_policy import demo_provisional_policy, smart_route_elapsed_policy
 from core.model.first_stop import FirstStopState, RecommendationStatus
 from core.model.service_window import ServiceWindow
-from demo.dataset import HEADLINE_STOP_IDS, build_demo_plan
+from demo.dataset import (
+    HEADLINE_STOP_IDS,
+    build_demo_plan,
+    demo_departure_time_at,
+)
 from demo.report import (
     BENCHMARK_COMMAND,
     DEMO_EVALUATION_RUNTIME_BUDGET_SEC,
     DEPARTURE_SWEEP_HOURS,
+    OWNER_SCALE_STATEMENT,
+    PORTFOLIO_ACCEPTABLE_BUDGET_SEC,
+    PREVIOUS_DEFAULT_WAITING_WEIGHT,
     RECORDED_BENCHMARK,
     WEIGHT_SENSITIVITY_RATIOS,
     build_report,
@@ -42,18 +59,53 @@ from demo.report import (
     fewest_driving_ids,
     format_duration,
     main,
+    objective_alignment,
     objective_winner_sentence,
+    performance_scale_lines,
+    previous_default_recommendation,
     recommendation_preview,
     rejected_candidate_lines,
     weight_sensitivity,
+)
+from demo.scale_dataset import (
+    PORTFOLIO_DISABLED_STOP_COUNT,
+    PORTFOLIO_ENABLED_STOP_COUNT,
+    PORTFOLIO_STOP_COUNT,
+    SCALE_DEFAULT_STOP_COUNT,
+    build_portfolio_plan,
 )
 from demo.synthetic_matrix import demo_matrix
 
 T = 3600
 M = 60
 
-#: The recommended first stop of the demo plan at 04:00 under the shipped provisional policy.
-RECOMMENDED = "S25-ON-OPENING"
+#: Set this environment variable to run the tests that measure the ~50-stop portfolio fixture for
+#: real (any truthy value). It matches the gate of ``tests/engine/test_optimizer_performance.py``.
+SLOW_TESTS_ENV = "ROUTEPILOT_SLOW_TESTS"
+
+#: Whether those heavy measurements run. **Off by default**, so the default suite stays fast and the
+#: ~50-stop figure is only ever *reported*, never asserted at an exact wall-clock second (D36).
+SLOW_TESTS_ENABLED = os.environ.get(SLOW_TESTS_ENV, "").strip().lower() not in {
+    "",
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+#: The gate for one test that measures the heavy ~50-stop portfolio loop.
+slow_test = unittest.skipUnless(
+    SLOW_TESTS_ENABLED,
+    f"measures the ~50-stop portfolio fixture, excluded by default; set {SLOW_TESTS_ENV}=1 to run it",
+)
+
+#: The recommended first stop of the demo plan at 04:00 under the shipped default objective
+#: (D35: the complete elapsed route duration, travel 1 / waiting 1).
+RECOMMENDED = "S23-UNKNOWN-HOURS2"
+
+#: The recommended first stop the **previous** default produced at 04:00: the non-default D31
+#: provisional policy (travel 1, waiting 2) ranked with the pre-D35 key (D35 audit trail).
+PREVIOUS_RECOMMENDED = "S25-ON-OPENING"
 
 
 def _demo_report() -> FirstStopEvaluationReport:
@@ -119,10 +171,44 @@ class DemoScenarioTests(unittest.TestCase):
                 self.assertIsNone(self.report.rank_of(candidate.stop_id))
                 self.assertTrue(self.report.reasons_for(candidate.stop_id))
 
-    def test_the_ranking_is_ordered_by_the_complete_route_objective(self) -> None:
-        scores = [candidate.score for candidate in self.report.ranked]
-        self.assertEqual(scores, sorted(scores))
+    def test_the_ranking_is_ordered_by_the_owners_five_key_tuple(self) -> None:
+        # D35: complete elapsed duration, complete travel, complete waiting, input_position,
+        # stop_id - from the complete-route metrics. The weighted score is a reported figure and
+        # need not be monotone with the ranking.
+        positions = {
+            stop.id: stop.input_position for stop in self.plan.active_stops()
+        }
+        expected = sorted(
+            self.report.ranked,
+            key=lambda candidate: (
+                candidate.estimated_complete_route_duration,
+                candidate.complete_travel_time,
+                candidate.complete_waiting_time,
+                positions[candidate.stop_id],
+                candidate.stop_id,
+            ),
+        )
+        self.assertEqual(list(self.report.ranked_ids()), [c.stop_id for c in expected])
         self.assertEqual(self.report.recommended_stop_id, self.report.ranked[0].stop_id)
+        self.assertEqual(self.report.recommended_stop_id, RECOMMENDED)
+        # The first key component is the complete elapsed duration, and it is non-decreasing.
+        durations = [
+            candidate.estimated_complete_route_duration for candidate in self.report.ranked
+        ]
+        self.assertEqual(durations, sorted(durations))
+        # The score is NOT a key component, but with the 1:1 default weights it is exactly the
+        # complete elapsed duration minus the constant service time - the equivalence D35 states,
+        # so here the reported objective and the first key component agree.
+        service = {candidate.total_service_time for candidate in self.report.ranked}
+        self.assertEqual(len(service), 1)
+        service_time = service.pop()
+        self.assertEqual(
+            [candidate.score for candidate in self.report.ranked],
+            [
+                float(candidate.estimated_complete_route_duration - service_time)
+                for candidate in self.report.ranked
+            ],
+        )
 
     def test_complete_duration_includes_travel_waiting_and_service(self) -> None:
         for candidate in list(self.report.ranked) + list(self.report.rejected):
@@ -199,14 +285,22 @@ class CompleteDrivingComparisonTests(unittest.TestCase):
                     + 1,
                 )
 
-    def test_the_nearest_really_drives_least_and_still_ranks_last(self) -> None:
+    def test_the_nearest_really_drives_least_and_still_ranks_near_the_bottom(self) -> None:
         nearest = self.report.find(HEADLINE_STOP_IDS["nearest"])
-        assert nearest is not None
+        recommended = self.report.recommended()
+        assert nearest is not None and recommended is not None
         self.assertLessEqual(
             nearest.complete_travel_time,
             min(candidate.complete_travel_time for candidate in self.report.ranked),
         )
-        self.assertEqual(self.report.rank_of(nearest.stop_id), len(self.report.ranked))
+        # It has the shortest first leg and the least complete driving, yet complete elapsed
+        # duration - the first ranking key component (D35) - puts it in the bottom half: starting
+        # at the nearest customer buys the longest wait of the day.
+        self.assertGreater(self.report.rank_of(nearest.stop_id), len(self.report.ranked) // 2)
+        self.assertGreater(
+            nearest.estimated_complete_route_duration,
+            recommended.estimated_complete_route_duration,
+        )
 
     def test_the_report_prints_the_computed_comparison_and_not_a_stale_superlative(self) -> None:
         text = build_report()
@@ -300,14 +394,21 @@ class DemoProvesSection33Tests(unittest.TestCase):
         # 04:00 does not.
         self.assertEqual(outcomes[-1].recommended_id, HEADLINE_STOP_IDS["nearest"])
         self.assertNotEqual(outcomes[0].recommended_id, HEADLINE_STOP_IDS["nearest"])
-        # The recommendation actually changes three times across the sweep, so the demo does not
-        # rely on a single flip.
+        # The recommendation changes twice across the sweep - 04:00-06:00 all recommend the same
+        # stop under the elapsed-duration objective, then 07:00 and 08:00 differ - so the demo does
+        # not rely on a single flip.
         self.assertEqual(
             [outcome.recommended_id for outcome in outcomes],
-            [RECOMMENDED, RECOMMENDED, "S08-UNKNOWN-HOURS", "S14-PRIORITY-2", HEADLINE_STOP_IDS["nearest"]],
+            [
+                RECOMMENDED,
+                RECOMMENDED,
+                RECOMMENDED,
+                "S14-PRIORITY-2",
+                HEADLINE_STOP_IDS["nearest"],
+            ],
         )
-        self.assertTrue(all(outcome.note for outcome in outcomes[2:]))
-        self.assertEqual(outcomes[2].note, f"changed from {RECOMMENDED} at 05:00")
+        self.assertTrue(all(outcome.note for outcome in outcomes[3:]))
+        self.assertEqual(outcomes[3].note, f"changed from {RECOMMENDED} at 06:00")
 
     def test_the_sweep_reports_the_complete_route_of_each_recommendation(self) -> None:
         for outcome in departure_sweep():
@@ -332,11 +433,29 @@ class DemoProvesSection33Tests(unittest.TestCase):
 
 
 class WeightSensitivityTests(unittest.TestCase):
-    """D31: the demo report shows the provisional weights' sensitivity over the complete routes."""
+    """D31 (non-default since D35): the report studies what a non-zero waiting preference would do."""
 
     def setUp(self) -> None:
         self.plan = build_demo_plan()
         self.rows = weight_sensitivity()
+
+    def test_the_plan_ships_the_elapsed_duration_objective_and_not_the_study_policy(self) -> None:
+        # D35: the default is the complete elapsed route duration at 1:1 and is NOT provisional;
+        # the D31 provisional weights survive only inside this labelled study.
+        from core.model.cost_policy import (
+            SMART_ROUTE_ELAPSED_POLICY_NAME,
+            CostComponent,
+        )
+
+        self.assertEqual(self.plan.cost_policy.name, SMART_ROUTE_ELAPSED_POLICY_NAME)
+        self.assertFalse(self.plan.cost_policy.provisional)
+        self.assertEqual(
+            float(self.plan.cost_policy.weights[CostComponent.TRAVEL_TIME]), 1.0
+        )
+        self.assertEqual(
+            float(self.plan.cost_policy.weights[CostComponent.WAITING_TIME]), 1.0
+        )
+        self.assertTrue(all(row.travel_weight == 1.0 for row in self.rows))
 
     def test_the_ratios_are_evaluated_over_the_complete_route_objective(self) -> None:
         self.assertEqual(
@@ -350,50 +469,195 @@ class WeightSensitivityTests(unittest.TestCase):
                 self.assertGreater(row.complete_duration, 0)
 
     def test_the_degenerate_one_to_one_case_is_reported_as_a_tie(self) -> None:
-        # The 1:1 case is the one D31 calls out: the objective cannot separate the candidates, so
-        # the documented tie-break decides. The report says so instead of claiming a clear winner.
+        # The 1:1 case is the one D31 calls out, and since D35 it is also numerically the shipped
+        # objective: the weighted objective cannot separate the four candidates, so the
+        # deterministic 5-key order decides. The report says so instead of claiming a clear winner.
         one_to_one = self.rows[0]
         self.assertEqual(one_to_one.waiting_weight, 1.0)
         self.assertGreater(one_to_one.tied_with_recommendation, 1)
         self.assertIn("DEGENERATE 1:1 case", one_to_one.note)
         self.assertIn("input_position, stop_id", one_to_one.note)
+        self.assertEqual(one_to_one.recommended_id, RECOMMENDED)
 
-    def test_the_shipped_and_heavier_weights_recommend_the_same_stop(self) -> None:
+    def test_the_one_to_one_row_reproduces_the_shipped_recommendation(self) -> None:
+        # The 1:1 row of the study is numerically the default objective, and the shipped default
+        # really does recommend the same stop at 04:00.
+        one_to_one = self.rows[0]
+        shipped = _demo_report().recommended()
+        assert shipped is not None
+        self.assertEqual(one_to_one.recommended_id, shipped.stop_id)
+        self.assertEqual(one_to_one.recommended_score, shipped.score)
+        self.assertEqual(one_to_one.complete_duration, shipped.estimated_complete_route_duration)
+
+    def test_a_non_zero_waiting_preference_would_move_the_objective_not_the_ranking(self) -> None:
+        # D35 makes complete elapsed duration the first ranking key component, so a heavier waiting
+        # weight changes the reported objective but not which stop the engine recommends here. The
+        # rows say exactly that instead of claiming the answer moved.
         winners = {row.waiting_weight: row.recommended_id for row in self.rows}
-        self.assertEqual(winners[1.0], "S09-ALWAYS-OPEN")
+        self.assertEqual(winners[1.0], RECOMMENDED)
         self.assertEqual(winners[1.5], RECOMMENDED)
         self.assertEqual(winners[2.0], RECOMMENDED)
         self.assertEqual(winners[3.0], RECOMMENDED)
-
-    def test_the_shipped_row_is_the_policy_the_plan_actually_ships(self) -> None:
-        # The 2.0 row must be the configured provisional policy (D31), not a different policy that
-        # happens to look similar.
-        from core.model.cost_policy import CostComponent
-
-        shipped = next(row for row in self.rows if row.waiting_weight == 2.0)
-        self.assertEqual(
-            shipped.waiting_weight,
-            float(self.plan.cost_policy.weights[CostComponent.WAITING_TIME]),
-        )
-        self.assertEqual(shipped.recommended_id, _demo_report().recommended_stop_id)
-
-    def test_an_unweighted_waiting_time_would_change_the_recommendation(self) -> None:
-        # The sensitivity section is not decorative: the answer really does depend on the
-        # provisional weight, which is exactly why the weights are marked provisional (D31).
-        self.assertNotEqual(self.rows[0].recommended_id, self.rows[-1].recommended_id)
+        for row in self.rows[1:]:
+            with self.subTest(weight=row.waiting_weight):
+                self.assertIn("a NON-ZERO waiting preference would make the objective pick", row.note)
+                self.assertIn(PREVIOUS_RECOMMENDED, row.note)
+                self.assertIn("shipped ranking key puts complete elapsed duration first", row.note)
+        # The study is not decorative: the objective's own preference really does differ from the
+        # shipped recommendation under a non-zero waiting preference.
+        self.assertTrue(all(row.recommended_id != PREVIOUS_RECOMMENDED for row in self.rows))
         shipped = demo_evaluation(self.plan)
         self.assertEqual(shipped.recommended_stop_id, RECOMMENDED)
 
     def test_the_report_prints_every_sensitivity_row(self) -> None:
         text = build_report()
         self.assertIn(
-            "SENSITIVITY TO THE PROVISIONAL WAITING WEIGHT - COMPLETE-ROUTE OUTCOMES (D31)", text
+            "SENSITIVITY STUDY (NON-DEFAULT) - WHAT A NON-ZERO WAITING PREFERENCE WOULD DO (D31)",
+            text,
         )
-        self.assertIn("PROVISIONAL WEIGHTS, NOT PRODUCT TRUTH (D31)", text)
+        # The PROVISIONAL marker belongs to this study alone; the shipped policy line is not
+        # provisional (D35).
+        self.assertIn("PROVISIONAL DEMO WEIGHTS, not product truth", text)
+        self.assertIn("NON-DEFAULT STUDY, NOT THE SHIPPED OBJECTIVE", text)
+        self.assertIn("waiting preference of ZERO (D35)", text)
+        self.assertIn("demo_provisional_v1", text)
         for row in self.rows:
             with self.subTest(weight=row.waiting_weight):
                 self.assertIn(f"{row.waiting_weight:>6.1f}  {row.recommended_id}", text)
         self.assertIn("DEGENERATE 1:1 case", text)
+        self.assertIn("a NON-ZERO waiting preference would make the objective pick", text)
+
+
+class ObjectiveAlignmentTests(unittest.TestCase):
+    """D35: the report carries the audit trail of the objective change, hour by hour.
+
+    The table must show, per departure hour, what the **previous** default (the non-default D31
+    provisional policy ranked with the pre-D35 key) recommended and what the **new** default
+    (complete elapsed duration, ranked with the owner's 5-tuple) recommends, with the new one's
+    FINISH, complete travel, waiting, service and feasibility. The new winner may legitimately
+    differ - it does at 04:00-06:00 - and the report must say so rather than preserve the old one.
+    """
+
+    def setUp(self) -> None:
+        self.plan = build_demo_plan()
+        self.rows = objective_alignment()
+        self.text = build_report()
+
+    def test_every_departure_hour_is_covered_in_order(self) -> None:
+        self.assertEqual(
+            tuple(row.local_hour for row in self.rows), DEPARTURE_SWEEP_HOURS
+        )
+        self.assertEqual(DEPARTURE_SWEEP_HOURS, (4, 5, 6, 7, 8))
+        for row in self.rows:
+            with self.subTest(hour=row.local_hour):
+                self.assertIsNotNone(row.new_recommended_id)
+                self.assertIsNotNone(row.finish)
+                self.assertIsNotNone(row.complete_travel)
+                self.assertIsNotNone(row.complete_waiting)
+                self.assertIsNotNone(row.complete_service)
+                self.assertIs(row.feasible, True)
+
+    def test_the_previous_column_is_the_pre_d35_default(self) -> None:
+        # Reconstructed, not remembered: the D31 provisional policy (travel 1, waiting
+        # PREVIOUS_DEFAULT_WAITING_WEIGHT) ranked with the pre-D35 key.
+        self.assertEqual(PREVIOUS_DEFAULT_WAITING_WEIGHT, 2.0)
+        self.assertTrue(demo_provisional_policy().provisional)
+        self.assertFalse(smart_route_elapsed_policy().provisional)
+        for row in self.rows:
+            with self.subTest(hour=row.local_hour):
+                provisional = demo_evaluation(
+                    dataclasses.replace(
+                        self.plan,
+                        departure_time=demo_departure_time_at(row.local_hour),
+                        cost_policy=demo_provisional_policy(),
+                    )
+                )
+                previous = previous_default_recommendation(provisional, self.plan)
+                assert previous is not None
+                self.assertEqual(row.previous_recommended_id, previous.stop_id)
+        self.assertEqual(
+            [row.previous_recommended_id for row in self.rows],
+            [
+                PREVIOUS_RECOMMENDED,
+                PREVIOUS_RECOMMENDED,
+                "S08-UNKNOWN-HOURS",
+                "S14-PRIORITY-2",
+                HEADLINE_STOP_IDS["nearest"],
+            ],
+        )
+
+    def test_the_new_column_is_the_shipped_elapsed_duration_recommendation(self) -> None:
+        sweep = departure_sweep(plan=self.plan)
+        self.assertEqual(
+            [row.new_recommended_id for row in self.rows],
+            [outcome.recommended_id for outcome in sweep],
+        )
+        self.assertEqual(
+            [row.new_recommended_id for row in self.rows],
+            [
+                RECOMMENDED,
+                RECOMMENDED,
+                RECOMMENDED,
+                "S14-PRIORITY-2",
+                HEADLINE_STOP_IDS["nearest"],
+            ],
+        )
+
+    def test_the_new_column_reports_the_complete_route_of_the_new_winner(self) -> None:
+        for row in self.rows:
+            with self.subTest(hour=row.local_hour):
+                report = demo_evaluation(
+                    dataclasses.replace(
+                        self.plan,
+                        departure_time=demo_departure_time_at(row.local_hour),
+                        cost_policy=smart_route_elapsed_policy(),
+                    )
+                )
+                candidate = report.recommended()
+                assert candidate is not None
+                self.assertEqual(row.new_recommended_id, candidate.stop_id)
+                self.assertEqual(row.finish, candidate.estimated_finish)
+                self.assertEqual(row.complete_travel, candidate.complete_travel_time)
+                self.assertEqual(row.complete_waiting, candidate.complete_waiting_time)
+                self.assertEqual(row.complete_service, candidate.total_service_time)
+                self.assertEqual(row.feasible, candidate.feasible)
+                # The four reported figures are the complete route's own, FINISH leg included.
+                self.assertEqual(
+                    candidate.estimated_complete_route_duration,
+                    candidate.complete_travel_time
+                    + candidate.complete_waiting_time
+                    + candidate.total_service_time,
+                )
+
+    def test_the_change_is_reported_where_it_happened(self) -> None:
+        changed = [row.local_hour for row in self.rows if row.changed]
+        self.assertEqual(changed, [4, 5, 6])
+        unchanged = [row.local_hour for row in self.rows if not row.changed]
+        self.assertEqual(unchanged, [7, 8])
+        # 04:00 legitimately moved away from the previous winner; nothing was tuned to keep it.
+        self.assertNotEqual(self.rows[0].new_recommended_id, self.rows[0].previous_recommended_id)
+        self.assertEqual(self.rows[0].previous_recommended_id, PREVIOUS_RECOMMENDED)
+
+    def test_the_report_prints_the_table_and_its_audit_note(self) -> None:
+        self.assertIn(
+            "OBJECTIVE ALIGNMENT - PREVIOUS D31 PROVISIONAL vs THE NEW ELAPSED-DURATION "
+            "DEFAULT (D35)",
+            self.text,
+        )
+        for column in ("departure", "previous D31", "new default", "FINISH", "c.trav", "c.wait",
+                       "c.svc", "feasible"):
+            with self.subTest(column=column):
+                self.assertIn(column, self.text)
+        for row in self.rows:
+            with self.subTest(hour=row.local_hour):
+                self.assertIn(f"  {row.local_hour:02d}:00      ", self.text)
+                self.assertIn(str(row.new_recommended_id), self.text)
+        self.assertIn("This table is the audit trail for the objective change (D35)", self.text)
+        self.assertIn("recommendation CHANGED", self.text)
+        self.assertIn("same recommendation", self.text)
+        self.assertEqual(
+            self.text.count("recommendation CHANGED"), len([r for r in self.rows if r.changed])
+        )
 
 
 class RecommendationPreviewTests(unittest.TestCase):
@@ -477,10 +741,27 @@ class ReportTextTests(unittest.TestCase):
         self.assertIn("DEMO / SYNTHETIC DATA", report)
         self.assertIn("NOT road routing", report)
 
-    def test_report_marks_the_weights_as_provisional(self) -> None:
+    def test_report_does_not_mark_the_default_policy_as_provisional(self) -> None:
+        # D35: the shipped default objective is the complete elapsed route duration and is not
+        # provisional, so its policy line carries no provisional marker. The marker survives only
+        # inside the labelled non-default sensitivity study of D31.
         report = build_report()
-        self.assertIn("demo_provisional_v1", report)
-        self.assertIn("PROVISIONAL DEMO WEIGHTS, not product truth", report)
+        plan = build_demo_plan()
+        self.assertIn("smart_route_elapsed_v1", report)
+        self.assertIn(
+            f"cost policy       : smart_route_elapsed_v1 "
+            f"(travel_time=1, waiting_time=1)",
+            report,
+        )
+        self.assertNotIn(
+            f"cost policy       : {plan.cost_policy.name}"
+            f" - PROVISIONAL DEMO WEIGHTS",
+            report,
+        )
+        self.assertEqual(report.count("PROVISIONAL DEMO WEIGHTS, not product truth"), 1)
+        study_index = report.index("SENSITIVITY STUDY (NON-DEFAULT)")
+        marker_index = report.index("PROVISIONAL DEMO WEIGHTS, not product truth")
+        self.assertGreater(marker_index, study_index)
 
     def test_report_contains_every_required_section(self) -> None:
         report = build_report()
@@ -493,9 +774,10 @@ class ReportTextTests(unittest.TestCase):
             "NEAREST vs FARTHEST vs THE RECOMMENDATION",
             "BASELINES",
             "DEPARTURE-TIME SWEEP",
+            "OBJECTIVE ALIGNMENT",
             "FINGERPRINTS",
             "REJECTED / INFEASIBLE CANDIDATES",
-            "SENSITIVITY TO THE PROVISIONAL WAITING WEIGHT",
+            "SENSITIVITY STUDY (NON-DEFAULT)",
             "PERFORMANCE",
             "DETERMINISM",
         ):
@@ -528,8 +810,11 @@ class ReportTextTests(unittest.TestCase):
         self.assertIn("nearest       S01-NEAR", report)
         self.assertIn("farthest      S05-FARTHEST", report)
         self.assertIn("ranks                       : recommended #1", report)
-        # The nearest is ranked last and the farthest is rejected: neither is the recommendation.
-        self.assertIn(f"nearest #{len(_demo_report().ranked)}", report)
+        # The nearest is in the bottom half and the farthest is rejected: neither is the
+        # recommendation.
+        nearest_rank = _demo_report().rank_of(HEADLINE_STOP_IDS["nearest"])
+        self.assertGreater(nearest_rank, len(_demo_report().ranked) // 2)
+        self.assertIn(f"nearest #{nearest_rank}", report)
         self.assertIn("farthest REJECTED of", report)
 
     def test_report_prints_both_baselines_and_what_was_saved(self) -> None:
@@ -547,14 +832,25 @@ class ReportTextTests(unittest.TestCase):
         for column in ("1st leg", "c.trav", "c.wait", "c.svc", "c.dur", "travel*w", "wait*w"):
             with self.subTest(column=column):
                 self.assertIn(column, report)
-        self.assertIn("travel_time 24900 x 1 + waiting_time 6720 x 2 = 38340", report)
+        recommended = _demo_report().recommended()
+        assert recommended is not None
+        # The default objective is 1:1 (D35), and the printed breakdown is the candidate's own
+        # measured complete-route figures - not a remembered number.
+        self.assertIn(
+            f"travel_time {recommended.complete_travel_time:.0f} x 1 + "
+            f"waiting_time {recommended.complete_waiting_time:.0f} x 1 = "
+            f"{recommended.score:.0f}",
+            report,
+        )
+        self.assertIn("travel_time 21420 x 1 + waiting_time 9420 x 1 = 30840", report)
 
     def test_report_prints_the_fingerprints_and_how_they_differ(self) -> None:
         report = build_report()
         self.assertIn("recommendation fingerprint (plan.inputs_fingerprint)", report)
         self.assertIn("same fingerprint after selecting", report)
         self.assertIn(f"route fingerprint, first stop {RECOMMENDED}", report)
-        self.assertIn("route fingerprint, first stop S08-UNKNOWN-HOURS", report)
+        second_ranked = _demo_report().ranked[1].stop_id
+        self.assertIn(f"route fingerprint, first stop {second_ranked}", report)
         self.assertIn("deliberately does not", report)
 
     def test_report_prints_the_work_counters(self) -> None:
@@ -569,15 +865,13 @@ class ReportTextTests(unittest.TestCase):
         plan = build_demo_plan()
         rendered = build_report(plan=plan)
         expected_label = (
-            f"  {len(plan.active_stops())} enabled stops ({len(plan.stops)} stops, "
-            f"{len(plan.disabled_stops())} disabled) : "
-            f"{len(plan.active_stops())} candidates"
+            f"{len(plan.active_stops())} enabled stops ({len(plan.stops)} stops, "
+            f"{len(plan.disabled_stops())} disabled)"
         )
-        self.assertEqual(
-            expected_label, "  31 enabled stops (32 stops, 1 disabled) : 31 candidates"
-        )
-        # The recommended path prints it once, and the no-feasible-route path prints the same label.
-        self.assertEqual(rendered.count(expected_label), 1)
+        self.assertEqual(expected_label, "31 enabled stops (32 stops, 1 disabled)")
+        # The scale/performance block prints the demo plan's own label on both paths (recommended
+        # and no-feasible-route), and the counters hang off it under the "demo plan" name (D36).
+        self.assertIn(f"demo plan          :   {expected_label} - 31 candidates", rendered)
         infeasible = dataclasses.replace(
             plan,
             stops=tuple(
@@ -590,7 +884,7 @@ class ReportTextTests(unittest.TestCase):
                 for stop in plan.stops
             ),
         )
-        self.assertIn(expected_label, build_report(plan=infeasible))
+        self.assertIn(f"demo plan          :   {expected_label}", build_report(plan=infeasible))
         # The label's numbers are the plan's own enabled/total/disabled counts, so it cannot drift.
         self.assertIn(
             f"{len(plan.stops)} total, {len(plan.active_stops())} enabled, "
@@ -623,6 +917,91 @@ class ReportTextTests(unittest.TestCase):
         self.assertIn("RECORDED measurement", report)
         self.assertIn("interim limitation (D34)", report)
         self.assertIn(f"<= {DEMO_EVALUATION_RUNTIME_BUDGET_SEC:.0f}s", report)
+        # D36: the ~100-stop section is the ENGINEERING STRESS REFERENCE and is explicitly not
+        # performance-qualified, and the fixture plus its recorded measurement are kept.
+        self.assertIn("ENGINEERING STRESS REFERENCE, NOT PERFORMANCE-QUALIFIED", report)
+        self.assertIn("NOT an MVP gate", report)
+        self.assertIn("The fixture and its tests are retained", report)
+
+    def test_report_prints_the_scale_performance_block_for_all_three_scales(self) -> None:
+        # DELIVERABLE 3: one block covering the ~30-stop demo plan, the ~50-enabled-stop portfolio
+        # fixture and the ~100-stop stress reference, with the owner's statement and the exact
+        # enabled counts (D36). Every count is read from the same plan object the lines describe.
+        plan = build_demo_plan()
+        report = build_report(plan=plan)
+        portfolio = build_portfolio_plan()
+
+        self.assertIn("SCALE AND PERFORMANCE (v2 section 20, D34, D36)", report)
+        self.assertIn(OWNER_SCALE_STATEMENT, report)
+        self.assertIn("PRIMARY MVP TARGET (D36)", report)
+        self.assertIn("approximately 50 enabled service stops", report)
+
+        demo_line = (
+            f"  demo plan          :   {len(plan.active_stops())} enabled stops "
+            f"({len(plan.stops)} stops, {len(plan.disabled_stops())} disabled)"
+        )
+        self.assertIn(demo_line, report)
+        portfolio_line = (
+            f"  portfolio fixture  : {len(portfolio.active_stops())} enabled stops "
+            f"({len(portfolio.stops)} stops, {len(portfolio.disabled_stops())} disabled)"
+        )
+        self.assertIn(portfolio_line, report)
+        stress_line = (
+            f"  stress reference   : {RECORDED_BENCHMARK.stop_count} enabled stops "
+            f"(~{SCALE_DEFAULT_STOP_COUNT} stops, ENGINEERING STRESS REFERENCE, "
+            "NOT PERFORMANCE-QUALIFIED - D36)"
+        )
+        self.assertIn(stress_line, report)
+
+        # The label's numbers are the fixture's own counts and cannot drift: 55 stops, 50 enabled,
+        # 5 disabled - exactly the ~50 enabled stops the owner's target names, stated as enabled.
+        self.assertEqual(
+            (len(portfolio.stops), len(portfolio.active_stops()), len(portfolio.disabled_stops())),
+            (PORTFOLIO_STOP_COUNT, PORTFOLIO_ENABLED_STOP_COUNT, PORTFOLIO_DISABLED_STOP_COUNT),
+        )
+        self.assertEqual((PORTFOLIO_STOP_COUNT, PORTFOLIO_ENABLED_STOP_COUNT), (55, 50))
+        self.assertNotIn("50 stops (55 stops", report)
+
+    def test_the_portfolio_measurement_is_reported_and_never_asserted_in_this_suite(self) -> None:
+        # The heavy ~50-stop measurement is opt-in behind ROUTEPILOT_SLOW_TESTS, so the fast suite
+        # reads the scale block with frozen timings and pins only what is deterministic: the target
+        # labels, the enabled count and the fact that the figure is REPORTED, not asserted. The
+        # opt-in module guards the real measurement against a generous bound instead.
+        from demo.report import EvaluationTimings, performance_scale_lines
+
+        plan = build_demo_plan()
+        report = demo_evaluation(plan)
+        lines, payload = performance_scale_lines(
+            plan.active_stops(),
+            plan.disabled_stops(),
+            plan,
+            report,
+            timings=EvaluationTimings(1.0, 1.0, portfolio_seconds=7.5),
+        )
+        text = "\n".join(lines)
+        self.assertIn("measured now     :", text)
+        self.assertIn("7.50s warm", text)
+        self.assertIn("printed not asserted", text)
+        self.assertIn("OUTSIDE", text)
+        self.assertIn(
+            f"preferred <= ~3s, acceptable <= ~{PORTFOLIO_ACCEPTABLE_BUDGET_SEC:.0f}s", text
+        )
+        self.assertEqual(payload["portfolio_enabled"], PORTFOLIO_ENABLED_STOP_COUNT)
+        self.assertEqual(payload["portfolio_seconds"], 7.5)
+        self.assertEqual(payload["owner_statement"], OWNER_SCALE_STATEMENT)
+        # Without a measurement the block says how to reproduce it instead of inventing a number.
+        unmeasured, unmeasured_payload = performance_scale_lines(
+            plan.active_stops(), plan.disabled_stops(), plan, report, timings=None
+        )
+        unmeasured_text = "\n".join(unmeasured)
+        self.assertIn("not measured in this call", unmeasured_text)
+        self.assertIn("python tools/benchmark_optimizer.py", unmeasured_text)
+        self.assertNotIn("s warm", unmeasured_text)
+        self.assertIsNone(unmeasured_payload["portfolio_seconds"])
+        # And the fast suite asserts no wall-clock bound for the ~50-stop figure at all: the only
+        # bound it mentions is the reported engineering target, never a pass/fail claim.
+        self.assertFalse(any("MET=" in line for line in unmeasured))
+        self.assertIn("reported engineering targets", unmeasured_text)
 
     def test_report_without_timings_says_how_to_measure_them(self) -> None:
         report = build_report()
@@ -638,9 +1017,15 @@ class ReportTextTests(unittest.TestCase):
         self.assertIn("MEASURED WALL CLOCK, machine-dependent", report)
 
     def test_report_states_the_ranking_key(self) -> None:
+        report = build_report()
         self.assertIn(
-            "(score, complete duration, input_position, stop_id)", build_report()
+            "(complete elapsed duration, complete travel time, complete waiting time, "
+            "input_position, stop_id)",
+            report,
         )
+        self.assertIn("(1) complete elapsed duration, (2) complete travel time", report)
+        # The old key is printed only as the audit trail's description of the PREVIOUS default.
+        self.assertIn("pre-D35 key (score, complete duration, input_position, stop_id)", report)
 
     def test_the_sweep_footer_maps_every_hour_to_its_recommendation(self) -> None:
         report = build_report()
@@ -673,35 +1058,73 @@ class ObjectiveSuperlativeTests(unittest.TestCase):
         self.assertEqual(len(self.report.rejected), 5)
         self.assertEqual(self.report.candidates_evaluated, 31)
         self.assertIn(
-            "the lowest objective of the 26 ranked fully feasible candidates is 38340 "
-            "(5 of the 31 evaluated are REJECTED, never ranked and carry no comparable score)",
+            "the minimum complete elapsed duration of the 26 ranked fully feasible "
+            "candidates is 10h49m (38940s)",
             self.text,
         )
+        self.assertIn("the lowest objective of 30840", self.text)
         self.assertNotIn("the lowest objective of all", self.text)
+        # The accuracy fix (review finding): the primary criterion is the minimum COMPLETE ELAPSED
+        # DURATION (D35), so that duration comes first and the weighted objective is printed as its
+        # supporting consequence - never as the reason the recommendation wins.
+        sentence = objective_winner_sentence(self.report)
+        self.assertTrue(sentence.startswith("- the minimum complete elapsed duration of the 26"))
+        self.assertLess(sentence.index("complete elapsed duration"), sentence.index("objective"))
+        self.assertLess(
+            sentence.index("complete travel"), sentence.index("lowest objective of")
+        )
+
+    def test_the_winner_sentence_shows_travel_waiting_and_service_beneath_the_duration(self) -> None:
+        # The numeric audit trail stays: the complete duration in seconds, the measured travel /
+        # waiting / service decomposition that produces it, and the objective minimum.
+        recommended = self.recommended
+        assert recommended is not None
+        sentence = objective_winner_sentence(self.report)
+        self.assertIn(
+            f"({recommended.estimated_complete_route_duration}s)",
+            sentence,
+        )
+        self.assertIn(f"complete travel {format_duration(recommended.complete_travel_time)}", sentence)
+        self.assertIn(
+            f"complete waiting {format_duration(recommended.complete_waiting_time)}", sentence
+        )
+        self.assertIn(f"service {format_duration(recommended.total_service_time)}", sentence)
+        self.assertIn("shipped 1:1 weights", sentence)
+        # The old wording made the objective the reason; it is now the supporting consequence.
+        self.assertNotIn("the lowest objective of the 26 ranked fully feasible candidates is", sentence)
 
     def test_the_printed_minimum_is_the_lowest_ranked_score(self) -> None:
-        # The sentence claims a lowest objective, so it must print the value it claims: the minimum
-        # of ``report.ranked``, derived from the ranking the sentence names (U5: the claim was
-        # unproven while the number itself was nowhere in the sentence).
+        # The sentence claims a minimum, so it must print the value it claims: the recommended
+        # candidate's complete duration and the minimum of ``report.ranked``'s scores, derived from
+        # the ranking the sentence names (U5: the claim was unproven while the number itself was
+        # nowhere in the sentence).
         scores = [candidate.score for candidate in self.report.ranked]
         self.assertEqual(scores, sorted(scores))
         lowest_ranked_score = min(candidate.score for candidate in self.report.ranked)
         sentence = objective_winner_sentence(self.report)
-        self.assertIn(f"candidates is {lowest_ranked_score:.0f} ", sentence)
-        self.assertIn(f"candidates is {lowest_ranked_score:.0f} ", self.text)
+        self.assertIn(f"the lowest objective of {lowest_ranked_score:.0f} ", sentence)
+        self.assertIn(f"the lowest objective of {lowest_ranked_score:.0f} ", self.text)
         # The printed minimum IS the recommended candidate's score: the ranking is ordered by that
         # objective and the recommendation is its head (v2 sections 12-14).
         self.assertEqual(lowest_ranked_score, self.recommended.score)
         self.assertEqual(lowest_ranked_score, self.report.ranked[0].score)
         self.assertEqual(self.report.ranked[0].stop_id, self.recommended.stop_id)
-        self.assertEqual(f"{lowest_ranked_score:.0f}", "38340")
+        self.assertEqual(f"{lowest_ranked_score:.0f}", "30840")
+        # ... and the duration the sentence prints first is the minimum complete elapsed duration of
+        # the ranked set, which is the primary criterion of D35.
+        self.assertEqual(
+            self.recommended.estimated_complete_route_duration,
+            min(candidate.estimated_complete_route_duration for candidate in self.report.ranked),
+        )
 
     def test_the_superlative_is_derived_from_the_ranking_not_remembered(self) -> None:
         # The sentence is produced by one helper from the report's own ranked/rejected sets, so it
         # cannot describe a larger set than the one the objective actually ranks.
         self.assertEqual(
             objective_winner_sentence(self.report),
-            "- the lowest objective of the 26 ranked fully feasible candidates is 38340 "
+            "- the minimum complete elapsed duration of the 26 ranked fully feasible candidates is "
+            "10h49m (38940s) - complete travel 5h57m, complete waiting 2h37m and service 2h15m - "
+            "which with the shipped 1:1 weights is the lowest objective of 30840 "
             "(5 of the 31 evaluated are REJECTED, never ranked and carry no comparable score).",
         )
         self.assertIn(objective_winner_sentence(self.report), self.text)
@@ -829,6 +1252,15 @@ class RejectedCandidateRenderingTests(unittest.TestCase):
 
 
 class CommandLineTests(unittest.TestCase):
+    """The CLI path. The heavy ~50-stop portfolio measurement is opt-in behind the slow gate.
+
+    ``main()`` measures the ~50-enabled-stop portfolio fixture for real (it is the primary MVP scale
+    target of D36), which is the heavy part of the command; the default fast suite therefore checks
+    the parts that do not require it, and the two tests that exercise the full run are gated behind
+    ``ROUTEPILOT_SLOW_TESTS`` so ordinary verification stays fast.
+    """
+
+    @slow_test
     def test_cli_prints_the_report_and_measures_the_runtime(self) -> None:
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
@@ -837,15 +1269,30 @@ class CommandLineTests(unittest.TestCase):
         output = buffer.getvalue()
         self.assertIn("RoutePilot demo - COMPLETE-ROUTE first-stop recommendation", output)
         self.assertIn("MEASURED WALL CLOCK, machine-dependent", output)
+        # The scale block is part of the CLI output and carries the live portfolio measurement.
+        self.assertIn("SCALE AND PERFORMANCE (v2 section 20, D34, D36)", output)
+        self.assertIn("measured now     :", output)
+        self.assertIn("MEASURED WALL CLOCK, machine-dependent, printed not asserted", output)
 
+    @slow_test
     def test_cli_accepts_the_offline_tzdata_flag(self) -> None:
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
             exit_code = main(["--allow-system-tzdata"])
         self.assertEqual(exit_code, 0)
 
+    def test_the_slow_gate_is_off_by_default_so_the_fast_suite_never_measures_it(self) -> None:
+        # The unit's requirement, pinned: the heavy measurement is opt-in, and this module's own
+        # gate is what keeps the default suite fast. Nothing here runs the loop.
+        self.assertFalse(SLOW_TESTS_ENABLED)
+
     def test_the_demo_evaluation_is_memoized_so_repeated_reads_are_cheap(self) -> None:
-        # The exhaustive loop costs seconds; the report and its tests share one evaluation.
+        # The exhaustive loop costs seconds; the report and its tests share one evaluation. The
+        # first render is made explicitly here so this test measures the MEMOIZATION and not the
+        # cold cost of the report's many evaluations (the demo plan, the five sweep hours, the D35
+        # alignment's two policies per hour and the D31 sensitivity policies). Without that warm-up
+        # the assertion would pass or fail on test execution order, which is not what it claims.
+        build_report()
         started = timer.perf_counter()
         build_report()
         elapsed = timer.perf_counter() - started

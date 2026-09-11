@@ -160,7 +160,13 @@ def build_plan(
     Unless ``input_positions`` is given, the stops receive ``input_position`` values by call order
     (0, 1, 2, ...), which is the normal user-supplied case. Pass ``input_positions`` to build a
     plan with gaps or with a deliberately different input order.
+
+    ``cost_policy`` defaults to the product's default SMART_ROUTE objective - the complete elapsed
+    route duration, :func:`core.model.cost_policy.smart_route_elapsed_policy` (D35) - so a fixture
+    plan is weighted the way the product is. Pass a policy explicitly (for example
+    ``demo_provisional_policy()`` or ``empty_cost_policy()``) to exercise another objective.
     """
+    from core.model.cost_policy import smart_route_elapsed_policy
     from core.model.first_stop import FirstStopIntent  # local import keeps the fixture light
     from core.model.service_window import DEFAULT_WINDOW_END_POLICY
 
@@ -182,8 +188,9 @@ def build_plan(
         kwargs["first_service_stop"] = first_service_stop
     if order_overrides is not None:
         kwargs["order_overrides"] = order_overrides
-    if cost_policy is not None:
-        kwargs["cost_policy"] = cost_policy
+    kwargs["cost_policy"] = (
+        cost_policy if cost_policy is not None else smart_route_elapsed_policy()
+    )
     return RoutePlan(
         id=PlanId(plan_id),
         timezone=timezone_name,

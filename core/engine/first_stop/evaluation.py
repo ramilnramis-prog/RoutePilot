@@ -28,8 +28,15 @@ fabricated winner.
 
 The objective comes from the configured :class:`~core.model.cost_policy.RouteCostPolicy` applied to
 the complete route's measured breakdown (travel, waiting, distance) through
-:func:`core.engine.cost.score_breakdown`. No weight is invented or tuned here, and service time -
-constant across the candidates of one plan - is reported, never scored.
+:func:`core.engine.cost.score_breakdown`. The **default** policy is the complete elapsed route
+duration (D35: ``travel_time`` and ``waiting_time`` at 1:1), so the score and the optimizer's own
+acceptance key ``(violations, elapsed seconds)`` measure the same thing. Service time - constant
+across the candidates of one plan - is reported, never scored. No weight is invented or tuned here.
+
+The order of the ranking is the owner's deterministic 5-key order of :func:`ranking_key`: complete
+elapsed duration, complete travel time, complete waiting time, ``input_position`` and ``stop_id``.
+The weighted objective stays a **reported** figure and is not part of the key; no weighting is
+hidden in the tie-break.
 """
 
 from __future__ import annotations
@@ -88,7 +95,7 @@ def score_of(metrics: CandidateMetrics, policy: RouteCostPolicy) -> float:
 
     The breakdown names the complete route's travel seconds, waiting seconds and metric distance.
     A component the policy does not weight contributes zero, so the objective stays explicitly
-    configured and no weight is invented here (D13, D31).
+    configured and no weight is invented here (D13, D31, D35).
     """
     return score_breakdown(
         {
@@ -191,17 +198,23 @@ def _diagnostic_for(timeline: StopTimeline, candidate_id: StopId | None) -> Cand
 # ranking
 # --------------------------------------------------------------------------- #
 def ranking_key(
-    candidate: FirstStopCandidate, *, score: float, input_position: int
-) -> tuple[float, DurationSec, int, StopId]:
-    """The deterministic ranking key of a fully feasible candidate.
+    candidate: FirstStopCandidate, *, input_position: int
+) -> tuple[DurationSec, DurationSec, DurationSec, int, StopId]:
+    """The owner's deterministic ranking key of a fully feasible candidate (D35).
 
-    ``(objective, complete route duration, input_position, stop_id)``. A weight set that cannot
-    separate two candidates still leaves a reproducible order, and ``input_position`` - the
-    immutable input-order provenance of D33 - is the stable human-facing tie-break before the id.
+    ``(complete elapsed duration, complete travel time, complete waiting time, input_position,
+    stop_id)`` - all five components come from the candidate's **complete-route** metrics, the
+    FINISH leg included, and the first component is the same quantity the default objective
+    measures (complete elapsed duration = travel + waiting + service). The weighted objective is
+    deliberately **not** part of the key: it stays a reported figure, so no weighting is hidden in
+    the tie-break. ``input_position`` - the immutable input-order provenance of D33 - is the stable
+    human-facing tie-break before the id, so two candidates that are equal on duration, travel and
+    waiting still order reproducibly.
     """
     return (
-        score,
         candidate.estimated_complete_route_duration,
+        candidate.complete_travel_time,
+        candidate.complete_waiting_time,
         input_position,
         candidate.stop_id,
     )
@@ -418,8 +431,9 @@ def evaluate_first_stop_candidates(
     ``plan.first_stop_state`` stays ``awaiting_first_stop_choice`` afterwards.
 
     Raises:
-        InvalidCostPolicyError: the policy has no weights at all. Ranking candidates with a
-            zero objective would look like a decision while carrying no information (D31).
+        InvalidCostPolicyError: the policy has no weights at all, so the objective the report prints
+            would carry no information at all. Weights are configuration, never hidden defaults
+            (D13/D31/D35); the default objective is the elapsed-duration policy of D35.
         StopNotGeocodedError: an enabled stop has no coordinates (resolve addresses first, spec
             section 16).
         MissingServiceDurationError: an enabled stop has no duration and the plan no default.
@@ -427,8 +441,9 @@ def evaluate_first_stop_candidates(
     cost_policy = policy if policy is not None else plan.cost_policy
     if not cost_policy.is_weighted():
         raise InvalidCostPolicyError(
-            f"cost policy {cost_policy.name!r} has no weights, so first-stop candidates cannot be "
-            "ranked meaningfully (D31: weights are configuration, not hidden defaults)"
+            f"cost policy {cost_policy.name!r} has no weights, so the objective this evaluation "
+            "would report is undefined (D13/D31/D35: weights are configuration, not hidden "
+            "defaults)"
         )
 
     disabled_stop_ids = tuple(stop.id for stop in plan.disabled_stops())
@@ -466,7 +481,6 @@ def evaluate_first_stop_candidates(
 
     candidates: list[FirstStopCandidate] = []
     diagnostics: list[CandidateDiagnostic] = []
-    ranking_scores: dict[StopId, float] = {}
     input_positions: dict[StopId, int] = {}
 
     for stop in active_stops:
@@ -486,7 +500,6 @@ def evaluate_first_stop_candidates(
             )
         candidates.append(candidate)
         input_positions[stop.id] = stop.input_position
-        ranking_scores[stop.id] = objective
         if not candidate.feasible:
             diagnostics.extend(diagnostics_of(evaluation, first_stop_id=stop.id))
 
@@ -497,7 +510,6 @@ def evaluate_first_stop_candidates(
             (candidate for candidate in candidates if candidate.feasible),
             key=lambda candidate: ranking_key(
                 candidate,
-                score=ranking_scores[candidate.stop_id],
                 input_position=input_positions[candidate.stop_id],
             ),
         )

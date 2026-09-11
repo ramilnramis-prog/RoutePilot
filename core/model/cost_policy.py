@@ -1,15 +1,18 @@
-"""Route cost policy (decision D13, amended; D16 capability honesty; D31 demo weights).
+"""Route cost policy (decision D13, amended; D16 capability honesty; D35 default; D31 sensitivity).
 
 The policy names every component the product will eventually score, and records its
 **implementation status**. Three rules keep it honest rather than aspirational:
 
-1. no arbitrary weights are hardcoded as product truth - the default policy carries no weights
-   at all;
+1. no arbitrary weights are hardcoded as product truth - an unweighted policy is the neutral
+   baseline and carries no weights at all;
 2. a weight may only be assigned to a component whose status is ``implemented``, so claiming to
    score side-of-road or U-turns without road geometry is impossible by construction;
-3. the only weighted policy shipped at this stage is
-   :func:`demo_provisional_policy`, which is marked ``provisional`` and exists purely to
-   demonstrate the architecture on the demo scenario. Its numbers are **not** product decisions.
+3. the **default SMART_ROUTE objective** is :func:`smart_route_elapsed_policy`, the complete
+   elapsed route duration (travel and waiting at 1:1). It is not ``provisional``: it is the
+   product objective of D35, and every other weight set is a labelled study.
+   :func:`demo_provisional_policy` is **not** the default any more; it is retained as the
+   non-default waiting-preference sensitivity study of D31, and its numbers are not product
+   decisions.
 
 The D13 amendment is encoded in the declarations: a **hard** service-window miss is an explicit
 ``Violation``, never a penalty. ``time_window_violation_penalty`` is declared as applying only to
@@ -33,10 +36,12 @@ __all__ = [
     "DEMO_PROVISIONAL_POLICY_NAME",
     "DEMO_TRAVEL_TIME_WEIGHT",
     "DEMO_WAITING_TIME_WEIGHT",
+    "SMART_ROUTE_ELAPSED_POLICY_NAME",
     "RouteCostPolicy",
     "default_component_declarations",
     "demo_provisional_policy",
     "empty_cost_policy",
+    "smart_route_elapsed_policy",
 ]
 
 
@@ -280,20 +285,57 @@ def empty_cost_policy(name: str = "default_no_weights") -> RouteCostPolicy:
     return RouteCostPolicy(name=name)
 
 
-#: Name of the only weighted policy in the project at this stage.
+#: Name of the **default** SMART_ROUTE objective (D35): the complete elapsed route duration.
+SMART_ROUTE_ELAPSED_POLICY_NAME = "smart_route_elapsed_v1"
+
+
+def smart_route_elapsed_policy() -> RouteCostPolicy:
+    """The default SMART_ROUTE objective: the **complete elapsed route duration** (D35).
+
+    The primary objective is the complete elapsed route duration = travel + waiting + service,
+    equivalently the estimated FINISH arrival time for a fixed departure. Service time is constant
+    across the candidates of one plan and is reported, never scored, so weighting travel and
+    waiting at 1:1 **is** the elapsed-duration objective and not a hidden weight. The optimizer's
+    own acceptance key is already ``(violations, elapsed seconds)``, so the ranking and the
+    optimizer optimize the same quantity, and the default additional waiting preference is zero.
+    No weight was tuned to favour any candidate.
+    """
+    return RouteCostPolicy(
+        name=SMART_ROUTE_ELAPSED_POLICY_NAME,
+        weights={
+            CostComponent.TRAVEL_TIME: 1.0,
+            CostComponent.WAITING_TIME: 1.0,
+        },
+        provisional=False,
+        notes=(
+            "DEFAULT SMART_ROUTE objective (D35): the complete elapsed route duration = travel + "
+            "waiting + service over the whole route, FINISH leg included - equivalently the "
+            "estimated FINISH arrival time for a fixed departure. Service time is constant across "
+            "the candidates of one plan and is reported, never scored, so travel and waiting at "
+            "1:1 IS the elapsed-duration objective and not a hidden weight; with these weights the "
+            "score equals travel + waiting, i.e. the complete duration minus that constant service "
+            "time. The optimizer's own acceptance key is already (violations, elapsed seconds). "
+            "The default additional waiting preference is zero, and no weight was tuned to favour "
+            "any candidate."
+        ),
+    )
+
+
+#: Name of the historical, **non-default** provisional policy (D31).
 DEMO_PROVISIONAL_POLICY_NAME = "demo_provisional_v1"
 
-#: Relative cost of driving one second (the base unit of the demo objective).
+#: Relative cost of driving one second in the provisional D31 demo units.
 DEMO_TRAVEL_TIME_WEIGHT = 1.0
 
-#: Relative cost of one second of waiting, in demo units.
+#: Relative cost of one second of waiting, in provisional D31 demo units.
 #:
-#: PROVISIONAL. A ratio is unavoidable here: for any stop that arrives before opening,
-#: ``travel + waiting`` is constant (both equal "time from departure until the window opens"), so
-#: at a 1:1 ratio every such candidate scores identically and the ranking degenerates into a
-#: tie-break. That degeneracy is exactly why spec section 8 requires candidate quality to include
-#: the remaining route, which arrives with the optimizer. Until then the demo uses a clearly
-#: marked ratio to separate candidates, and the demo report shows the sensitivity to it.
+#: PROVISIONAL AND NOT THE DEFAULT (D31, superseded for the default objective by D35). This ratio
+#: exists only for the waiting-preference sensitivity study: for any stop that arrives before
+#: opening, ``travel + waiting`` is constant (both equal "time from departure until the window
+#: opens"), so at a 1:1 ratio every such candidate scores identically on the objective and the
+#: deterministic ranking key decides. D35 makes that 1:1 case the **default** objective and moves
+#: the separation into the ranking key; this ratio is retained to show what a non-zero waiting
+#: preference would have done.
 DEMO_WAITING_TIME_WEIGHT = 2.0
 
 
@@ -302,11 +344,13 @@ def demo_provisional_policy(
     travel_time_weight: float = DEMO_TRAVEL_TIME_WEIGHT,
     waiting_time_weight: float = DEMO_WAITING_TIME_WEIGHT,
 ) -> RouteCostPolicy:
-    """The demo objective: driving time plus waiting time, weighted.
+    """The historical demo objective: driving time plus waiting time, weighted.
 
-    PROVISIONAL AND NOT PRODUCT TRUTH (D31). It exists so that the demo can separate first-stop
-    candidates and show that waiting time affects route cost. ``distance``, priorities and the
-    remaining-route weight are deliberately not part of it.
+    **NOT THE DEFAULT** and **NOT PRODUCT TRUTH** (D31, superseded for the default objective by
+    D35, which makes complete elapsed duration the shipped objective with a zero waiting
+    preference). It is retained as the non-default waiting-preference sensitivity study the demo
+    report prints, so the effect of a non-zero waiting preference stays visible and testable.
+    ``distance``, priorities and the remaining-route weight are deliberately not part of it.
     """
     return RouteCostPolicy(
         name=DEMO_PROVISIONAL_POLICY_NAME,
@@ -316,8 +360,10 @@ def demo_provisional_policy(
         },
         provisional=True,
         notes=(
-            "Provisional demo objective. Weights are illustrative, chosen to demonstrate the "
-            "architecture, and are expected to change once the remaining-route term (spec "
-            "section 8) and real routing data exist."
+            "Non-default provisional demo objective, retained as the D31 waiting-preference "
+            "sensitivity study. Weights are illustrative, chosen to demonstrate the architecture, "
+            "and are expected to change once the remaining-route term (spec section 8) and real "
+            "routing data exist. The default SMART_ROUTE objective is "
+            f"{SMART_ROUTE_ELAPSED_POLICY_NAME} (D35)."
         ),
     )

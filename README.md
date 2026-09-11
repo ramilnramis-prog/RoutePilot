@@ -30,17 +30,33 @@ Implemented so far:
   shared and measured leg cache, a prepared problem with a precomputed service-window table, and a
   **route fingerprint** for the committed route;
 - **first-stop recommendation over complete routes**: every enabled stop is optimized as a
-  candidate, ranked by the configured objective, rejected candidates are reported with their
-  violating stops, and the driver still decides — nothing is applied automatically (D4/D32);
+  candidate and ranked by the **complete elapsed route duration** (travel + waiting + service,
+  equivalently the FINISH arrival time for a fixed departure) with a **zero** default waiting
+  preference, using the owner's deterministic 5-key order (complete elapsed duration, complete
+  travel, complete waiting, `input_position`, `stop_id`); rejected candidates are reported with
+  their violating stops, and the driver still decides — nothing is applied automatically (D4/D32,
+  D35);
 - **deterministic demo scenario**: ~30 synthetic stops (31 enabled + 1 disabled), departure 04:00,
   many customers opening 08:00, one early-closing customer that makes some first-stop choices
   genuinely infeasible, and a complete-route report (`python -m demo.report`) that shows the
   ranking, the recommended candidate's complete route, the rejected candidates with their violating
-  stops, the baselines, the departure-time sweep, the provisional weights' sensitivity and both
-  fingerprints;
+  stops, the baselines, the departure-time sweep, the objective-alignment audit of the D35 change,
+  the non-default waiting-preference sensitivity study, both fingerprints and the scale/performance
+  block;
+- **scale: ~50 enabled service stops is the primary MVP target** (D36). 100 stops is future scale /
+  an engineering **stress** reference and is **not performance-qualified** in this MVP: failing the
+  old ≤ ~5 s target at 100 stops does **not** block the portfolio MVP. The domain has no hard
+  50-stop maximum and the architecture stays able to evolve beyond it;
 - **measured performance**: `tools/benchmark_optimizer.py` runs the exhaustive first-stop loop over
-  a ~100-stop synthetic fixture and reports the numbers (the ~100-stop latency is an accepted
-  interim limitation, D34; the incremental/delta evaluator that would remove it is deferred);
+  the ~30-stop demo plan, the **~50-enabled-stop portfolio fixture** (the primary MVP target, with
+  the preferred ≤ ~3 s / acceptable ≤ ~5 s targets reported) and the **~100-stop stress reference**,
+  labelling each with its exact enabled count and DEMO/SYNTHETIC provenance. The measured
+  ~100-stop latency is an accepted interim limitation (D34) and the incremental/delta evaluator that
+  would remove it is deferred; the ~50-stop figure is measured and **reported honestly** as it is
+  (~19-25 s warm on the development machine, i.e. outside the ≤ ~5 s target), never improved with a
+  prefilter, a shortlist, an approximate ranking or any other quality-degrading shortcut, and never
+  asserted at a `≤ ~5 s` wall-clock second - the asserted guard at every measured scale, the primary
+  MVP scale included, is the generous owner-accepted regression bound of D34 (~150 s);
 - error taxonomy split from violations, `tools/doctor.py`, and a deterministic offline test suite;
 - [`docs/STORAGE_SCHEMA.md`](docs/STORAGE_SCHEMA.md) — **proposal only**, no storage code.
 
@@ -94,11 +110,17 @@ Tests are deterministic and require no network, no browser and no external servi
 the recommended first stop with its complete-route metrics, the top-5 ranking, the recommended
 candidate's complete route stop by stop, the nearest and the farthest candidate with their complete
 outcomes and their rank, USER vs OPTIMIZED vs the internal ALGORITHM baseline, the departure-time
-sweep (04:00-08:00, where the recommendation changes), the sensitivity of the provisional waiting
-weight, the rejected-candidate diagnostics grouped by candidate with their violating stop ids, both
-fingerprints, the work counters, the measured ~30-stop evaluation runtime and the recorded ~100-stop
-benchmark with its command. The demo plan's BEFORE route is itself infeasible (it serves the
-early-closing customer too late), which is what the optimizer's AFTER route fixes.
+sweep (04:00-08:00, where the recommendation changes), the objective-alignment audit of the D35
+change (per departure hour, the previous provisional recommendation against the new elapsed-duration
+one, with FINISH, complete travel, waiting, service and feasibility), the **non-default** study of
+what a non-zero waiting preference would do, the rejected-candidate diagnostics grouped by candidate
+with their violating stop ids, both fingerprints, the work counters, the measured ~30-stop evaluation
+runtime and the **scale/performance block** — the ~30-stop demo plan, the ~50-enabled-stop portfolio
+fixture (the primary MVP scale target, with its own live measurement) and the ~100-stop stress
+reference, which is relabelled as future scale / **not performance-qualified** while keeping its
+honest recorded number and the owner-accepted bound. The demo plan's BEFORE route is itself
+infeasible (it serves the early-closing customer too late), which is what the optimizer's AFTER route
+fixes.
 
 `python -m demo.report` needs a time zone database. On an offline machine where `tzdata` cannot be
 installed, either set `PYTHONTZPATH` (see above) or use the explicit development flag, which prints
@@ -113,11 +135,13 @@ python -m demo.report --allow-system-tzdata
 ```
 core/     domain model, time layer, engine (cost scoring, complete-route optimizer, exhaustive
           first-stop recommendation) — no HTTP, no UI, no storage, no network
-demo/     deterministic demo dataset, synthetic travel matrix, complete-route demo report
+demo/     deterministic demo dataset, synthetic travel matrix, scale fixtures (portfolio ~50 enabled
+          stops and the ~100-stop stress reference), complete-route demo report
 storage/  SQLite persistence (later, proposal only)
 api/      transport layer: stdlib http.server now, FastAPI later (later)
 web/      HTML/CSS/JS frontend with Leaflet + OSM tiles (later)
-tools/    doctor, the ~100-stop benchmark and other developer utilities
+tools/    doctor, the exhaustive first-stop benchmark (demo / portfolio / stress) and other
+          developer utilities
 docs/     PRODUCT_SPEC_v2.md (current), PRODUCT_SPEC.md (historical v1), ARCHITECTURE.md,
           DECISIONS.md, STORAGE_SCHEMA.md
 tests/    deterministic offline unittest suite
@@ -128,7 +152,7 @@ tests/    deterministic offline unittest suite
 1. **The specification is the Source of Truth.** `docs/PRODUCT_SPEC.md` is stored verbatim
    and is never rewritten as a summary.
 2. **Decisions are documented, not remembered.** `docs/DECISIONS.md` holds the approved
-   registry D1–D34 and is the only place a decision is considered settled.
+   registry D1–D36 and is the only place a decision is considered settled.
 3. **Start is not a service stop.** The departure location is where driving begins; it is
    never a customer task.
 4. **No invented business hours.** An unknown service window stays explicitly unknown.
@@ -149,8 +173,8 @@ tests/    deterministic offline unittest suite
 | 0 ✅ | foundation: docs, domain skeleton, time layer, strict DST, error taxonomy, doctor, tests, storage schema proposal |
 | 1 ✅ | cost scoring over implemented components, deterministic demo dataset (~30 stops), synthetic matrix, 04:00 / 08:00 scenario, candidate evaluation, numeric demo report |
 | 1.5 ✅ | semantics migration off the revoked AUTO model: RECOMMEND/MANUAL, recommendation vs driver decision, `awaiting_first_stop_choice` (D4–D11, D32) |
-| 2 ✅ | complete-route evaluation (FINISH leg included), deterministic optimizer with a measured leg cache, **exhaustive** complete-route first-stop recommendation with top-K and rejected-candidate diagnostics, recommendation and route fingerprints, the three baselines, the ~100-stop benchmark, and the complete-route demo narrative |
-| 2 (deferred) | incremental / delta complete-route evaluator to remove the ~100-stop latency accepted in D34 — recorded, not implemented; no prefilter or approximation meanwhile |
+| 2 ✅ | complete-route evaluation (FINISH leg included), deterministic optimizer with a measured leg cache, **exhaustive** complete-route first-stop recommendation with top-K and rejected-candidate diagnostics, recommendation and route fingerprints, the three baselines, the **complete elapsed-duration default objective with the owner's deterministic 5-key ranking** (D35), the **scale decision: ~50 enabled stops is the primary MVP target** with its portfolio fixture and the ~100-stop stress benchmark (D36), and the complete-route demo narrative (U1–U6, U6b) |
+| 2 (deferred) | incremental / delta complete-route evaluator to remove the ~100-stop latency accepted in D34 (and, under D36, to close the gap at the ~50-stop primary target) — recorded, not implemented; no prefilter or approximation meanwhile |
 | 3 | SQLite storage + schema implementation + round-trip tests |
 | 4 | API + web UI (map, timeline panel, route summary, top-K, override) |
 | 5 | reoptimization after each served stop + active-leg protection groundwork |

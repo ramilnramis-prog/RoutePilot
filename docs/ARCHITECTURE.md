@@ -11,9 +11,13 @@ document and the registry disagree, the registry wins.
 
 Stages 0, 1 and 1.5 implement the foundation, the demo scenario and the semantic migration to
 RECOMMEND / MANUAL. **Stage 2 is implemented** (complete-route evaluation and optimizer, exhaustive
-first-stop recommendation, fingerprints, leg cache, baselines, measured performance, and the
-complete-route demo narrative). One Stage 2 item is explicitly **deferred**: the incremental /
-delta complete-route evaluator that would remove the ~100-stop latency accepted in D34.
+first-stop recommendation, fingerprints, leg cache, baselines, measured performance, the
+complete-route demo narrative, and the default objective of D35 - the complete elapsed route
+duration, ranked by the owner's deterministic 5-tuple). The **scale target is ~50 enabled service
+stops** (D36): the exhaustive complete-route first-stop loop is performance-qualified at that scale,
+and ~100 stops is an **engineering stress reference that is not performance-qualified**. One Stage 2
+item is explicitly **deferred**: the incremental / delta complete-route evaluator that would remove
+the ~100-stop latency accepted in D34.
 
 ---
 
@@ -63,7 +67,7 @@ core/
   engine/
     providers.py       TravelMatrix / RoutingProvider / GeocodingProvider Protocols
                        + capability records (D15/D16)
-    cost.py            weighted scoring over implemented components (D13, D31)
+    cost.py            weighted scoring over implemented components (D13, D31, D35)
     first_stop/
       evaluation.py    COMPLETE-ROUTE first-stop recommendation: every enabled candidate is
                        optimized (START -> candidate -> remaining stops -> FINISH), ranked by the
@@ -86,12 +90,15 @@ core/
 demo/
   dataset.py           deterministic ~30-stop demo plan (DEMO/SYNTHETIC, spec section 24)
   synthetic_matrix.py  deterministic synthetic travel matrix (DEMO/SYNTHETIC)
-  scale_dataset.py     deterministic ~100-stop benchmark fixture (NOT the product demo dataset)
+  scale_dataset.py     deterministic scale fixtures: the ~50-enabled-stop portfolio fixture (the
+                       primary MVP target, D36) and the ~100-stop stress fixture
   report.py            complete-route demo report: `python -m demo.report`
 
 tools/
   doctor.py            environment health (D12)
-  benchmark_optimizer.py  exhaustive first-stop benchmark (~100 stops) and its measurement method
+  benchmark_optimizer.py  exhaustive first-stop benchmark over the ~30-stop demo plan, the
+                       ~50-stop portfolio fixture and the ~100-stop stress reference, with the
+                       per-fixture target that applies to each (D34/D36)
   workspace_fingerprint.py deterministic working-tree digest
   isolation_check.py   the `core/` import-boundary check
 ```
@@ -236,11 +243,11 @@ from Stage 2, every rejected candidate with its violating stops and reasons (§5
 
 No constraint solver is built yet.
 
-### 3.6 Cost policy (D13, amended)
+### 3.6 Cost policy (D13 amended, D31 sensitivity, D35 default)
 
 `RouteCostPolicy` = name + `weights: Mapping[CostComponent, float]` + per-component
-`ComponentStatus` + a `provisional` marker. The default policy ships **no weights**: an empty
-policy is honest, whereas invented numbers would become product truth by accident.
+`ComponentStatus` + a `provisional` marker. An empty policy is the neutral baseline and ships no
+weights: invented numbers would become product truth by accident.
 
 Component statuses make capability honesty machine-checkable (D16):
 
@@ -254,19 +261,29 @@ Component statuses make capability honesty machine-checkable (D16):
   the objective (spec §11).
 
 A weight may only be assigned to an `implemented` component; anything else raises
-`UnsupportedFeatureError`. The only weighted policy is `demo_provisional_v1`
-(`travel_time = 1`, `waiting_time = 2`, marked `provisional`), whose numbers are explicitly not
-product truth (D31). Scoring itself is one function, `core.engine.cost.score_breakdown`, so the
-objective stays visible and testable.
+`UnsupportedFeatureError`. Scoring itself is one function, `core.engine.cost.score_breakdown`, so
+the objective stays visible and testable.
 
-Since Stage 2 that one function is applied to the **complete route's** measured breakdown:
+Two weighted policies exist, and only one of them is a default:
+
+- **`smart_route_elapsed_v1` — the default SMART_ROUTE objective (D35)**, built by
+  `core.model.cost_policy.smart_route_elapsed_policy()` (`travel_time = 1`, `waiting_time = 1`,
+  `provisional = False`). It measures the **complete elapsed route duration** = travel + waiting +
+  service, equivalently the estimated FINISH arrival time for a fixed departure. Service time is
+  deliberately not a component - every candidate of one plan serves exactly the same stops, so
+  `total_service_time` is constant and is reported rather than scored - which is why travel and
+  waiting at 1:1 **is** the elapsed-duration objective and not a hidden weight. The default
+  additional waiting preference is zero, and the optimizer already accepts moves on
+  `(violations, elapsed seconds)`, so ranking and optimization measure the same quantity.
+- **`demo_provisional_v1` — the non-default waiting-preference sensitivity study (D31)**, built by
+  `demo_provisional_policy()` (`travel_time = 1`, `waiting_time = 2`, marked `provisional`). It is
+  **not** the shipped objective any more; it exists so the report can show what a non-zero waiting
+  preference would do.
+
+Since Stage 2 scoring is applied to the **complete route's** measured breakdown:
 `core.engine.first_stop.evaluation.score_of` weights the candidate's complete travel seconds,
-complete waiting seconds and metric distance, and `distance` keeps a weight of 0 in the provisional
-policy. Service time is deliberately not a component - every candidate of one plan serves exactly
-the same stops, so `total_service_time` is constant and is reported rather than scored. **The
-objective is still the configured provisional policy of D31**; an elapsed-time model with a soft
-waiting preference instead of a universal multiplier remains an open decision (see
-`DECISIONS.md`, Stage 2 change set item 5) and nothing here anticipates it.
+complete waiting seconds and metric distance, and `distance` keeps a weight of 0 in both policies.
+The objective is a **reported** figure; the order comes from the deterministic ranking key of §5.1.
 
 ## 4. Time model
 
@@ -356,20 +373,56 @@ build_problem(plan, travel_matrix, first_stop_id=candidate)   # frozen prepared 
   one `CandidateDiagnostic` per violating stop, keyed by `candidate_stop_id` so a caller can ask a
   rejected candidate for *its own* reasons. With no fully feasible candidate the status is
   `no_fully_feasible_route` and there is no recommended stop - never a fabricated winner.
-* **Ranking**: `(score, complete duration, input_position, stop_id)`. The score is the configured
-  policy applied to the complete route's measured breakdown; `total_service_time` is identical for
-  every candidate of one plan and is therefore reported, never scored (it cannot separate them).
+* **Ranking**: the owner's deterministic 5-tuple (D35) - complete elapsed duration, complete travel
+  time, complete waiting time, `input_position`, `stop_id` - all from the complete-route metrics, the
+  FINISH leg included. The weighted score is a **reported** figure and is deliberately not a key
+  component, so no weighting is hidden in the tie-break; `total_service_time` is identical for every
+  candidate of one plan and is therefore reported, never scored (it cannot separate them). With the
+  default 1:1 weights the score equals complete travel + waiting, i.e. the complete duration minus
+  that constant service time.
 * **Cache and cost**: all candidates share one `LegCache`, so every leg is priced once and the
   reuse is measured (`cache_stats`) instead of claimed. The *prepared problem* is deliberately not
-  shared: `with_first_stop` builds a fresh problem per candidate, which is why the ~100-stop loop
-  costs what D34 records. The objective and the shipped weights are documented in §3.6/D31.
+  shared: `with_first_stop` builds a fresh problem per candidate, which is why the loop costs what
+  D34 and D36 record. The objective and the shipped weights are documented in §3.6/D35.
 * **Nothing is applied**: `plan.first_stop_state` stays `awaiting_first_stop_choice`; a
   recommendation is not a selection (D4/D32/I5), and `recommended_stop_id`/`selected_stop_id` remain
   separate fields with separate lifecycles.
 
 **Deferred (recorded, not implemented):** the incremental / delta complete-route evaluator that
 would remove the ~100-stop latency accepted in D34. Until it lands, the measured latency is the
-accepted state and no prefilter or approximation is authorized.
+accepted state and no prefilter or approximation is authorized. Under D36 this is an
+engineering-scale improvement, not a gate on the portfolio MVP.
+
+### 5.1.1 Scale and measured performance (D36, amending D34)
+
+The primary MVP performance target is **approximately 50 enabled service stops**. Two fixtures are
+built by the **same** deterministic generator in `demo/scale_dataset.py`, so the smaller one is a
+scale subset of the larger and neither can drift into a different shape:
+
+| Fixture | Builder | Stops | Enabled | Target |
+|---|---|---|---|---|
+| portfolio (**primary MVP target**) | `build_portfolio_plan()` | 55 | **50** (`PORTFOLIO_ENABLED_STOP_COUNT`) | preferred ≤ ~3 s, acceptable ≤ ~5 s, **reported**; asserted guard: the generous owner-accepted bound of D34 |
+| stress (engineering reference) | `build_scale_plan()` | 100 | 97 | v2 §20 numbers **reported only**; **not performance-qualified**, the ≤ ~5 s figure is **not an MVP gate** |
+
+The portfolio fixture's enabled count is a property of its own deterministic disabled policy
+(`PORTFOLIO_DISABLED_EVERY = 10`), asserted on every call to `build_portfolio_plan()`, and every
+label prints the **enabled** count next to the total - a fixture with materially fewer enabled stops
+is never called a "50-stop" fixture. The ~100-stop default and its tests are untouched.
+
+`tools/benchmark_optimizer.py` measures all three fixtures (demo plan, portfolio, stress) and
+attaches a **profile** to each, so the same measurement is read under the target that applies to it:
+every profile asserts the same **generous owner-accepted regression bound** of D34 (~150 s) - the
+primary MVP scale included - while the reported v2 §20 targets are printed with their honest verdict,
+so no scale is gated on a missed engineering target and none is left without a regression guard.
+`demo/report.py` prints a `SCALE AND PERFORMANCE` block covering the same three
+scales, with the owner's D36 statement verbatim, the enabled counts, and the portfolio fixture's
+**live measured** number - reported as it is. It is **outside** the ≤ ~5 s target (~19-25 s warm on
+this development machine, ~0.4-0.5 s per candidate, every candidate hitting the deterministic
+per-candidate evaluation ceiling); profiling locates the cost inside the complete-route evaluations
+themselves (one full route evaluation per candidate move), so closing the gap needs the deferred
+incremental / delta evaluator, not a prefilter, a shortlist, an approximate ranking or any
+quality-degrading cut - none of which is authorized. The ~50-stop scale decision introduces **no
+hard validation limit**: the domain and the generator stay able to evolve beyond 50 stops (D18).
 
 ### 5.2 Demo data, the demo narrative and its calibration (Stage 1 + Stage 2 U5)
 
@@ -408,39 +461,53 @@ of an artefact:
 * the plan's `input_position` order (its immutable input-order provenance, v2 §30) is a plausible
   **nearest-first work list**, so the USER baseline is a route a driver could really have entered.
 
-What the demo shows at 04:00 (all numbers are printed by the report and pinned by
-`tests/demo/test_report.py`):
+What the demo shows at 04:00 under the default elapsed-duration objective (D35) - all numbers are
+printed by the report and pinned by `tests/demo/test_report.py`:
 
 | candidate | first leg | complete waiting | complete duration | rank |
 |---|---|---|---|---|
-| `S25-ON-OPENING` (recommended) | 2h08m | 1h52m | 11h02m | #1 of 26 |
-| `S01-NEAR` (nearest) | 7m | 3h53m | 11h42m | #26 of 26 |
+| `S23-UNKNOWN-HOURS2` (recommended) | 37m | 2h37m | 10h49m | #1 of 26 |
+| `S01-NEAR` (nearest) | 7m | 3h53m | 11h42m | #20 of 26 |
 | `S05-FARTHEST` (farthest, opens 10:00) | 2h12m | 3h48m | 12h56m | REJECTED |
 
 The nearest candidate has the cheapest first leg **and** the least complete driving (5h34m, the
-minimum of the ranking - `S02-NEAR2` ties it), and still ranks #26, because starting there means
-waiting 3h53m before the first customer opens. The farthest candidate loses for the opposite reason:
-opening at 10:00, it cannot serve the early-closing customer at all and is rejected rather than
-ranked. The recommendation is neither. The report derives those comparisons from the ranking it
+minimum of the ranking - `S02-NEAR2` ties it), and still ranks #20 of 26, because starting there
+means waiting 3h53m before the first customer opens. The farthest candidate loses for the opposite
+reason: opening at 10:00, it cannot serve the early-closing customer at all and is rejected rather
+than ranked. The recommendation is neither. The report derives those comparisons from the ranking it
 claims they are about (`complete_travel_rank`, `fewest_driving_ids`), so a superlative such as
 "least complete driving" is computed for the run that printed it.
 
-Changing the departure time changes the answer - at 06:00 `S08-UNKNOWN-HOURS`, at 07:00
-`S14-PRIORITY-2`, and at 08:00 the nearest customer `S01-NEAR` becomes the strongest complete route
-(04:00 and 05:00 both recommend `S25-ON-OPENING`). Complete-route quality decides, not the first leg.
+Changing the departure time changes the answer - 04:00, 05:00 and 06:00 all recommend
+`S23-UNKNOWN-HOURS2`, at 07:00 `S14-PRIORITY-2` takes over, and at 08:00 the nearest customer
+`S01-NEAR` becomes the strongest complete route. Complete-route quality decides, not the first leg.
+
+The same table-shaped audit is printed for every sweep hour as `OBJECTIVE ALIGNMENT` (D35): per
+departure hour, the recommendation the **previous** default produced (the non-default D31
+provisional policy ranked with the pre-D35 key) next to the new elapsed-duration recommendation with
+its FINISH, complete travel, waiting, service and feasibility. At 04:00-06:00 the two differ
+(`S25-ON-OPENING` / `S25-ON-OPENING` / `S08-UNKNOWN-HOURS` → `S23-UNKNOWN-HOURS2`); at 07:00 and
+08:00 they agree. That table is the audit trail of the objective change, and the shipped answer is
+the elapsed-duration one - nothing was tuned to preserve the previous winner.
 
 `demo/report.py` (`python -m demo.report`) prints that story from the engine's own objects: plan and
 status, the recommended candidate with its complete-route metrics, the top-5 ranking, the
 recommendation's complete route stop by stop, the nearest/farthest complete outcomes with their
 ranks and an explicit why-it-wins comparison, USER vs OPTIMIZED vs the internal ALGORITHM baseline,
-the departure sweep, the sensitivity of the provisional waiting weight over the same complete-route
-outcomes (D31, including the degenerate 1:1 case), the rejected-candidate diagnostics (grouped by
-candidate, with violating stop ids), both fingerprints, the work counters, the measured ~30-stop
-runtime and the recorded ~100-stop benchmark with its command. The report is deterministic (the only
-non-deterministic lines are the measured runtimes, which are labelled and only printed when
-measured), it is labelled DEMO/SYNTHETIC everywhere, and it never presents synthetic travel as road
-routing. Its exhaustive evaluation is memoized inside the module, so the report and the demo tests
-evaluate each distinct plan (and each sensitivity policy) once.
+the departure sweep, the **objective-alignment** audit of the D35 change (the previous D31
+provisional recommendation against the new elapsed-duration one, per departure hour, with FINISH,
+complete travel, waiting, service and feasibility), the **non-default** sensitivity study of what a
+*non-zero* waiting preference would do (D31, including the degenerate 1:1 case, which is numerically
+the shipped objective), the rejected-candidate diagnostics (grouped by candidate, with violating
+stop ids), both fingerprints, the work counters, the measured ~30-stop runtime and the
+**scale/performance block** (D36): the ~30-stop demo plan, the ~50-enabled-stop portfolio fixture -
+the primary MVP scale target, with its own live measured number - and the ~100-stop stress reference,
+which is relabelled as future scale / **not performance-qualified** while keeping its honest recorded
+measurement and the owner-accepted bound (D34). The report is deterministic (the only non-deterministic lines
+are the measured runtimes, which are labelled and only printed when measured), it is labelled
+DEMO/SYNTHETIC everywhere, and it never presents synthetic travel as road routing. Its exhaustive
+evaluation is memoized inside the module, so the report and the demo tests evaluate each distinct
+plan (and each sensitivity policy) once.
 
 Baselines (v2 §30, D22): **USER** = `START → enabled stops in input_position order → FINISH` (the
 user-facing BEFORE), **OPTIMIZED** = the optimized route around the driver's selection (AFTER), and
@@ -504,19 +571,27 @@ visible attribution; `core/` never references them.
 | 15, 16 | `tests/time/test_tz_strict_validation.py` |
 | 18 | `tests/engine/test_optimizer.py` (local-search monotonicity, fingerprints), `tests/engine/test_optimizer_evaluation.py` (complete-route metrics, baselines) |
 | 19 | `tests/engine/test_optimizer_performance.py`, `tests/engine/test_optimizer.py` (demo-plan 31-enabled-stops measurement) |
-| 20 | `tools/benchmark_optimizer.py` (~100-stop measurement, no prefilter), `tests/engine/test_optimizer_performance.py` |
+| 20 | `tools/benchmark_optimizer.py` (demo plan + ~50-stop portfolio fixture + ~100-stop stress reference, all with no prefilter), `tests/engine/test_optimizer_performance.py`, `tests/tools/test_benchmark_optimizer_labels.py` |
 | 21 | Stage 3 (SQLite round-trip) |
-| 24, 33 | `tests/demo/test_dataset.py` (fixture shape and calibration: 31 enabled + 1 disabled stop, the early-closing bottleneck, short services and the 10m default, determinism), `tests/demo/test_report.py` (the four §33 claims: nearest/farthest are not the recommendation, the departure sweep changes it, complete-route quality decides; the computed least-driving comparison; the rejected-candidate diagnostics; the D31 weight sensitivity), `tests/demo/test_synthetic_matrix.py` |
-| — | `tests/test_core_isolation.py` (D1/§22), `tests/tools/test_doctor.py` (D12), `tests/engine/test_cost.py` (D13/D31), `tests/tools/test_workspace_fingerprint.py` |
+| 24, 33 | `tests/demo/test_dataset.py` (fixture shape and calibration: 31 enabled + 1 disabled stop, the early-closing bottleneck, short services and the 10m default, determinism), `tests/demo/test_report.py` (the four §33 claims: nearest/farthest are not the recommendation, the departure sweep changes it, complete-route quality decides; the computed least-driving comparison; the rejected-candidate diagnostics; the D35 objective-alignment audit; the D31 weight sensitivity; the D36 scale/performance block and its enabled counts), `tests/demo/test_synthetic_matrix.py` |
+| — | `tests/test_core_isolation.py` (D1/§22), `tests/tools/test_doctor.py` (D12), `tests/engine/test_cost.py` (D13/D31/D35), `tests/model/test_cost_policy.py` (D13/D16/D31/D35), `tests/tools/test_workspace_fingerprint.py` |
 
 - The suite prints a warning and uses a detected system TZif tree when `tzdata` is unavailable, so
   the DST tests are meaningful on an offline machine; the real fix remains `pip install tzdata`.
 - The demo-scale exhaustive evaluation costs several seconds per plan. `demo/report.py` memoizes the
-  evaluation, the departure sweep, the D31 weight-sensitivity policies and the recommendation
-  preview, so the report and the demo tests evaluate each distinct plan (and each sensitivity
-  policy) once instead of once per assertion. `tests/demo/test_report.py` still costs about a minute
-  and is the slowest module in the suite; that is the measured cost of evaluating 31 complete routes
+  evaluation, the departure sweep, the D35 objective-alignment evaluations, the D31
+  weight-sensitivity policies, the recommendation preview and the ~50-stop portfolio evaluation, so
+  the report and the demo tests evaluate each distinct plan (and each sensitivity policy) once
+  instead of once per assertion. `tests/demo/test_report.py` still costs about a minute and is the
+  slowest module in the suite; that is the measured cost of evaluating 31 complete routes
   exhaustively, not a prefilter or a shortcut.
+- The **~50-stop portfolio measurement** and the **~100-stop stress loop** are heavy, so they are
+  opt-in behind `ROUTEPILOT_SLOW_TESTS` (`tests/engine/test_optimizer_performance.py`, and the CLI
+  tests of `tests/demo/test_report.py`) and are never asserted at an exact wall-clock second: the
+  measured figure is **reported** and every measured scale - the portfolio scale included - is
+  guarded by the generous owner-accepted regression bound of D34 (~150 s, D36), not by the reported
+  ≤ ~3 s / ≤ ~5 s engineering targets. The default fast suite pins the
+  labels, the enabled counts and the fixture determinism only.
 
 ## 9. Extension points
 
@@ -525,8 +600,8 @@ visible attribution; `core/` never references them.
 | 0 ✅ | foundation: docs, domain skeleton, time layer, strict DST, error taxonomy, doctor, tests, storage schema proposal |
 | 1 ✅ | cost scoring over implemented components, deterministic demo dataset (~30 stops), synthetic matrix, 04:00 / 08:00 scenario, candidate evaluation, numeric demo report |
 | 1.5 ✅ | semantics migration off the revoked AUTO model: RECOMMEND/MANUAL, recommendation vs driver decision, `awaiting_first_stop_choice` (D4–D11, D32) |
-| 2 ✅ | complete-route evaluation (FINISH leg included) + deterministic optimizer (greedy seed, 2-opt/Or-opt improvement, leg cache) + **exhaustive** complete-route first-stop recommendation with top-K and rejected-candidate diagnostics + recommendation and route fingerprints + the three baselines + the ~100-stop benchmark + the complete-route demo narrative (U1–U5) |
-| 2 (deferred) | incremental / delta complete-route evaluator to remove the ~100-stop latency the owner accepted in D34. Recorded, **not implemented**: no prefilter, no approximation and no shortcut may be introduced before it is benchmarked |
+| 2 ✅ | complete-route evaluation (FINISH leg included) + deterministic optimizer (greedy seed, 2-opt/Or-opt improvement, leg cache) + **exhaustive** complete-route first-stop recommendation with top-K and rejected-candidate diagnostics + recommendation and route fingerprints + the three baselines + the complete elapsed-duration default objective with the owner's deterministic 5-key ranking (D35) + the scale decision (**~50 enabled stops is the primary MVP target**, D36) with the portfolio fixture and the ~100-stop stress benchmark + the complete-route demo narrative (U1–U6, U6b) |
+| 2 (deferred) | incremental / delta complete-route evaluator to remove the ~100-stop latency the owner accepted in D34 (and, under D36, to close the gap at the ~50-stop primary target). Recorded, **not implemented**: no prefilter, no approximation and no shortcut may be introduced before it is benchmarked |
 | 3 | SQLite repositories behind the approved schema |
 | 4 | API transport + web UI (map, timeline panel, summary, override controls) |
 | 5 | reoptimization after each served stop, active-leg protection groundwork |
@@ -537,3 +612,5 @@ Stages 0–2 deliberately contain no demo UI, no SQLite code, no API, no geocodi
 provider, no traffic, no side-of-road logic, no active-leg handling, no LLM integration, no
 automatic commitment of a recommendation, and no candidate prefilter or approximation. The
 incremental / delta evaluator is deferred (see §9) and must not be implemented as part of Stage 2.
+The D36 scale decision adds **no hard stop-count maximum** and no new validation limit: it changes a
+performance target, not the domain.

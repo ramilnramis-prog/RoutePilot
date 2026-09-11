@@ -4,9 +4,11 @@ What is locked in here, beyond the Stage 1 first-leg story:
 
 * **exhaustive candidates** - every enabled stop is evaluated, with no prefilter and no shortlist,
   and the counts prove it (v2 section 20, D34);
-* **complete-route ranking** - the objective is the configured policy over the complete route's
-  own travel/waiting/distance, the FINISH leg included, so a candidate with the cheapest first leg
-  does not win by default (v2 sections 12, 15);
+* **complete-route ranking** - the deterministic ranking key is the owner's 5-tuple (complete
+  elapsed duration, complete travel time, complete waiting time, ``input_position``, ``stop_id``,
+  D35) taken from the complete route's own metrics, the FINISH leg included, so a candidate with
+  the cheapest first leg does not win by default (v2 sections 12, 15) and no weighted score is
+  hidden in the tie-break;
 * **complete-route feasibility** - a candidate whose remainder misses a hard window is never
   ranked, and is reported in ``rejected`` with its violating stop ids and reasons (v2 section 14);
 * **no_fully_feasible_route** - when nothing is fully feasible there is no recommended id and no
@@ -63,11 +65,18 @@ OPEN = ServiceWindow.unrestricted()
 
 
 def at(seconds: int, stop_id: str, **kwargs):
-    """A stop exactly ``seconds`` of synthetic travel from the warehouse."""
+    """A stop exactly ``seconds`` of synthetic travel from the warehouse, straight north."""
     return stop(stop_id, WAREHOUSE[0] + degrees_for(seconds), WAREHOUSE[1], **kwargs)
 
 
+def east(seconds: int, stop_id: str, **kwargs):
+    """A stop exactly ``seconds`` of synthetic travel from the warehouse, due east."""
+    return stop(stop_id, WAREHOUSE[0], WAREHOUSE[1] + degrees_for(seconds), **kwargs)
+
+
 def evaluate(plan, *, policy=None, matrix=None):
+    # The weighted-policy mechanics are exercised explicitly here; the product default is the
+    # elapsed-duration objective (D35), which ``tests.support.build_plan`` applies by default.
     chosen = policy if policy is not None else demo_provisional_policy()
     return evaluate_first_stop_candidates(
         plan=plan, travel_matrix=matrix if matrix is not None else demo_matrix(), policy=chosen
@@ -113,18 +122,19 @@ def waiting_plan():
     )
 
 
-def shortest_first_leg_loses_plan():
-    """Every candidate is feasible, and a longer first leg still wins on the complete route.
+def nearer_first_stop_loses_plan():
+    """Every candidate is feasible, and the **nearest** first leg still loses the ranking.
 
-    ``A`` (20 min away) and ``C`` (2h away) both open at 08:00, so whichever of them is served
-    first absorbs the waiting; ``B`` (40 min away) can be served first with no waiting at all, and
-    its complete route is the cheapest of the three even though its first leg is not the shortest.
+    ``A`` is 20 minutes from START and ``B`` is 40 minutes, both straight north, while ``D`` sits
+    60 minutes due east. Serving ``A`` first looks cheapest on the first leg, but the complete
+    route it produces has to make the detour east and then run out to FINISH the long way;
+    starting at ``D`` finishes the whole route sooner. Nothing is rejected here, so complete-route
+    quality - not feasibility and not the first leg - decides the ranking (v2 sections 12/13).
     """
     return build_plan(
         at(20 * M, "A", window=OPEN),
         at(40 * M, "B", window=OPEN),
-        at(2 * T, "C", window=ServiceWindow.fixed(time(8, 0), time(8, 30))),
-        cost_policy=demo_provisional_policy(),
+        east(1 * T, "D", window=OPEN),
     )
 
 
@@ -213,9 +223,9 @@ class CompleteRouteRankingTests(unittest.TestCase):
 
     def test_a_nearer_first_stop_can_lose_on_the_complete_route_alone(self) -> None:
         # Every candidate is feasible here, so nothing is hidden behind a rejection: the winner is
-        # decided by the complete-route objective, and a shorter first leg is not enough to win
+        # decided by the complete route, and the cheapest first leg is not enough to win
         # (v2 sections 12/13).
-        plan = shortest_first_leg_loses_plan()
+        plan = nearer_first_stop_loses_plan()
         policy = demo_provisional_policy()
         report = evaluate(plan, policy=policy)
         recommended = report.recommended()
@@ -230,26 +240,47 @@ class CompleteRouteRankingTests(unittest.TestCase):
             alternatives, key=lambda candidate: (candidate.travel_time, candidate.stop_id)
         )
         self.assertLess(shorter_first_leg.travel_time, recommended.travel_time)
-        self.assertLess(recommended.score, shorter_first_leg.score)
-        self.assertEqual(report.rank_of(shorter_first_leg.stop_id), 2)
+        # The cheaper first leg produces the LONGER complete route, so it loses on the complete
+        # elapsed duration - the first component of the D35 ranking key.
+        self.assertLess(
+            recommended.estimated_complete_route_duration,
+            shorter_first_leg.estimated_complete_route_duration,
+        )
         self.assertEqual(report.rank_of(recommended.stop_id), 1)
 
-    def test_ranking_follows_the_objective_then_the_documented_tie_break(self) -> None:
-        plan = shortest_first_leg_loses_plan()
-        policy = demo_provisional_policy()
-        report = evaluate(plan, policy=policy)
+    def test_the_ranking_key_is_the_owners_five_tuple_and_carries_no_score(self) -> None:
+        # D35: the deterministic ranking key is exactly (complete elapsed duration, complete travel
+        # time, complete waiting time, input_position, stop_id) - complete-route metrics, FINISH
+        # leg included - and the weighted objective is deliberately not part of it.
+        plan = nearer_first_stop_loses_plan()
+        report = evaluate(plan, policy=demo_provisional_policy())
 
+        for candidate in report.ranked:
+            position = plan.stop_by_id(candidate.stop_id).input_position
+            with self.subTest(stop=candidate.stop_id):
+                self.assertEqual(
+                    ranking_key(candidate, input_position=position),
+                    (
+                        candidate.estimated_complete_route_duration,
+                        candidate.complete_travel_time,
+                        candidate.complete_waiting_time,
+                        position,
+                        candidate.stop_id,
+                    ),
+                )
         expected = sorted(
             report.ranked,
             key=lambda candidate: ranking_key(
                 candidate,
-                score=score_of(candidate.metrics, policy),
                 input_position=plan.stop_by_id(candidate.stop_id).input_position,
             ),
         )
-        self.assertEqual([candidate.stop_id for candidate in expected], list(report.ranked_ids()))
-        scores = [candidate.score for candidate in report.ranked]
-        self.assertEqual(scores, sorted(scores))
+        self.assertEqual(
+            [candidate.stop_id for candidate in expected], list(report.ranked_ids())
+        )
+        # No score can be smuggled in: the key does not accept one.
+        with self.assertRaises(TypeError):
+            ranking_key(report.ranked[0], score=report.ranked[0].score, input_position=0)  # type: ignore[call-arg]
 
     def test_candidates_that_tie_exactly_fall_back_to_the_documented_tie_break(self) -> None:
         # Unrestricted windows and two stops: both candidates have the same complete route, so the
@@ -624,7 +655,7 @@ class CachingAndDeterminismTests(unittest.TestCase):
         for seed, output in outputs.items():
             with self.subTest(seed=seed):
                 self.assertIn("recommended", output)
-                self.assertIn("ranked B:", output)
+                self.assertIn("ranked D:", output)
                 self.assertIn("CacheStats(hits=161", output)
 
     def test_fingerprint_reflects_the_evaluated_plan(self) -> None:
@@ -840,8 +871,8 @@ def _evaluation_under_hash_seed(seed: str) -> str:
     repo_root = Path(__file__).resolve().parents[2]
     script = (
         "import sys; sys.path.insert(0, r'%s');"
-        "from tests.engine.test_first_stop_evaluation import shortest_first_leg_loses_plan, evaluate;"
-        "report = evaluate(shortest_first_leg_loses_plan());"
+        "from tests.engine.test_first_stop_evaluation import nearer_first_stop_loses_plan, evaluate;"
+        "report = evaluate(nearer_first_stop_loses_plan());"
         "print(report.status_name, report.cache_stats);\n"
         "print('ranked', ','.join(\n"
         "    f'{c.stop_id}:{c.score}:{c.estimated_complete_route_duration}:{c.travel_time}:'\n"

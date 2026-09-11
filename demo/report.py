@@ -16,14 +16,26 @@ What the report shows, in the order the spec asks for it:
 * the **USER** baseline against the **OPTIMIZED** route, and the internal **ALGORITHM** baseline
   (v2 section 30, D22);
 * the **departure-time sweep** 04:00-08:00, which shows that the recommendation changes;
-* the **sensitivity of the provisional objective** to its waiting weight (D31), computed over the
+* the **OBJECTIVE-ALIGNMENT** table (D35): per departure hour, the previous D31 provisional
+  recommendation against the new elapsed-duration recommendation, with the new one's FINISH,
+  complete travel, waiting, service and feasibility - the audit trail of the objective change;
+* the **non-default sensitivity study** of a *non-zero* waiting preference (D31), computed over the
   same complete-route outcomes, including the degenerate 1:1 case;
 * the **rejected candidates** with their violating stop ids (v2 section 14, D9);
 * the **route fingerprint** and the **recommendation fingerprint**, and the difference between
   them once a first stop is selected (v2 section 7, D33);
 * the deterministic work counters (candidates evaluated, optimizer runs, leg-cache hits/misses/
-  entries), the measured ~30-stop evaluation runtime, and the recorded ~100-stop benchmark
-  (v2 section 20, D34).
+  entries), the measured ~30-stop evaluation runtime, and the **scale/performance block**: the
+  ~30-stop demo plan, the **~50-enabled-stop portfolio fixture** (the primary MVP scale target of
+  D36) and the **~100-stop stress reference**, which D36 declares future scale / not
+  performance-qualified (v2 section 20, D34, D36).
+
+The default objective is the **complete elapsed route duration** (D35): ``travel_time`` and
+``waiting_time`` at 1:1 over the complete route, with a waiting preference of zero. Service time is
+constant across the candidates of one plan and is reported, never scored, so the score equals
+complete travel + waiting and equals the complete duration minus that constant. The historical
+``demo_provisional_v1`` weights (travel 1, waiting 2) are **not** the default any more and are
+printed only inside the labelled sensitivity study.
 
 Two things are deliberate and worth stating up front:
 
@@ -59,9 +71,12 @@ from core.engine.optimizer.route_fingerprint import route_fingerprint
 from core.engine.optimizer.route_problem import build_problem
 from core.model.cost_policy import (
     DEMO_TRAVEL_TIME_WEIGHT,
+    DEMO_WAITING_TIME_WEIGHT,
+    SMART_ROUTE_ELAPSED_POLICY_NAME,
     CostComponent,
     RouteCostPolicy,
     demo_provisional_policy,
+    smart_route_elapsed_policy,
 )
 from core.model.first_stop import FirstStopCandidate, FirstStopIntent
 from core.model.ids import StopId
@@ -78,17 +93,31 @@ from demo.dataset import (
     build_demo_plan,
     demo_departure_time_at,
 )
+from demo.scale_dataset import (
+    PORTFOLIO_DISABLED_STOP_COUNT,
+    PORTFOLIO_ENABLED_STOP_COUNT,
+    PORTFOLIO_STOP_COUNT,
+    SCALE_DEFAULT_STOP_COUNT,
+    SCALE_WARNING,
+    build_portfolio_plan,
+)
 from demo.synthetic_matrix import DEMO_MATRIX_DISCLAIMER, demo_matrix
 
 __all__ = [
     "BENCHMARK_COMMAND",
     "DEMO_EVALUATION_RUNTIME_BUDGET_SEC",
     "DEPARTURE_SWEEP_HOURS",
+    "OWNER_SCALE_STATEMENT",
+    "PORTFOLIO_ACCEPTABLE_BUDGET_SEC",
+    "PORTFOLIO_BENCHMARK_COMMAND",
+    "PORTFOLIO_PREFERRED_BUDGET_SEC",
+    "PREVIOUS_DEFAULT_WAITING_WEIGHT",
     "RECORDED_BENCHMARK",
     "WEIGHT_SENSITIVITY_RATIOS",
     "BaselineComparison",
     "DepartureOutcome",
     "EvaluationTimings",
+    "ObjectiveAlignmentRow",
     "RecordedBenchmark",
     "WeightSensitivityRow",
     "baseline_comparison",
@@ -99,7 +128,11 @@ __all__ = [
     "fewest_driving_ids",
     "format_duration",
     "main",
+    "objective_alignment",
     "objective_winner_sentence",
+    "performance_scale_lines",
+    "portfolio_evaluation",
+    "previous_default_recommendation",
     "recommendation_preview",
     "rejected_candidate_lines",
     "weight_sensitivity",
@@ -111,10 +144,15 @@ DEPARTURE_SWEEP_HOURS = (4, 5, 6, 7, 8)
 #: How many alternatives the ranking section shows (v2 section 13: "approximately 3-5").
 TOP_K = 5
 
-#: The waiting:travel ratios the sensitivity section evaluates over the complete-route objective
-#: (D31: the demo report must show the provisional weights' sensitivity, including the degenerate
-#: 1:1 case where the waiting weight equals the travel weight).
+#: The waiting:travel ratios the **non-default** sensitivity study evaluates over the complete-route
+#: objective (D31, superseded for the default objective by D35: the shipped default has a waiting
+#: preference of zero). The 1:1 case is included because it is numerically the default objective
+#: and shows how the deterministic ranking key - not the objective - decides there.
 WEIGHT_SENSITIVITY_RATIOS = (1.0, 1.5, 2.0, 3.0)
+
+#: The waiting weight of the **previous** D31 default (travel 1, waiting 2), kept so the
+#: objective-alignment table can name exactly what it compares against.
+PREVIOUS_DEFAULT_WAITING_WEIGHT = DEMO_WAITING_TIME_WEIGHT
 
 #: v2 section 20's "acceptable for the early product" target for ~100 stops is 5 s. The demo plan has
 #: 31 enabled stops and its exhaustive evaluation is measured around that boundary (see the printed
@@ -122,8 +160,25 @@ WEIGHT_SENSITIVITY_RATIOS = (1.0, 1.5, 2.0, 3.0)
 #: these engineering targets, not correctness rules).
 DEMO_EVALUATION_RUNTIME_BUDGET_SEC = 5.0
 
-#: The exact command that produces the ~100-stop figures below.
+#: The exact command that produces the ~100-stop stress figures below.
 BENCHMARK_COMMAND = "python tools/benchmark_optimizer.py --stop-count 100"
+
+#: The owner's Stage 2.1 scale decision, verbatim (D36), printed with the scale/performance block so
+#: the numbers are read under the target that actually applies to them.
+OWNER_SCALE_STATEMENT = (
+    "Portfolio MVP performance target: ~50 stops. 100-stop exhaustive optimization is supported as "
+    "an engineering stress scenario but is not yet performance-optimized."
+)
+
+#: The ~50-enabled-stop portfolio fixture is the **primary MVP scale target** (D36), so its
+#: preferred / acceptable targets are the v2 section 20 pair: preferred <= ~3 s, acceptable <= ~5 s.
+#: They are **reported**, never asserted as a correctness rule (v2 section 20 calls them engineering
+#: targets), and the benchmark tool guards the measurement with a generous bound instead.
+PORTFOLIO_PREFERRED_BUDGET_SEC = 3.0
+PORTFOLIO_ACCEPTABLE_BUDGET_SEC = 5.0
+
+#: The exact command that reproduces the scale/performance block's live portfolio measurement.
+PORTFOLIO_BENCHMARK_COMMAND = "python tools/benchmark_optimizer.py"
 
 _SEPARATOR = "=" * 112
 _SUBSEPARATOR = "-" * 112
@@ -166,6 +221,36 @@ def _policy_text(policy: RouteCostPolicy) -> str:
     )
     marker = " - PROVISIONAL DEMO WEIGHTS, not product truth" if policy.provisional else ""
     return f"{policy.name} ({weights}){marker}"
+
+
+def _weighted_sum_text(policy: RouteCostPolicy) -> str:
+    """``travel_time x 1 + waiting_time x 1`` for the policy's own weighted components."""
+    weighted = [
+        f"{component.value} x {weight:g}"
+        for component, weight in sorted(policy.weights.items(), key=lambda item: item[0].value)
+    ]
+    return " + ".join(weighted) if weighted else "no weights configured"
+
+
+def _objective_note(policy: RouteCostPolicy) -> str:
+    """What the configured objective is, said truthfully for the policy actually in force.
+
+    The default (D35) is the complete elapsed route duration with a waiting preference of zero.
+    A ``provisional`` policy is the non-default D31 sensitivity study and is labelled as such
+    instead of being described as the shipped objective.
+    """
+    if policy.provisional:
+        return (
+            "NON-DEFAULT sensitivity policy, not the shipped objective (D31): the default "
+            f"SMART_ROUTE objective is {SMART_ROUTE_ELAPSED_POLICY_NAME} - complete elapsed "
+            "duration with a zero waiting preference (D35)"
+        )
+    return (
+        "the default SMART_ROUTE objective (D35): the complete elapsed route duration. Service "
+        "time is constant across the candidates of one plan and is reported, never scored, so at "
+        "1:1 weights this score equals complete travel + waiting and equals the complete duration "
+        "minus that constant - the elapsed-duration objective, not a hidden weight"
+    )
 
 
 def _distance_km(metres: float) -> str:
@@ -308,6 +393,18 @@ def demo_evaluation(plan: RoutePlan) -> FirstStopEvaluationReport:
     return cached
 
 
+def portfolio_evaluation() -> FirstStopEvaluationReport:
+    """The exhaustive complete-route evaluation of the ~50-enabled-stop portfolio fixture (D36).
+
+    Memoized through :func:`demo_evaluation`, so the report, the scale block and the tests share one
+    evaluation and a repeated read is free. The plan comes from
+    :func:`demo.scale_dataset.build_portfolio_plan`, which asserts on every call that the fixture
+    still holds exactly :data:`demo.scale_dataset.PORTFOLIO_ENABLED_STOP_COUNT` enabled stops, so a
+    "~50-stop" label can never outlive the plan it names.
+    """
+    return demo_evaluation(build_portfolio_plan())
+
+
 # --------------------------------------------------------------------------- #
 # the departure-time sweep
 # --------------------------------------------------------------------------- #
@@ -390,6 +487,119 @@ def _run_sweep(
             previous = recommended.stop_id
             previous_hour = hour
     return tuple(outcomes)
+
+
+# --------------------------------------------------------------------------- #
+# the objective-alignment audit (D35)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ObjectiveAlignmentRow:
+    """One departure hour of the objective-alignment audit (D35).
+
+    ``previous_*`` is the recommendation under the **previous** default, the non-default
+    provisional D31 policy (``travel_time = 1``, ``waiting_time = 2``); ``new_*`` is the
+    recommendation under the new default, the complete elapsed route duration. A row therefore
+    records exactly what the objective change did, and where it changed the answer it reports that
+    instead of hiding it.
+    """
+
+    local_hour: int
+    previous_recommended_id: StopId | None
+    new_recommended_id: StopId | None
+    finish: datetime | None
+    complete_travel: int | None
+    complete_waiting: int | None
+    complete_service: int | None
+    feasible: bool | None
+
+    @property
+    def changed(self) -> bool:
+        return (
+            self.previous_recommended_id is not None
+            and self.new_recommended_id is not None
+            and self.previous_recommended_id != self.new_recommended_id
+        )
+
+
+def previous_default_recommendation(
+    report: FirstStopEvaluationReport, plan: RoutePlan
+) -> FirstStopCandidate | None:
+    """The recommendation the **pre-D35** default produced, reconstructed for the audit trail.
+
+    Before D35 the ranking key was ``(score, complete duration, input_position, stop_id)`` and the
+    default policy was the D31 provisional ``demo_provisional_v1`` (travel 1, waiting 2). This
+    helper applies exactly that historical key to the provisional policy's own ranked candidates,
+    so the objective-alignment table compares like with like: what the previous default would have
+    recommended at that departure hour against what the new default recommends now.
+
+    It ranks nothing the product ships - the shipped ranking is
+    :func:`core.engine.first_stop.evaluation.ranking_key` (D35) - and it exists only so the audit
+    table is not a comparison of the new key against itself. Rejected candidates are already absent
+    from ``report.ranked``, so the reconstruction can never rank an infeasible route.
+    """
+    if not report.ranked:
+        return None
+    return min(
+        report.ranked,
+        key=lambda candidate: (
+            candidate.score,
+            candidate.estimated_complete_route_duration,
+            plan.stop_by_id(candidate.stop_id).input_position,
+            candidate.stop_id,
+        ),
+    )
+
+
+def objective_alignment(
+    *, plan: RoutePlan | None = None, hours: tuple[int, ...] = DEPARTURE_SWEEP_HOURS
+) -> tuple[ObjectiveAlignmentRow, ...]:
+    """The audit trail of the D35 objective change, per departure hour.
+
+    For every hour the **same** exhaustive candidate set is evaluated twice: once under the
+    previous D31 default (``demo_provisional_policy()``, travel 1 / waiting 2, ranked with the
+    pre-D35 key via :func:`previous_default_recommendation`) and once under the new default
+    :func:`core.model.cost_policy.smart_route_elapsed_policy` (complete elapsed route duration,
+    ranked with the D35 key). The new row carries its FINISH instant, complete travel, complete
+    waiting, total service and feasibility, so the change is auditable rather than asserted.
+
+    Nothing is tuned and nothing is preserved: the new winner may legitimately differ from the
+    previous one, and the table reports that. Both evaluations are memoized like every other
+    evaluation of the module, so the table is a pure function of the plan and the two policies.
+    """
+    base_plan = build_demo_plan() if plan is None else plan
+    rows: list[ObjectiveAlignmentRow] = []
+    for hour in hours:
+        departure = demo_departure_time_at(hour)
+        previous = previous_default_recommendation(
+            demo_evaluation(
+                dataclasses.replace(
+                    base_plan,
+                    departure_time=departure,
+                    cost_policy=demo_provisional_policy(),
+                )
+            ),
+            base_plan,
+        )
+        current = demo_evaluation(
+            dataclasses.replace(
+                base_plan,
+                departure_time=departure,
+                cost_policy=smart_route_elapsed_policy(),
+            )
+        ).recommended()
+        rows.append(
+            ObjectiveAlignmentRow(
+                local_hour=hour,
+                previous_recommended_id=previous.stop_id if previous is not None else None,
+                new_recommended_id=current.stop_id if current is not None else None,
+                finish=current.estimated_finish if current is not None else None,
+                complete_travel=current.complete_travel_time if current is not None else None,
+                complete_waiting=current.complete_waiting_time if current is not None else None,
+                complete_service=current.total_service_time if current is not None else None,
+                feasible=current.feasible if current is not None else None,
+            )
+        )
+    return tuple(rows)
 
 
 # --------------------------------------------------------------------------- #
@@ -496,14 +706,18 @@ def baseline_comparison(preview: RecommendationPreview) -> BaselineComparison:
 
 
 # --------------------------------------------------------------------------- #
-# sensitivity of the provisional objective (D31)
+# sensitivity study of a NON-ZERO waiting preference (D31, non-default since D35)
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class WeightSensitivityRow:
-    """What the demo plan recommends at 04:00 under one waiting weight (D31).
+    """What the engine recommends at 04:00 under one waiting weight (D31, non-default).
 
     The row is computed over the **complete-route** outcomes of that policy, so it shows the
-    sensitivity of the objective the product actually ranks with - not a leftover first-leg view.
+    sensitivity of the objective to its waiting weight - not a leftover first-leg view. Since D35
+    the default objective has a waiting preference of zero, so this is a labelled non-default
+    study; ``recommended_id`` is the shipped engine's answer under that policy, i.e. ranked with
+    the D35 key (complete elapsed duration first), and ``note`` says when the weighted objective
+    alone would have picked a different stop.
     """
 
     waiting_weight: float
@@ -522,14 +736,21 @@ def weight_sensitivity(
     ratios: tuple[float, ...] = WEIGHT_SENSITIVITY_RATIOS,
     travel_weight: float = DEMO_TRAVEL_TIME_WEIGHT,
 ) -> tuple[WeightSensitivityRow, ...]:
-    """The recommended first stop at 04:00 for several waiting weights (D31).
+    """The recommended first stop at 04:00 for several waiting weights (D31, non-default).
 
-    The demo weights are provisional, so the report shows what they do: each ratio re-ranks the
-    **same** complete routes under a policy ``travel_weight = 1``, ``waiting_time = ratio``. The
-    degenerate 1:1 case is included, and its row says how many candidates tie at the winning score
-    and which documented ranking key broke the tie, because the tie-break - not the objective -
-    decides the answer there. Nothing is tuned: the ratios are fixed inputs of the report, and the
-    payload plan is never mutated.
+    ``demo_provisional_policy`` is **not** the shipped default any more (D35 makes complete elapsed
+    duration the default with a waiting preference of zero), so this is a labelled non-default
+    study: each ratio re-evaluates the **same** complete candidate set under a policy
+    ``travel_weight = 1``, ``waiting_time = ratio``. The 1:1 case is included; its row is
+    numerically the default objective, and it says how many candidates tie at the winning score and
+    which deterministic ranking key broke the tie, because the tie-break - not the objective -
+    decides the answer there.
+
+    ``recommended_id`` is the shipped engine's answer under that policy, so it is ordered by the
+    D35 key (complete elapsed duration first). Where the weighted objective alone would have
+    preferred another stop, the row's ``note`` says so explicitly: that is exactly what a non-zero
+    waiting preference would do, and it is reported rather than hidden. Nothing is tuned: the
+    ratios are fixed inputs of the report, and the payload plan is never mutated.
     """
     base_plan = build_demo_plan() if plan is None else plan
     rows: list[WeightSensitivityRow] = []
@@ -548,16 +769,39 @@ def weight_sensitivity(
             if recommended is not None
             else []
         )
+        objective_best = (
+            min(
+                evaluated.ranked,
+                key=lambda candidate: (
+                    candidate.score,
+                    candidate.estimated_complete_route_duration,
+                    candidate.stop_id,
+                ),
+            )
+            if evaluated.ranked
+            else None
+        )
         if recommended is None:
             note = "no fully feasible complete route under this weight"
         elif len(ties) > 1:
             note = (
-                f"DEGENERATE 1:1 case: {len(ties)} candidates tie at "
-                f"{recommended.score:.0f}; the documented ranking key (score, complete duration, "
-                "input_position, stop_id) breaks the tie"
+                f"DEGENERATE {ratio:g}:1 case: {len(ties)} candidates tie at "
+                f"{recommended.score:.0f}; the deterministic ranking key (complete elapsed "
+                "duration, complete travel time, complete waiting time, input_position, stop_id) "
+                "breaks the tie (D35)"
+            )
+        elif objective_best is not None and objective_best.stop_id != recommended.stop_id:
+            note = (
+                f"a NON-ZERO waiting preference would make the objective pick "
+                f"{objective_best.stop_id} ({objective_best.score:.0f} vs "
+                f"{recommended.score:.0f}), but the shipped ranking key puts complete elapsed "
+                f"duration first (D35), so the recommendation stays {recommended.stop_id}"
             )
         else:
-            note = "waiting is penalised, so arriving near opening is recommended"
+            note = (
+                "the weighted objective and the shipped ranking key pick the same stop under this "
+                "preference"
+            )
         rows.append(
             WeightSensitivityRow(
                 waiting_weight=ratio,
@@ -607,20 +851,43 @@ def rejected_candidate_lines(report: FirstStopEvaluationReport) -> tuple[str, ..
 def objective_winner_sentence(report: FirstStopEvaluationReport) -> str:
     """The "why the recommendation wins" claim, computed from the ranking it is about.
 
+    The primary criterion is the **minimum complete elapsed duration** (D35): the default
+    SMART_ROUTE objective is the complete elapsed route duration (travel + waiting + service,
+    equivalently the FINISH arrival time for a fixed departure), so the sentence states that
+    duration first and shows the complete travel, the complete waiting and the total service time
+    as the measured decomposition that produces it. The weighted **objective** is printed last as
+    the supporting consequence it is, not as the reason: with the shipped 1:1 weights it equals
+    travel + waiting, i.e. the complete duration minus the constant service time (D35).
+
     The objective is only defined over the **fully feasible ranked** candidates: a rejected
     candidate is never ranked and its infeasible score is not comparable with a feasible one (v2
-    section 14, D9). So the superlative names that ranked set and the rejected count explicitly, and
+    section 14, D9). So the sentence names that ranked set and the rejected count explicitly, and
     it is derived from the report's own ``ranked``/``rejected`` sets - it cannot be read as ranking
     an infeasible route, and it cannot go stale with the fixture.
 
-    The claimed minimum is **printed**, not merely asserted in prose: it is ``min`` of the ranked
-    candidates' scores, so a reader can check the claim against the ranking the sentence names
-    instead of having to take the word "lowest" on trust.
+    The claimed minimum is **printed**, not merely asserted in prose: it is the recommended
+    candidate's complete elapsed duration and the ``min`` of the ranked candidates' scores, so a
+    reader can check the claim against the ranking the sentence names instead of having to take the
+    word "lowest" on trust.
     """
+    recommended = report.recommended()
     lowest_ranked_score = min(candidate.score for candidate in report.ranked)
+    if recommended is None:  # pragma: no cover - a ranking exists whenever this sentence is printed
+        return (
+            f"- the minimum complete elapsed duration over the {len(report.ranked)} ranked fully "
+            f"feasible candidates is undefined, and the lowest ranked objective is "
+            f"{lowest_ranked_score:.0f} "
+            f"({len(report.rejected)} of the {report.candidates_evaluated} evaluated are REJECTED, "
+            "never ranked and carry no comparable score)."
+        )
     return (
-        f"- the lowest objective of the {len(report.ranked)} ranked fully feasible candidates "
-        f"is {lowest_ranked_score:.0f} "
+        f"- the minimum complete elapsed duration of the {len(report.ranked)} ranked fully feasible "
+        f"candidates is {format_duration(recommended.estimated_complete_route_duration)} "
+        f"({recommended.estimated_complete_route_duration}s) - complete travel "
+        f"{format_duration(recommended.complete_travel_time)}, complete waiting "
+        f"{format_duration(recommended.complete_waiting_time)} and service "
+        f"{format_duration(recommended.total_service_time)} - which with the shipped 1:1 weights is "
+        f"the lowest objective of {lowest_ranked_score:.0f} "
         f"({len(report.rejected)} of the {report.candidates_evaluated} evaluated are REJECTED, "
         "never ranked and carry no comparable score)."
     )
@@ -631,12 +898,16 @@ def objective_winner_sentence(report: FirstStopEvaluationReport) -> str:
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class RecordedBenchmark:
-    """A previous, clearly labelled measurement of the ~100-stop exhaustive loop.
+    """A previous, clearly labelled measurement of the ~100-stop stress fixture.
 
     The report does **not** re-run the ~100-stop benchmark: it takes minutes, and pretending a
     recorded figure is a live measurement would be exactly the kind of claim this project refuses.
     The command is printed next to the numbers, with the machine note, so anyone can reproduce them
     (v2 section 20, D34).
+
+    Since D36 this is the **engineering stress reference**, not a performance-qualified MVP scale: the
+    recorded figure keeps reporting its honest measured number and the owner-accepted bound, and the
+    section is labelled as future scale / not performance-qualified rather than as a missed MVP gate.
     """
 
     measured_on: str
@@ -657,7 +928,8 @@ class RecordedBenchmark:
 #: The last measurement taken on this development machine with
 #: ``python tools/benchmark_optimizer.py --stop-count 100`` (2026-09-11). Wall-clock figures are
 #: machine-dependent; every other number is deterministic (the benchmark proves it by repeating
-#: the loop and comparing the counters).
+#: the loop and comparing the counters). Under D36 this fixture is the stress reference: the figure
+#: is reported honestly and is **not** an MVP performance gate.
 RECORDED_BENCHMARK = RecordedBenchmark(
     measured_on="2026-09-11 (this development machine, `--stop-count 100`)",
     stop_count=97,
@@ -682,12 +954,16 @@ RECORDED_BENCHMARK = RecordedBenchmark(
 class EvaluationTimings:
     """Wall-clock measurements taken by :func:`main` (machine-dependent, never part of the report).
 
-    ``demo_evaluation`` and each sweep row are memoized, so a timing is recorded only when that
-    evaluation was actually computed in this process.
+    ``demo_evaluation``, each sweep row and the portfolio evaluation are memoized, so a timing is
+    recorded only when that evaluation was actually computed in this process. ``portfolio_seconds``
+    is the ~50-enabled-stop portfolio fixture's exhaustive loop - the primary MVP scale target
+    (D36) - measured by :func:`main` itself; it is ``None`` in a call that did not measure it, and
+    the scale block then says so instead of inventing a number.
     """
 
     demo_seconds: float | None
     sweep_seconds: float | None
+    portfolio_seconds: float | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -780,7 +1056,8 @@ def build_report(
         "optimized remaining stops -> FINISH, FINISH leg included), 20 (exhaustive candidates), "
         "25/30 (baselines), 33 (what the demo must prove), 35 (fingerprints); decisions D4/D32 "
         "(recommendation is not selection), D22 (baselines), D29 (window end policy), D34 "
-        "(interim ~100-stop latency)."
+        "(interim ~100-stop latency), D35 (the default objective is complete elapsed duration and "
+        "the ranking key is the owner's 5-tuple)."
     )
     lines.append(_SEPARATOR)
     lines.append("")
@@ -825,9 +1102,15 @@ def build_report(
     )
     lines.append(f"  cost policy       : {_policy_text(plan.cost_policy)}")
     lines.append(
-        "  objective         : the configured policy over the COMPLETE route's measured "
-        "breakdown: travel_time x 1 + waiting_time x 2 (distance weight is 0; service time is "
-        "identical for every candidate, so it is reported, never scored)"
+        f"  objective         : {_weighted_sum_text(plan.cost_policy)} over the COMPLETE route's "
+        "measured breakdown (travel, waiting; the distance weight is 0 and service time is "
+        "identical for every candidate, so it is reported, never scored) - "
+        + _objective_note(plan.cost_policy)
+    )
+    lines.append(
+        "  ranking key       : (1) complete elapsed duration, (2) complete travel time, "
+        "(3) complete waiting time, (4) input_position, (5) stop_id - the owner's deterministic "
+        "5-tuple (D35); the weighted score is a reported figure, never a ranking key"
     )
     lines.append("")
 
@@ -899,14 +1182,13 @@ def build_report(
             or ["  none recorded, which cannot happen while the status is not 'recommended'"]
         )
         lines.append("")
-        lines.append("PERFORMANCE (v2 section 20, D34)")
+        lines.append("SCALE AND PERFORMANCE (v2 section 20, D34, D36)")
         lines.append(
-            f"{_performance_stop_count_line(active, disabled, plan)} : "
-            f"{report.candidates_evaluated} candidates, {report.optimizer_runs} optimizer runs, "
-            f"{report.cache_stats.lookups} leg questions "
-            f"({report.cache_stats.hits} hits / {report.cache_stats.misses} misses, "
-            f"{report.cache_stats.entries} entries)."
+            "  The owner's Stage 2.1 scale decision (D36), verbatim: "
+            f"\"{OWNER_SCALE_STATEMENT}\""
         )
+        scale_lines, _ = performance_scale_lines(active, disabled, plan, report, timings=timings)
+        lines.extend(scale_lines)
         lines.append("")
         return "\n".join(_closing_lines(lines, report))
 
@@ -926,10 +1208,15 @@ def build_report(
         f"{_clock(recommended.estimated_service_start, zone)}"
     )
     lines.append(
-        "  objective          : travel_time "
-        f"{_component(recommended, CostComponent.TRAVEL_TIME):.0f} x 1 + waiting_time "
-        f"{_component(recommended, CostComponent.WAITING_TIME):.0f} x 2 = {recommended.score:.0f} "
-        "(provisional demo policy, D31)"
+        "  objective          : "
+        + " + ".join(
+            f"{component.value} {_component(recommended, component):.0f} x {weight:g}"
+            for component, weight in sorted(
+                plan.cost_policy.weights.items(), key=lambda item: item[0].value
+            )
+        )
+        + f" = {recommended.score:.0f} - "
+        + _objective_note(plan.cost_policy)
     )
     lines.append(
         "  hard windows      : "
@@ -952,8 +1239,10 @@ def build_report(
             _candidate_row(position, candidate, zone, plan.stop_by_id(candidate.stop_id))
         )
     lines.append(
-        "  ranking key       : (score, complete duration, input_position, stop_id) - deterministic, "
-        "so a tie cannot hand the recommendation to an arbitrary stop (v2 section 30, D33)"
+        "  ranking key       : (complete elapsed duration, complete travel time, complete waiting "
+        "time, input_position, stop_id) - the owner's deterministic 5-tuple from the complete-route "
+        "metrics, FINISH leg included, with no weighted score in it (D35); a tie therefore cannot "
+        "hand the recommendation to an arbitrary stop (v2 section 30, D33)"
     )
     lines.append("")
 
@@ -1150,6 +1439,44 @@ def build_report(
     )
     lines.append("")
 
+    # ---- objective alignment (D35) -------------------------------------- #
+    lines.append(
+        "OBJECTIVE ALIGNMENT - PREVIOUS D31 PROVISIONAL vs THE NEW ELAPSED-DURATION DEFAULT (D35)"
+    )
+    previous_column = f"previous D31 (travel 1, wait {PREVIOUS_DEFAULT_WAITING_WEIGHT:g})"
+    new_column = f"new default {SMART_ROUTE_ELAPSED_POLICY_NAME}"
+    lines.append(
+        f"  {'departure':<10} {previous_column:<34} {new_column:<36} {'FINISH':>6}  {'c.trav':>7}  "
+        f"{'c.wait':>7}  {'c.svc':>7}  {'feasible':>8}  note"
+    )
+    alignment_rows = objective_alignment(plan=plan)
+    for row in alignment_rows:
+        lines.append(
+            f"  {row.local_hour:02d}:00      "
+            f"{str(row.previous_recommended_id or '-'):<34} "
+            f"{str(row.new_recommended_id or '-'):<36} "
+            f"{_clock(row.finish, zone):>6}  "
+            f"{(format_duration(row.complete_travel) if row.complete_travel is not None else '-'):>7}  "
+            f"{(format_duration(row.complete_waiting) if row.complete_waiting is not None else '-'):>7}  "
+            f"{(format_duration(row.complete_service) if row.complete_service is not None else '-'):>7}  "
+            f"{('yes' if row.feasible else 'NO') if row.feasible is not None else '-':>8}  "
+            f"{'recommendation CHANGED' if row.changed else 'same recommendation'}"
+        )
+    lines.append(
+        "  This table is the audit trail for the objective change (D35). The default SMART_ROUTE "
+        "objective is now the complete elapsed route duration (travel + waiting + service, "
+        "equivalently the FINISH arrival time for a fixed departure) with a waiting preference of "
+        "zero, and the deterministic ranking key is (complete elapsed duration, complete travel, "
+        "complete waiting, input_position, stop_id). The previous column is what the pre-D35 "
+        "default produced at that hour - the non-default D31 provisional policy (travel 1, waiting "
+        f"{PREVIOUS_DEFAULT_WAITING_WEIGHT:g}) ranked with the pre-D35 key (score, complete "
+        "duration, input_position, stop_id) - and it is kept only as the sensitivity study below. "
+        "Nothing was tuned to preserve the previous winner: where the two columns differ, the "
+        "elapsed-duration recommendation is the shipped answer and the difference is reported "
+        "rather than hidden. Every row is a recommendation only; nothing is selected (D4/D32)."
+    )
+    lines.append("")
+
     # ---- fingerprints --------------------------------------------------- #
     second_stop_id = next(
         (
@@ -1213,7 +1540,11 @@ def build_report(
 
     # ---- weight sensitivity (D31) --------------------------------------- #
     lines.append(
-        "SENSITIVITY TO THE PROVISIONAL WAITING WEIGHT - COMPLETE-ROUTE OUTCOMES (D31)"
+        "SENSITIVITY STUDY (NON-DEFAULT) - WHAT A NON-ZERO WAITING PREFERENCE WOULD DO (D31)"
+    )
+    lines.append(
+        f"  study base         : {_policy_text(demo_provisional_policy())} (only waiting_time "
+        "varies per row)"
     )
     lines.append(
         f"  {'wait w':>6}  {'recommended':<22} {'objective':>10}  {'complete':>8}  "
@@ -1229,16 +1560,63 @@ def build_report(
             f"{sensitivity_row.tied_with_recommendation:>5}  {sensitivity_row.note}"
         )
     lines.append(
-        "  PROVISIONAL WEIGHTS, NOT PRODUCT TRUTH (D31): travel_time stays 1 and only waiting_time "
-        "changes, over the same complete routes and the same exhaustive candidate set. No weight was "
-        "tuned to produce a winner, and each row is a recommendation only."
+        "  NON-DEFAULT STUDY, NOT THE SHIPPED OBJECTIVE: the default SMART_ROUTE objective has a "
+        "waiting preference of ZERO (D35) and is the complete elapsed route duration, so the "
+        "PROVISIONAL marker belongs to this study alone. Each row re-evaluates the same exhaustive "
+        "candidate set under the historical D31 policy (travel_time 1, waiting_time "
+        "1.0/1.5/2.0/3.0); the 1:1 row is numerically the default objective. The `recommended` "
+        "column is the shipped engine's answer under that policy, i.e. ordered by the D35 key, "
+        "which puts complete elapsed duration first - so a row whose note says a non-zero waiting "
+        "preference would move the objective shows exactly that: the objective would prefer another "
+        "stop and the shipped recommendation does not follow it. No weight was tuned to produce a "
+        "winner, and each row is a recommendation only."
     )
     lines.append("")
 
-    # ---- performance ---------------------------------------------------- #
-    lines.append("PERFORMANCE (v2 section 20, D34)")
+    # ---- scale and performance (v2 section 20, D34, D36) ---------------- #
+    lines.append("SCALE AND PERFORMANCE (v2 section 20, D34, D36)")
     lines.append(
-        f"{_performance_stop_count_line(active, disabled, plan)} : "
+        f"  The owner's Stage 2.1 scale decision (D36), verbatim: \"{OWNER_SCALE_STATEMENT}\""
+    )
+    scale_lines, _ = performance_scale_lines(active, disabled, plan, report, timings=timings)
+    lines.extend(scale_lines)
+    lines.append("")
+
+    return "\n".join(_closing_lines(lines, report))
+
+
+def performance_scale_lines(
+    active: tuple[RouteStop, ...],
+    disabled: tuple[RouteStop, ...],
+    plan: RoutePlan,
+    report: FirstStopEvaluationReport,
+    *,
+    timings: EvaluationTimings | None = None,
+) -> tuple[list[str], dict[str, object]]:
+    """The scale/performance block: ~30 stops, ~50 stops and the ~100-stop stress reference.
+
+    Returns the printed lines and a small structured payload of the same facts, so a test can pin
+    the labels and the enabled counts without parsing prose.
+
+    The three scales it covers, each with its **exact enabled count** (D20: only enabled stops are
+    candidates, so a label that names the total would misdescribe the counters):
+
+    * the **~30-stop demo plan** - the product demo scenario, counted from the plan the report was
+      built for;
+    * the **~50-enabled-stop portfolio fixture** - the primary MVP scale target of D36, measured
+      live by :func:`main` over the shipped exact implementation and printed with the v2 section 20
+      preferred <= ~3 s / acceptable <= ~5 s targets as *reported* targets. The **measured number is
+      printed, never asserted here**: the fast suite only pins the labels, so a machine-dependent
+      second can never gate it (the benchmark tool and the opt-in slow module carry the guarded
+      bound);
+    * the **~100-stop stress reference** - :data:`RECORDED_BENCHMARK`, relabelled by D36 as future
+      scale / **not performance-qualified**, keeping its honest measured number and the
+      owner-accepted bound of D34.
+    """
+    lines: list[str] = []
+    lines.append(
+        "  demo plan          : "
+        f"{_performance_stop_count_line(active, disabled, plan)} - "
         f"{report.candidates_evaluated} candidates, {report.optimizer_runs} optimizer runs, "
         f"{report.cache_stats.lookups} leg questions "
         f"({report.cache_stats.hits} hits / {report.cache_stats.misses} misses, "
@@ -1250,9 +1628,63 @@ def build_report(
         f"<= {DEMO_EVALUATION_RUNTIME_BUDGET_SEC:.0f}s; that is an engineering target, not a "
         "correctness rule."
     )
+
+    portfolio_plan = build_portfolio_plan()
+    portfolio_active = len(portfolio_plan.active_stops())
+    portfolio_total = len(portfolio_plan.stops)
+    portfolio_disabled = len(portfolio_plan.disabled_stops())
+    lines.append(
+        f"  portfolio fixture  : {portfolio_active} enabled stops ({portfolio_total} stops, "
+        f"{portfolio_disabled} disabled) - PRIMARY MVP TARGET (D36), approximately 50 enabled "
+        "service stops, DEMO/SYNTHETIC."
+    )
+    lines.append(
+        f"    provenance       : built by demo.scale_dataset.build_portfolio_plan "
+        f"({PORTFOLIO_STOP_COUNT} stops, deterministic disabled policy of every "
+        "demo.scale_dataset.PORTFOLIO_DISABLED_EVERY-th stop, so the enabled count is exactly "
+        f"{PORTFOLIO_ENABLED_STOP_COUNT}); synthetic coordinates, windows and durations - never "
+        "real addresses or opening hours."
+    )
+    lines.append(
+        "    scale decision   : ~100 stops is no longer a hard MVP performance requirement. The "
+        "~100-stop figure below is the engineering stress reference; it is NOT performance-qualified "
+        "in this MVP, and failing the old <= "
+        f"{PORTFOLIO_ACCEPTABLE_BUDGET_SEC:.0f}s target at 100 stops does NOT block the portfolio "
+        "MVP (D36)."
+    )
+    lines.append(
+        f"    targets          : v2 section 20 reported engineering targets at this scale - "
+        f"preferred <= ~{PORTFOLIO_PREFERRED_BUDGET_SEC:.0f}s, acceptable "
+        f"<= ~{PORTFOLIO_ACCEPTABLE_BUDGET_SEC:.0f}s."
+    )
+    if timings is not None and timings.portfolio_seconds is not None:
+        lines.append(
+            f"    measured now     : exhaustive complete-route first-stop loop over all "
+            f"{portfolio_active} enabled stops = {timings.portfolio_seconds:.2f}s warm "
+            f"({timings.portfolio_seconds / portfolio_active * 1000:.0f}ms per candidate) - "
+            "MEASURED WALL CLOCK, machine-dependent, printed not asserted."
+        )
+        lines.append(
+            "    honesty          : the figure above is the shipped exact implementation's measured "
+            f"number, reported as it is. It is {'inside' if timings.portfolio_seconds <= PORTFOLIO_ACCEPTABLE_BUDGET_SEC else 'OUTSIDE'} "
+            f"the acceptable <= ~{PORTFOLIO_ACCEPTABLE_BUDGET_SEC:.0f}s target. No prefilter, no "
+            "approximate ranking, no shortlist and no quality-degrading cut was introduced to move "
+            "it, and no number is estimated or borrowed from another scale (D36, v2 section 20)."
+        )
+    else:
+        lines.append(
+            "    measured now     : not measured in this call; reproduce it with "
+            f"`{PORTFOLIO_BENCHMARK_COMMAND}`, which measures this fixture, the ~100-stop stress "
+            "reference and the demo plan in one run."
+        )
+
     benchmark = RECORDED_BENCHMARK
     lines.append(
-        f"  ~100-stop benchmark: RECORDED measurement ({benchmark.measured_on}), not a live run of "
+        f"  stress reference   : {benchmark.stop_count} enabled stops (~{SCALE_DEFAULT_STOP_COUNT} "
+        "stops, ENGINEERING STRESS REFERENCE, NOT PERFORMANCE-QUALIFIED - D36), DEMO/SYNTHETIC."
+    )
+    lines.append(
+        f"    ~100-stop record : RECORDED measurement ({benchmark.measured_on}), not a live run of "
         f"this report. Reproduce it with `{BENCHMARK_COMMAND}`."
     )
     lines.append(
@@ -1266,14 +1698,34 @@ def build_report(
     )
     lines.append(
         f"    The v2 section 20 <= {DEMO_EVALUATION_RUNTIME_BUDGET_SEC:.0f}s target is "
-        f"{'met' if benchmark.spec_target_met else 'NOT met'} at that scale; the owner accepted the "
-        f"measured latency as an interim limitation (D34) with an asserted regression guard of "
+        f"{'met' if benchmark.spec_target_met else 'NOT met'} at that scale; under D36 that is "
+        "reported and is NOT an MVP gate. The owner accepted the measured latency as an interim "
+        f"limitation (D34) with an asserted regression guard of "
         f"{benchmark.accepted_interim_limit_sec:.0f}s, and the candidate set stays exhaustive - no "
-        "prefilter, no weight tuning, no neighbourhood cut."
+        "prefilter, no weight tuning, no neighbourhood cut. The fixture and its tests are retained."
     )
-    lines.append("")
-
-    return "\n".join(_closing_lines(lines, report))
+    lines.append(
+        "  scope              : the loop is exhaustive over every enabled candidate at every scale - "
+        "no prefilter, no shortlist and no approximation (D34, D36, v2 section 20)."
+    )
+    lines.append(
+        "  architecture       : the domain has no hard 50-stop maximum. The scale decision changes "
+        "the performance target, never a validation limit, so the architecture stays able to evolve "
+        "beyond 50 stops (D36, D18)."
+    )
+    payload: dict[str, object] = {
+        "demo_enabled": len(active),
+        "demo_total": len(plan.stops),
+        "demo_disabled": len(disabled),
+        "portfolio_enabled": portfolio_active,
+        "portfolio_total": portfolio_total,
+        "portfolio_disabled": portfolio_disabled,
+        "stress_enabled": benchmark.stop_count,
+        "stress_total": SCALE_DEFAULT_STOP_COUNT,
+        "owner_statement": OWNER_SCALE_STATEMENT,
+        "portfolio_seconds": timings.portfolio_seconds if timings is not None else None,
+    }
+    return lines, payload
 
 
 def _closing_lines(lines: list[str], report: FirstStopEvaluationReport) -> list[str]:
@@ -1285,8 +1737,8 @@ def _closing_lines(lines: list[str], report: FirstStopEvaluationReport) -> list[
     )
     lines.append(
         f"  Ranking is exhaustive and deterministic: {report.ranked_ids()[:3]}... "
-        f"({len(report.ranked)} ranked candidates), key (score, complete duration, input_position, "
-        "stop_id)."
+        f"({len(report.ranked)} ranked candidates), key (complete elapsed duration, complete "
+        "travel time, complete waiting time, input_position, stop_id) - D35."
     )
     lines.append(_SEPARATOR)
     return lines
@@ -1335,10 +1787,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     departure_sweep()
     sweep_seconds = timer.perf_counter() - started
 
+    # The ~50-enabled-stop portfolio fixture is the primary MVP scale target (D36), so the report
+    # measures the shipped exhaustive loop over it for real instead of quoting a number from another
+    # scale. It runs once, after the body, and only its measurement is printed in the scale block.
+    started = timer.perf_counter()
+    portfolio_evaluation()
+    portfolio_seconds = timer.perf_counter() - started
+
     print(
         build_report(
             timings=EvaluationTimings(
-                demo_seconds=demo_seconds, sweep_seconds=sweep_seconds
+                demo_seconds=demo_seconds,
+                sweep_seconds=sweep_seconds,
+                portfolio_seconds=portfolio_seconds,
             )
         )
     )
