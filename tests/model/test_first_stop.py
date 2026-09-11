@@ -14,6 +14,7 @@ import unittest
 
 from core.model.first_stop import (
     CandidateDiagnostic,
+    CandidateMetrics,
     FirstStopCandidate,
     FirstStopIntent,
     FirstStopMode,
@@ -36,11 +37,23 @@ def candidate(
     wait: int = 300,
     lateness: int = 0,
     complete: int = 22860,
-    feasible: bool | None = None,
+    feasible: bool = True,
+    violating: tuple[str, ...] = (),
+    complete_travel: int = 0,
+    complete_waiting: int = 0,
+    service: int = 0,
+    metrics: CandidateMetrics | None = None,
     explanation: tuple[tuple[str, float], ...] = (),
 ) -> FirstStopCandidate:
-    if feasible is None:
-        feasible = lateness == 0
+    """A candidate; feasibility is the complete route's (v2 section 14), never the first leg's.
+
+    When a breakdown is supplied, the reported complete-route figures default to that same
+    breakdown: one route has one set of measurements, and a call that means to make them disagree
+    passes the disagreeing value explicitly.
+    """
+    if metrics is not None:
+        complete_travel = metrics.travel_sec if not complete_travel else complete_travel
+        complete_waiting = metrics.waiting_sec if not complete_waiting else complete_waiting
     return FirstStopCandidate(
         stop_id=stop_id,
         travel_time=travel,
@@ -49,6 +62,11 @@ def candidate(
         lateness=lateness,
         estimated_complete_route_duration=complete,
         feasible=feasible,
+        complete_travel_time=complete_travel,
+        complete_waiting_time=complete_waiting,
+        total_service_time=service,
+        violating_stop_ids=violating,
+        metrics=metrics,
         explanation=explanation,
     )
 
@@ -227,6 +245,22 @@ class RecommendationTests(unittest.TestCase):
         self.assertEqual(len(recommendation.diagnostics), 1)
         self.assertEqual(recommendation.diagnostics[0].code, "time_window_infeasible")
 
+    def test_a_diagnostic_names_the_violating_stop_and_the_candidate_separately(self) -> None:
+        # U4 contract item 4: the violating stop and the candidate are two different stops whenever
+        # the miss is later in the route, so the candidate is an explicit field a caller can look a
+        # rejected candidate's own reasons up by.
+        diagnostic = CandidateDiagnostic(
+            stop_id="S06",
+            code="time_window_infeasible",
+            message="window closes before the earliest possible arrival",
+            candidate_stop_id="S73",
+            reason="candidate first stop S73: stop S06 cannot be served within its window",
+        )
+        self.assertEqual(diagnostic.stop_id, "S06")
+        self.assertEqual(diagnostic.candidate_stop_id, "S73")
+        unlinked = CandidateDiagnostic(stop_id="S06", code="c", message="m")
+        self.assertIsNone(unlinked.candidate_stop_id)
+
     def test_ranked_candidates_are_accessible(self) -> None:
         ranked = (candidate("S73"), candidate("S51", complete=23280))
         recommendation = FirstStopRecommendation.recommended(
@@ -257,23 +291,81 @@ class RecommendationTests(unittest.TestCase):
 
 
 class FirstStopCandidateTests(unittest.TestCase):
-    def test_feasibility_matches_lateness(self) -> None:
+    """The candidate carries the complete-route metrics of v2 section 12."""
+
+    def test_feasibility_is_the_complete_route_not_the_first_leg(self) -> None:
+        # A first stop served inside its own window is still infeasible when a later stop of the
+        # complete route misses a hard window (v2 section 14, D32).
         feasible = candidate("S73")
         self.assertEqual(feasible.lateness, 0)
         self.assertTrue(feasible.feasible)
+        self.assertEqual(feasible.violating_stop_ids, ())
 
-        infeasible = candidate("S06", lateness=600, wait=0)
-        self.assertFalse(infeasible.feasible)
+        late_later_stop = candidate("S73", feasible=False, violating=("S06",))
+        self.assertEqual(late_later_stop.lateness, 0)
+        self.assertFalse(late_later_stop.feasible)
+
+    def test_first_stop_lateness_alone_does_not_decide_feasibility(self) -> None:
+        # The first stop's lateness stays a reported metric; it is not the feasibility answer.
+        candidate("S06", lateness=600, wait=0, feasible=True)
+        with self.assertRaises(InvalidRoutePlanError):
+            candidate("S06", lateness=600, wait=0, feasible=False, violating=())
 
     def test_inconsistent_feasibility_is_rejected(self) -> None:
         with self.assertRaises(InvalidRoutePlanError):
-            candidate("S06", lateness=600, feasible=True)
+            candidate("S06", feasible=True, violating=("S06",))
         with self.assertRaises(InvalidRoutePlanError):
-            candidate("S06", lateness=0, feasible=False)
+            candidate("S06", feasible=False, violating=())
 
     def test_complete_route_duration_cannot_be_shorter_than_the_first_leg(self) -> None:
         with self.assertRaises(InvalidRoutePlanError):
             candidate("S73", travel=14100, complete=1000)
+
+    def test_objective_breakdown_matches_the_complete_route_metrics(self) -> None:
+        metrics = CandidateMetrics(travel_sec=20000, waiting_sec=300, distance_m=240000.0)
+        full = candidate(
+            "S73",
+            complete_travel=20000,
+            complete_waiting=300,
+            service=600,
+            metrics=metrics,
+            explanation=(("travel_time", 20000.0), ("waiting_time", 300.0)),
+        )
+        self.assertEqual(full.metrics, metrics)
+        self.assertEqual(dict(full.explanation)["waiting_time"], 300.0)
+        self.assertEqual(full.total_service_time, 600)
+
+    def test_inconsistent_breakdown_is_rejected(self) -> None:
+        metrics = CandidateMetrics(travel_sec=20000, waiting_sec=300, distance_m=1.0)
+        with self.assertRaises(InvalidRoutePlanError):
+            candidate("S73", complete_travel=1000, metrics=metrics)
+
+    def test_a_complete_route_has_exactly_one_set_of_measurements(self) -> None:
+        # A reported complete-route figure that disagrees with the scored breakdown is an invalid
+        # candidate, not a candidate whose route depends on which field is read.
+        metrics = CandidateMetrics(travel_sec=20000, waiting_sec=300, distance_m=1.0)
+        with self.assertRaises(InvalidRoutePlanError):
+            candidate("S73", complete_waiting=999, metrics=metrics)
+
+    def test_the_first_stop_service_start_is_reported(self) -> None:
+        start = utc(2026, 9, 11, 5, 0)
+        built = FirstStopCandidate(
+            stop_id="S73",
+            travel_time=14100,
+            estimated_arrival=utc(2026, 9, 11, 4, 55),
+            waiting_time=300,
+            lateness=0,
+            estimated_complete_route_duration=22860,
+            feasible=True,
+            estimated_service_start=start,
+        )
+        self.assertEqual(built.estimated_service_start, start)
+
+    def test_negative_components_are_rejected(self) -> None:
+        with self.assertRaises(InvalidRoutePlanError):
+            CandidateMetrics(travel_sec=-1, waiting_sec=0, distance_m=0.0)
+        with self.assertRaises(InvalidRoutePlanError):
+            candidate("S73", complete_travel=0, complete_waiting=0, service=-5)
 
 
 if __name__ == "__main__":

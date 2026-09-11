@@ -1,16 +1,24 @@
-"""Numeric demo report (spec sections 1, 24, 25).
+"""Numeric demo report (spec sections 1, 24, 25; Stage 2 U4 wiring).
 
 Prints, deterministically:
 
 * the demo plan and its provenance warning;
 * the input route (the order as supplied by the user = the product's BEFORE baseline);
 * first-leg timelines for the notable stops;
-* candidate costs for every possible first stop, plus the top 5;
-* why the recommendation is neither the nearest nor the farthest stop;
+* candidate first legs for every possible first stop, plus the top 5;
+* why the first-leg view is neither the nearest nor the farthest stop;
 * the effect of changing the departure time;
 * sensitivity to the provisional waiting weight;
 * the window-end policy (D29) and what it changes;
 * the data-quality caveat for stops whose business hours are unknown.
+
+**Interim, and stated rather than hidden (U4/U5):** the recommendation engine now ranks
+**complete-route** outcomes (``core.engine.first_stop.evaluation``, v2 sections 12-14). This
+report still narrates the Stage 1 *first-leg* view, because that narrative is what the demo's
+A-G acceptance criteria pin; the demo narrative refresh is a later unit (U5). The first-leg
+numbers here are produced by the same timeline arithmetic and the same cost policy the engine
+uses - :func:`candidate_first_leg_view` - so they cannot drift from the engine's own per-leg
+figures.
 
 Run: ``python -m demo.report``
 """
@@ -25,20 +33,20 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from core.engine.first_stop.evaluation import (
-    CandidateEvaluation,
-    FirstStopEvaluationReport,
-    evaluate_first_stop_candidates,
-)
+from core.engine.cost import breakdown_as_tuple, score_breakdown
+from core.engine.providers import TravelMatrix
 from core.model.cost_policy import (
     DEMO_TRAVEL_TIME_WEIGHT,
     CostComponent,
     RouteCostPolicy,
     demo_provisional_policy,
 )
+from core.model.ids import PlanId, StopId
 from core.model.route_plan import RoutePlan
 from core.model.route_stop import RouteStop
+from core.model.solution import StopTimeline, Violation
 from core.model.service_window import ServiceWindow, WindowEndPolicy
+from core.time import timeline as timeline_engine
 from core.time import tz, tzdata
 from core.validation.errors import TZDATA_INSTALL_COMMAND
 from demo.dataset import (
@@ -56,10 +64,13 @@ __all__ = [
     "DEPARTURE_SWEEP_HOURS",
     "WEIGHT_SENSITIVITY_RATIOS",
     "DepartureOutcome",
+    "FirstLegCandidate",
+    "FirstLegReport",
     "UnknownHoursDistortion",
     "UnknownHoursRow",
     "WeightSensitivityRow",
     "build_report",
+    "candidate_first_leg_view",
     "departure_sweep",
     "format_duration",
     "main",
@@ -154,10 +165,201 @@ def evaluate(
     *,
     plan: RoutePlan,
     policy: RouteCostPolicy | None = None,
-) -> FirstStopEvaluationReport:
-    """Evaluate one plan with the demo matrix."""
-    return evaluate_first_stop_candidates(
+) -> FirstLegReport:
+    """The demo's first-leg view of every candidate of one plan (interim, see the module docstring)."""
+    return candidate_first_leg_view(
         plan=plan, travel_matrix=demo_matrix(), policy=policy
+    )
+
+
+# --------------------------------------------------------------------------- #
+# interim first-leg view of the candidates (the engine ranks complete routes)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class FirstLegCandidate:
+    """One candidate timed and priced on its **first leg** only (the Stage 1 view, D31).
+
+    Interim and local to the demo: the recommendation engine ranks complete-route outcomes
+    (v2 sections 12-14). The fields are exactly the timeline's, so they cannot drift from the
+    engine's own per-leg arithmetic, and ``violation`` is the timeline's explicit violation.
+    """
+
+    stop_id: StopId
+    timeline: StopTimeline
+    distance_m: float
+    cost_breakdown: tuple[tuple[CostComponent, float], ...]
+    score: float
+    violation: Violation | None = None
+
+    # ---- delegated timeline facts (single source of truth) ------------- #
+    @property
+    def feasible(self) -> bool:
+        return not self.timeline.is_infeasible
+
+    @property
+    def travel_time(self) -> int:
+        return self.timeline.travel_time
+
+    @property
+    def waiting_time(self) -> int:
+        return self.timeline.waiting_time
+
+    @property
+    def estimated_arrival(self) -> datetime:
+        return self.timeline.estimated_arrival
+
+    @property
+    def service_start(self) -> datetime:
+        return self.timeline.service_start
+
+    @property
+    def estimated_departure(self) -> datetime:
+        return self.timeline.estimated_departure
+
+    @property
+    def service_window_start(self) -> datetime | None:
+        return self.timeline.service_window_start
+
+    @property
+    def service_window_end(self) -> datetime | None:
+        return self.timeline.service_window_end
+
+    @property
+    def window_end_policy(self) -> WindowEndPolicy | None:
+        return self.timeline.window_end_policy
+
+    @property
+    def lateness(self) -> int:
+        return self.timeline.lateness
+
+    @property
+    def finish_overtime(self) -> int:
+        return self.timeline.finish_overtime
+
+    def component(self, component: CostComponent) -> float:
+        """Measured value of one cost component (0.0 when not part of the breakdown)."""
+        for candidate_component, value in self.cost_breakdown:
+            if candidate_component is component:
+                return value
+        return 0.0
+
+
+@dataclass(frozen=True)
+class FirstLegReport:
+    """Every candidate's first leg: feasible candidates ranked, infeasible ones separated.
+
+    A local, interim view (see the module docstring). ``ranked`` orders by
+    ``(score, travel_time, stop_id)`` - the Stage 1 tie-break - and ``infeasible`` holds the
+    candidates whose first leg misses a hard window.
+    """
+
+    plan_id: PlanId
+    inputs_fingerprint: str
+    ranked: tuple[FirstLegCandidate, ...]
+    infeasible: tuple[FirstLegCandidate, ...]
+    disabled_stop_ids: tuple[StopId, ...]
+
+    def recommended(self) -> FirstLegCandidate | None:
+        return self.ranked[0] if self.ranked else None
+
+    @property
+    def recommended_stop_id(self) -> StopId | None:
+        recommended = self.recommended()
+        return recommended.stop_id if recommended is not None else None
+
+    def nearest(self) -> FirstLegCandidate | None:
+        if not self.ranked:
+            return None
+        return min(self.ranked, key=lambda candidate: (candidate.travel_time, candidate.stop_id))
+
+    def farthest(self) -> FirstLegCandidate | None:
+        if not self.ranked:
+            return None
+        return min(self.ranked, key=lambda candidate: (-candidate.travel_time, candidate.stop_id))
+
+    def find(self, stop_id: StopId) -> FirstLegCandidate | None:
+        for candidate in self.ranked:
+            if candidate.stop_id == stop_id:
+                return candidate
+        for candidate in self.infeasible:
+            if candidate.stop_id == stop_id:
+                return candidate
+        return None
+
+    def rank_of(self, stop_id: StopId) -> int | None:
+        for position, candidate in enumerate(self.ranked, start=1):
+            if candidate.stop_id == stop_id:
+                return position
+        return None
+
+    def top(self, count: int) -> tuple[FirstLegCandidate, ...]:
+        return self.ranked[:count]
+
+
+def candidate_first_leg_view(
+    *,
+    plan: RoutePlan,
+    travel_matrix: TravelMatrix,
+    policy: RouteCostPolicy | None = None,
+) -> FirstLegReport:
+    """Time and price every candidate's **first leg** only.
+
+    Interim demo view, kept because the demo's A-G narrative is about the first-leg degeneracy
+    (Stage 1, D31); the engine itself ranks complete routes. The timing is
+    :func:`core.time.timeline.compute_stop_timeline` and the pricing is
+    :func:`core.engine.cost.score_breakdown` with the configured policy, so neither number is a
+    second model of the engine's arithmetic.
+    """
+    cost_policy = policy if policy is not None else plan.cost_policy
+    tzinfo = plan.load_timezone()
+    candidates: list[FirstLegCandidate] = []
+
+    for stop in plan.active_stops():
+        timeline = timeline_engine.compute_stop_timeline(
+            plan=plan,
+            stop=stop,
+            departure_from_previous=plan.departure_time,
+            previous_point=plan.departure_point,
+            travel_provider=travel_matrix,
+            tzinfo=tzinfo,
+        )
+        location = stop.location
+        assert location is not None  # compute_stop_timeline raises otherwise
+        distance_m = float(travel_matrix.distance_meters(plan.departure_point, location))
+        breakdown = {
+            CostComponent.TRAVEL_TIME: float(timeline.travel_time),
+            CostComponent.WAITING_TIME: float(timeline.waiting_time),
+            CostComponent.DISTANCE: distance_m,
+        }
+        candidates.append(
+            FirstLegCandidate(
+                stop_id=stop.id,
+                timeline=timeline,
+                distance_m=distance_m,
+                cost_breakdown=breakdown_as_tuple(breakdown),
+                score=score_breakdown(breakdown, cost_policy),
+                violation=timeline_engine.violation_for(timeline),
+            )
+        )
+
+    ranked = tuple(
+        sorted(
+            (candidate for candidate in candidates if candidate.feasible),
+            key=lambda candidate: (candidate.score, candidate.travel_time, candidate.stop_id),
+        )
+    )
+    infeasible = tuple(
+        sorted(
+            (candidate for candidate in candidates if not candidate.feasible),
+            key=lambda candidate: (candidate.travel_time, candidate.stop_id),
+        )
+    )
+    return FirstLegReport(
+        plan_id=plan.id,
+        inputs_fingerprint=plan.inputs_fingerprint(),
+        ranked=ranked,
+        infeasible=infeasible,
+        disabled_stop_ids=tuple(stop.id for stop in plan.disabled_stops()),
     )
 
 
@@ -354,7 +556,7 @@ def unknown_hours_distortion(*, stop_key: str = "nearest") -> UnknownHoursDistor
 # --------------------------------------------------------------------------- #
 def _candidate_row(
     position: int | str,
-    evaluation: CandidateEvaluation,
+    evaluation: FirstLegCandidate,
     zone: ZoneInfo,
     stop: RouteStop,
 ) -> str:
@@ -688,7 +890,13 @@ def build_report() -> str:
     lines.append(f"inputs_fingerprint : {report.inputs_fingerprint}")
     lines.append(
         "Identical inputs give an identical ranking, score and fingerprint; the tie-break is "
-        "(score, travel_time, stop_id)."
+        "(score, travel_time, stop_id) on this first-leg view."
+    )
+    lines.append(
+        "NOTE: the recommendation engine itself ranks COMPLETE route outcomes "
+        "(START -> candidate -> optimized remaining stops -> FINISH, v2 sections 12-14), and a "
+        "candidate whose complete route misses a hard window is never ranked. This report still "
+        "narrates the Stage 1 first-leg view; refreshing that narrative is a later unit."
     )
     lines.append(_SEPARATOR)
     return "\n".join(lines)

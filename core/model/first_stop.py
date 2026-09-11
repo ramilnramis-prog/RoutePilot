@@ -20,14 +20,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 from core.model.ids import StopId
 from core.model.value_objects import DurationSec, Instant, ensure_utc
 from core.validation.errors import InvalidRoutePlanError
 
+if TYPE_CHECKING:  # pragma: no cover - import for typing only, avoids an import cycle
+    from core.model.solution import ViolationKind
+
 __all__ = [
     "CandidateDiagnostic",
+    "CandidateMetrics",
     "FirstStopCandidate",
     "FirstStopIntent",
     "FirstStopMode",
@@ -220,24 +224,92 @@ class FirstStopIntent:
 
 @dataclass(frozen=True)
 class CandidateDiagnostic:
-    """Why a candidate stop was rejected (D9: diagnostics, not a bare ``None``)."""
+    """Why a candidate stop was rejected (D9: diagnostics, not a bare ``None``).
+
+    A diagnostic carries **two different stops**, and they are the same stop only when the miss is
+    at the candidate's own first stop:
+
+    * :attr:`stop_id` - the **violating** stop, whose hard window the complete route cannot meet;
+    * :attr:`candidate_stop_id` - the **candidate** whose complete route cannot meet it, i.e. the
+      first stop that route starts from. It is the key
+      :meth:`core.engine.first_stop.evaluation.FirstStopEvaluationReport.reasons_for` answers for,
+      so a caller holding a rejected candidate gets *that candidate's own* reasons.
+
+    ``code`` is the :class:`~core.model.solution.ViolationKind` value, so a rejection reason is
+    machine-readable rather than prose only.
+    """
 
     stop_id: StopId
     code: str
     message: str
+    #: The candidate whose complete route could not serve :attr:`stop_id`: that candidate's own
+    #: first stop id. It differs from :attr:`stop_id` whenever the miss is later in the route, so
+    #: lookup by candidate is never the same question as lookup by violating stop. ``None`` only
+    #: for a diagnostic that is not tied to one candidate at all.
+    candidate_stop_id: StopId | None = None
+    reason: str = ""
+    violation_kind: "ViolationKind | None" = None
 
     def __post_init__(self) -> None:
         if not self.code:
             raise InvalidRoutePlanError("a candidate diagnostic needs a non-empty code")
+        if not self.message:
+            raise InvalidRoutePlanError("a candidate diagnostic needs a human-readable message")
+
+
+@dataclass(frozen=True)
+class CandidateMetrics:
+    """The measured components one candidate's complete route is scored on (v2 sections 12, 16).
+
+    Every component is **measured**, never an assumption or an estimate developed from the first
+    leg: the values are the complete route's own travel, waiting and metric distance, FINISH leg
+    included (v2 section 15). Only components a policy can actually weight are scored
+    (:func:`core.engine.cost.score_breakdown`); the rest of the v2 section 12 metrics are reported
+    as data on :class:`FirstStopCandidate`.
+
+    Service time is deliberately **not** a component: for one plan every candidate serves exactly
+    the same stops, so total service seconds are constant across candidates and cannot separate
+    them. It is reported, never scored.
+    """
+
+    travel_sec: DurationSec
+    waiting_sec: DurationSec
+    distance_m: float
+
+    def __post_init__(self) -> None:
+        for field_name in ("travel_sec", "waiting_sec"):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise InvalidRoutePlanError(
+                    f"{field_name} must be whole seconds, got {value!r}"
+                )
+            if value < 0:
+                raise InvalidRoutePlanError(f"{field_name} must be >= 0")
+        if self.distance_m < 0:
+            raise InvalidRoutePlanError("distance_m must be >= 0")
 
 
 @dataclass(frozen=True)
 class FirstStopCandidate:
-    """One ranked first-stop alternative with its deterministic explanation inputs (spec 9).
+    """One first-stop alternative with the complete-route metrics of v2 section 12.
 
-    ``feasible`` currently describes the **first leg**. From Stage 2 it must describe the
-    **complete** route outcome (D32), because a candidate whose remainder contains an
-    impossible hard window must not look feasible.
+    The candidate is the **complete** outcome of ``START -> this stop -> optimized remaining
+    enabled stops -> FINISH`` (v2 sections 12/15, D32), so ``estimated_complete_route_duration``
+    and ``estimated_finish`` include the final leg to FINISH. Its first-leg metrics of v2 section
+    12 are ``travel_time``, ``estimated_arrival``, ``waiting_time``, ``lateness`` and
+    ``estimated_service_start``; its complete-route metrics are ``complete_travel_time``,
+    ``complete_waiting_time``, ``total_service_time``, ``estimated_complete_route_duration``,
+    ``estimated_finish``, ``violating_stop_ids`` and :attr:`metrics`.
+
+    ``feasible`` means the **complete route** contains no hard service-window violation
+    (v2 section 14, D32). The first stop's own lateness stays a reported metric
+    (``lateness``), but it no longer decides feasibility: a candidate whose later remainder misses
+    a hard window is infeasible too.
+
+    The objective that ranked this candidate is :func:`core.engine.first_stop.evaluation.score_of`
+    over :attr:`metrics`, and only candidates whose ``feasible`` is ``True`` are ranked. The
+    breakdown is carried per candidate so a recommendation can explain itself deterministically
+    (v2 sections 13, 16); service time is reported separately and never scored.
     """
 
     stop_id: StopId
@@ -250,6 +322,27 @@ class FirstStopCandidate:
     service_window_start: Instant | None = None
     score: float | None = None
     explanation: tuple[tuple[str, float], ...] = ()
+    # ---- complete-route metrics (v2 section 12) -------------------------------------------- #
+    #: Travel seconds of the whole route, FINISH leg included.
+    complete_travel_time: DurationSec = 0
+    #: Waiting seconds of the whole route.
+    complete_waiting_time: DurationSec = 0
+    #: Service seconds of the whole route. Constant across the candidates of one plan, because
+    #: every candidate serves exactly the same enabled stops; reported, never scored.
+    total_service_time: DurationSec = 0
+    #: When the driver reaches FINISH, the last service leg included.
+    estimated_finish: Instant | None = None
+    #: When service actually begins at the first stop: the ETA plus the first-stop waiting, never
+    #: before the window opens (v2 sections 10, 12).
+    estimated_service_start: Instant | None = None
+    #: Ascending ids of the stops whose hard window the complete route misses. Empty exactly when
+    #: ``feasible`` is ``True`` (v2 section 14).
+    violating_stop_ids: tuple[StopId, ...] = ()
+    #: The worst measured lateness inside the complete route (0 on a fully feasible route).
+    max_lateness: DurationSec = 0
+    #: The measured objective components the candidate was scored on. Deliberately last: every
+    #: earlier field of this Stage 1 type keeps its position.
+    metrics: CandidateMetrics | None = None
 
     def __post_init__(self) -> None:
         if self.travel_time < 0:
@@ -262,12 +355,42 @@ class FirstStopCandidate:
             raise InvalidRoutePlanError(
                 "estimated_complete_route_duration cannot be shorter than the first leg"
             )
-        # A candidate that would be served outside its window is infeasible, and that is exactly
-        # what lateness > 0 means (D13 amendment, D29).
-        if self.feasible == (self.lateness > 0):
+        for field_name in (
+            "complete_travel_time",
+            "complete_waiting_time",
+            "total_service_time",
+            "max_lateness",
+        ):
+            value = getattr(self, field_name)
+            if value < 0:
+                raise InvalidRoutePlanError(f"{field_name} must be >= 0")
+
+        object.__setattr__(self, "violating_stop_ids", tuple(self.violating_stop_ids))
+        # v2 section 14 / D32: feasibility is a property of the COMPLETE route, never of the first
+        # leg alone. The first stop's lateness is still reported above, but it cannot make a route
+        # with a later hard-window miss look feasible.
+        if self.feasible != (not self.violating_stop_ids):
             raise InvalidRoutePlanError(
-                "a candidate with lateness > 0 must be infeasible and vice versa"
+                "feasible must be exactly 'the complete route has no violating stop' (v2 section "
+                "14); the first stop's lateness is a reported metric, not the feasibility answer"
             )
+        # One complete route has exactly one set of measurements: the reported complete-route
+        # figures and the scored breakdown are the same route's, and a mismatch is an invalid
+        # candidate rather than a candidate with two different travel times.
+        if self.metrics is not None and self.complete_travel_time != self.metrics.travel_sec:
+            raise InvalidRoutePlanError(
+                "complete_travel_time and metrics.travel_sec must describe the same complete route"
+            )
+        if self.metrics is not None and self.complete_waiting_time != self.metrics.waiting_sec:
+            raise InvalidRoutePlanError(
+                "complete_waiting_time and metrics.waiting_sec must describe the same complete route"
+            )
+        for field_name in ("estimated_finish", "estimated_service_start"):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(
+                    self, field_name, ensure_utc(value, field_name=field_name)
+                )
 
 
 @dataclass(frozen=True)
