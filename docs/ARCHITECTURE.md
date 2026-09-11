@@ -10,7 +10,10 @@ Precedence when documents disagree (v2 section 37): the **current product specif
 document and the registry disagree, the registry wins.
 
 Stages 0, 1 and 1.5 implement the foundation, the demo scenario and the semantic migration to
-RECOMMEND / MANUAL. Stage 2 (complete-route optimizer and recommendation) is not started.
+RECOMMEND / MANUAL. **Stage 2 is implemented** (complete-route evaluation and optimizer, exhaustive
+first-stop recommendation, fingerprints, leg cache, baselines, measured performance, and the
+complete-route demo narrative). One Stage 2 item is explicitly **deferred**: the incremental /
+delta complete-route evaluator that would remove the ~100-stop latency accepted in D34.
 
 ---
 
@@ -20,9 +23,9 @@ RECOMMEND / MANUAL. Stage 2 (complete-route optimizer and recommendation) is not
 web/      HTML/CSS/JS + Leaflet/OSM tiles        (later)  -- never imported by core
 api/      transport: stdlib http.server -> FastAPI (later) -- depends on core
 storage/  SQLite repositories                    (later)  -- depends on core, never the reverse
-demo/     deterministic demo dataset + synthetic matrix (later) -- depends on core
+demo/     deterministic demo dataset + synthetic matrix + demo report -- depends on core
+tools/    doctor, benchmark and developer utilities -- may inspect core, never imported by it
 core/     domain model, time, engine              <-- depends on nothing but the stdlib
-tools/    doctor and developer utilities          -- may inspect core, never imported by it
 ```
 
 The rule is one-directional: **`core/` imports only the Python standard library.** It contains no
@@ -44,11 +47,11 @@ core/
     value_objects.py   Instant, DurationSec, GeoPoint, PlaceRef, DataProvenance
     service_window.py  WindowKind, WindowEndPolicy, ServiceWindow (value object, D28/D29)
     route_stop.py      GeocodeStatus, ServiceStatus, RouteStop
-    route_plan.py      RoutePlan + invariant validation + order validation
+    route_plan.py      RoutePlan + invariant validation + order validation + fingerprints
     order_override.py  OrderConstraint, OrderOverrides (generic, D21)
     first_stop.py      FirstStopMode, SelectionSource, FirstStopState, RecommendationStatus,
-                       FirstStopIntent, FirstStopRecommendation, CandidateDiagnostic,
-                       FirstStopCandidate
+                       FirstStopIntent, FirstStopRecommendation, FirstStopCandidate,
+                       CandidateMetrics, CandidateDiagnostic
     cost_policy.py     CostComponent, ComponentStatus, RouteCostPolicy (D13)
     route_mode.py      RouteMode + ROUTE_MODE_STATUS registry (D19)
     solution.py        StopTimeline, TimelineFlag, Feasibility, Violation, RouteMetrics,
@@ -62,20 +65,42 @@ core/
                        + capability records (D15/D16)
     cost.py            weighted scoring over implemented components (D13, D31)
     first_stop/
-      evaluation.py    first-stop candidate timing, cost breakdown, deterministic ranking
+      evaluation.py    COMPLETE-ROUTE first-stop recommendation: every enabled candidate is
+                       optimized (START -> candidate -> remaining stops -> FINISH), ranked by the
+                       configured policy, rejected candidates kept with their violating stops
+                       (Stage 2 U4; v2 sections 12-14, 20; D32)
+    optimizer/
+      cache.py         LegCache + CacheStats: deterministic, transparent, measured leg reuse
+      route_problem.py frozen prepared problem (travel/distance tables, precomputed window table)
+                       + the integer-second fast pass the hot loops use
+      route_evaluation.py evaluate_order: THE compile of one order into a complete route,
+                       FINISH leg included (v2 section 15); user_baseline_order; build_solution
+      seed.py          constraint-aware greedy seed (complete-route criterion, D17)
+      local_search.py  deterministic 2-opt / Or-opt improvement, lexicographic acceptance
+      optimize.py      RouteProblem -> seed -> improvement -> authoritative evaluation
+      solve.py         solver boundary: optimize + commit with both baselines
+      route_fingerprint.py the committed route's own digest (v2 section 7, D4)
   validation/
     errors.py          error taxonomy (D26)
 
 demo/
   dataset.py           deterministic ~30-stop demo plan (DEMO/SYNTHETIC, spec section 24)
   synthetic_matrix.py  deterministic synthetic travel matrix (DEMO/SYNTHETIC)
-  report.py            numeric demo report: `python -m demo.report`
+  scale_dataset.py     deterministic ~100-stop benchmark fixture (NOT the product demo dataset)
+  report.py            complete-route demo report: `python -m demo.report`
+
+tools/
+  doctor.py            environment health (D12)
+  benchmark_optimizer.py  exhaustive first-stop benchmark (~100 stops) and its measurement method
+  workspace_fingerprint.py deterministic working-tree digest
+  isolation_check.py   the `core/` import-boundary check
 ```
 
 Stage status: `core/model`, `core/time`, `core/validation` and `core/engine/providers.py` are
-Stage 0; `core/engine/cost.py`, `core/engine/first_stop/evaluation.py` and `demo/` are Stage 1. The
-first-stop semantics were then migrated off the revoked AUTO model (D4/D32): the engine recommends,
-the driver decides. There is still no optimizer, no storage code, no API and no UI.
+Stage 0; `core/engine/cost.py` and `demo/` are Stage 1, whose semantics were then migrated off the
+revoked AUTO model (D4/D32). `core/engine/optimizer/`, `core/engine/first_stop/evaluation.py`,
+`demo/report.py` and `tools/benchmark_optimizer.py` are **Stage 2**. There is still no storage code,
+no API and no UI.
 
 ## 3. Domain model
 
@@ -139,8 +164,8 @@ Structural invariants (D10):
   the departure location, and START never appears in timelines.
 - **I2** FINISH is a `PlaceRef` and is never part of the optimized order; it may not appear in it.
 - **I3** a driver-selected first stop stays first through any optimization and is never replaced by a
-  recomputation or a changed recommendation (enforced by the optimizer in Stage 2; the model records
-  the decision now).
+  recomputation or a changed recommendation (enforced by the optimizer: `with_first_stop` fixes the
+  first position and no local-search move may touch it).
 - **I4** in RECOMMEND mode the system always returns ranked recommendations when a feasible candidate
   exists, but a **committed** first service stop — and therefore a committed working route — requires
   an explicit driver choice. `awaiting_first_stop_choice` is a valid state, not an error.
@@ -196,8 +221,8 @@ application there is no "Lock" action left for them to describe.
 
 Plan-level states (derived, never stored): `awaiting_first_stop_choice`, `first_stop_selected`,
 `no_active_stops`, `empty_plan`. Recommendation outcomes (D9, distinct reasons rather than a bare
-`None`): `recommended`, `no_fully_feasible_route` (v2 §14), `no_active_stops`, `empty_plan`
-(+ diagnostics and, from Stage 2, the rejected candidates with their violating stops and reasons).
+`None`): `recommended`, `no_fully_feasible_route` (v2 §14), `no_active_stops`, `empty_plan` - and,
+from Stage 2, every rejected candidate with its violating stops and reasons (§5.1).
 
 ### 3.5 Order overrides (D21)
 
@@ -233,6 +258,15 @@ A weight may only be assigned to an `implemented` component; anything else raise
 (`travel_time = 1`, `waiting_time = 2`, marked `provisional`), whose numbers are explicitly not
 product truth (D31). Scoring itself is one function, `core.engine.cost.score_breakdown`, so the
 objective stays visible and testable.
+
+Since Stage 2 that one function is applied to the **complete route's** measured breakdown:
+`core.engine.first_stop.evaluation.score_of` weights the candidate's complete travel seconds,
+complete waiting seconds and metric distance, and `distance` keeps a weight of 0 in the provisional
+policy. Service time is deliberately not a component - every candidate of one plan serves exactly
+the same stops, so `total_service_time` is constant and is reported rather than scored. **The
+objective is still the configured provisional policy of D31**; an elapsed-time model with a soft
+waiting preference instead of a universal multiplier remains an open decision (see
+`DECISIONS.md`, Stage 2 change set item 5) and nothing here anticipates it.
 
 ## 4. Time model
 
@@ -292,43 +326,127 @@ Key semantics:
 - `window_kind='unknown'` raises no violation — it raises a timeline flag (`window_unknown`) so the
   driver sees "hours unknown" instead of silently treated-as-open.
 
-### 5.1 First-stop recommendation (Stage 1, D32)
+### 5.1 First-stop recommendation: COMPLETE routes, not first legs (Stage 2, v2 §12-§14, §20; D32)
 
-`core.engine.first_stop.evaluate_first_stop_candidates` times and prices **every** possible first
-stop with the same per-leg arithmetic as a real route leg, and returns a
-`FirstStopEvaluationReport`:
+`core.engine.first_stop.evaluation.evaluate_first_stop_candidates` evaluates **every enabled stop**
+as a first-stop candidate and ranks the resulting **complete routes**:
 
-- `ranked` — feasible candidates ordered by `(score, travel_time, stop_id)`. The explicit tie-break
-  keeps results reproducible even when a weight set cannot separate candidates;
-- `infeasible` — candidates whose hard window cannot be met, each with its explicit `Violation`.
-  They are **never** ranked and never recommended, even when their score is the lowest of all
-  candidates;
-- `disabled_stop_ids` — excluded stops, reported rather than silently dropped.
+```
+START -> candidate -> optimized remaining enabled stops -> FINISH      (FINISH leg included)
+```
 
-What this deliberately is **not**: it never selects, pins or applies anything. `report.recommended()`
-is advisory input for the driver (D4), and the driver's decision lives in `FirstStopIntent`, not in
-the engine.
+The pipeline, once per candidate, is exactly the committed-route pipeline (I6 - preview and commit
+never diverge):
 
-Spec §8 and D32 require ranking **complete route outcomes**
-(`START → candidate → optimized remaining stops → FINISH`). The optimizer that produces them is
-Stage 2, so `remaining_route_estimate` is `None` rather than approximated, and `feasible` still
-describes the first leg only. The reason is measurable: for every candidate arriving before opening,
-`travel + waiting` is fixed by the opening time, so at a 1:1 weight ratio they tie exactly. The demo
-report shows that degeneracy explicitly, which is why the demo weights are marked provisional (D31).
-Once complete-route outcomes exist, candidate feasibility must cover the whole route (D32).
+```
+build_problem(plan, travel_matrix, first_stop_id=candidate)   # frozen prepared problem
+  -> greedy seed (complete-route criterion)  -> local improvement  -> evaluate_order (authoritative)
+  -> score_breakdown over the complete route's measured travel/waiting
+```
 
-### 5.2 Demo data and provenance (Stage 1)
+* **Candidate set**: exhaustive - one optimizer run per enabled stop, in `input_position` order,
+  with no prefilter, no shortlist and no fixed-K cut (v2 §20, D34). `candidates_evaluated` is always
+  `ranked + rejected`, and the report is rejected outright if it is not.
+* **Metrics** (v2 §12): first-leg travel, first-stop ETA, first-stop waiting, first-stop service
+  start, complete travel, complete waiting, total service, complete duration, FINISH arrival,
+  violating stop ids and the objective breakdown. Every complete figure is the whole route's,
+  FINISH leg included (v2 §15).
+* **Feasibility is a property of the complete route** (v2 §14, D32). A candidate whose remainder
+  misses a hard window is **not ranked**; it is kept in `rejected` with the violating stop ids and
+  one `CandidateDiagnostic` per violating stop, keyed by `candidate_stop_id` so a caller can ask a
+  rejected candidate for *its own* reasons. With no fully feasible candidate the status is
+  `no_fully_feasible_route` and there is no recommended stop - never a fabricated winner.
+* **Ranking**: `(score, complete duration, input_position, stop_id)`. The score is the configured
+  policy applied to the complete route's measured breakdown; `total_service_time` is identical for
+  every candidate of one plan and is therefore reported, never scored (it cannot separate them).
+* **Cache and cost**: all candidates share one `LegCache`, so every leg is priced once and the
+  reuse is measured (`cache_stats`) instead of claimed. The *prepared problem* is deliberately not
+  shared: `with_first_stop` builds a fresh problem per candidate, which is why the ~100-stop loop
+  costs what D34 records. The objective and the shipped weights are documented in §3.6/D31.
+* **Nothing is applied**: `plan.first_stop_state` stays `awaiting_first_stop_choice`; a
+  recommendation is not a selection (D4/D32/I5), and `recommended_stop_id`/`selected_stop_id` remain
+  separate fields with separate lifecycles.
 
-`demo/dataset.py` builds a deterministic, ~30-stop demo plan (departure 04:00, many customers
-opening 08:00, mixed window kinds, priorities, one disabled stop, one stop without a service
-duration). `demo/synthetic_matrix.py` provides a deterministic synthetic matrix (1 coordinate
+**Deferred (recorded, not implemented):** the incremental / delta complete-route evaluator that
+would remove the ~100-stop latency accepted in D34. Until it lands, the measured latency is the
+accepted state and no prefilter or approximation is authorized.
+
+### 5.2 Demo data, the demo narrative and its calibration (Stage 1 + Stage 2 U5)
+
+`demo/dataset.py` builds a deterministic ~30-stop demo plan: departure 04:00 Europe/Moscow, 31
+enabled stops + 1 disabled stop, mixed window kinds (`fixed`, `unrestricted`, `unknown`), mixed
+opening times (08:00, 08:30, 09:00, 10:00), priorities, one stop without a service duration, and
+short services of 4-5 minutes plus the 10-minute plan default for the stop whose duration is
+unknown. `demo/synthetic_matrix.py` provides the synthetic matrix (1 coordinate
 degree = 1 hour) carrying `DataProvenance.DEMO_SYNTHETIC` and **empty** provider capabilities.
 
-`demo/report.py` (`python -m demo.report`) prints the whole numeric story: input order, notable
-first-leg timelines, all candidate costs, the top 5, why the winner is neither nearest nor
-farthest, the departure-time sweep, waiting-weight sensitivity, the window-end-policy comparison
-and the unknown-hours caveat. Synthetic data is labelled everywhere and the report never presents
-it as road routing.
+The fixture is **calibrated**, and this is the part that makes the demo demonstrate v2 §33 instead
+of an artefact:
+
+* the 04:00 → 08:00 gap is 240 minutes while the service area spans only ~7 to ~132 synthetic
+  minutes, so **no** candidate can drive the gap away: every complete route contains real waiting
+  and the ranking is decided by the whole route, not by one candidate happening to arrive at 08:00;
+* services are short so the whole 31-stop enabled route fits inside one working day. With long
+  services the
+  day cannot be served at all inside the closing times, and the optimizer legitimately spills the
+  route into the next day's windows - which is a different (and misleading) demonstration;
+* every fixed window except one closes at **19:00 or 20:00**, so a route that wastes the morning is
+  a *worse* complete route, not an infeasible one;
+* **one customer is the feasibility bottleneck**: `S32-EARLY-CLOSE` (1h36m from the warehouse)
+  closes at 10:00, so a complete route can only serve it in its first two hours. The 26 ranked
+  candidates reach it between 08:00 and 09:56; five candidates (`S11-OPEN-0900`,
+  `S12-OPEN-0900B`, `S07-OPEN-1000`, `S05-FARTHEST`, `S27-OPEN-1000B`) reach it at 12:27-13:36 and
+  are **rejected** with that stop named as violating (v2 §14, D9). Without it every candidate would
+  be feasible and the report would have no rejection diagnostics to print at all;
+* the same deadline makes the **USER baseline infeasible**: the input order (a plausible
+  nearest-first work list) serves the bottleneck 17th and arrives at 13:23. That is not avoidable by
+  moving the deadline - the input order serves the bottleneck *after* the five rejected candidates
+  do, so a deadline late enough to keep the input order feasible also makes every candidate feasible
+  (measured: 08:00-13:30 → 31 feasible / 0 rejected). The demo therefore shows both the v2 §14
+  rejection diagnostics **and** an infeasible BEFORE route that the optimizer turns into a feasible
+  AFTER route;
+* the plan's `input_position` order (its immutable input-order provenance, v2 §30) is a plausible
+  **nearest-first work list**, so the USER baseline is a route a driver could really have entered.
+
+What the demo shows at 04:00 (all numbers are printed by the report and pinned by
+`tests/demo/test_report.py`):
+
+| candidate | first leg | complete waiting | complete duration | rank |
+|---|---|---|---|---|
+| `S25-ON-OPENING` (recommended) | 2h08m | 1h52m | 11h02m | #1 of 26 |
+| `S01-NEAR` (nearest) | 7m | 3h53m | 11h42m | #26 of 26 |
+| `S05-FARTHEST` (farthest, opens 10:00) | 2h12m | 3h48m | 12h56m | REJECTED |
+
+The nearest candidate has the cheapest first leg **and** the least complete driving (5h34m, the
+minimum of the ranking - `S02-NEAR2` ties it), and still ranks #26, because starting there means
+waiting 3h53m before the first customer opens. The farthest candidate loses for the opposite reason:
+opening at 10:00, it cannot serve the early-closing customer at all and is rejected rather than
+ranked. The recommendation is neither. The report derives those comparisons from the ranking it
+claims they are about (`complete_travel_rank`, `fewest_driving_ids`), so a superlative such as
+"least complete driving" is computed for the run that printed it.
+
+Changing the departure time changes the answer - at 06:00 `S08-UNKNOWN-HOURS`, at 07:00
+`S14-PRIORITY-2`, and at 08:00 the nearest customer `S01-NEAR` becomes the strongest complete route
+(04:00 and 05:00 both recommend `S25-ON-OPENING`). Complete-route quality decides, not the first leg.
+
+`demo/report.py` (`python -m demo.report`) prints that story from the engine's own objects: plan and
+status, the recommended candidate with its complete-route metrics, the top-5 ranking, the
+recommendation's complete route stop by stop, the nearest/farthest complete outcomes with their
+ranks and an explicit why-it-wins comparison, USER vs OPTIMIZED vs the internal ALGORITHM baseline,
+the departure sweep, the sensitivity of the provisional waiting weight over the same complete-route
+outcomes (D31, including the degenerate 1:1 case), the rejected-candidate diagnostics (grouped by
+candidate, with violating stop ids), both fingerprints, the work counters, the measured ~30-stop
+runtime and the recorded ~100-stop benchmark with its command. The report is deterministic (the only
+non-deterministic lines are the measured runtimes, which are labelled and only printed when
+measured), it is labelled DEMO/SYNTHETIC everywhere, and it never presents synthetic travel as road
+routing. Its exhaustive evaluation is memoized inside the module, so the report and the demo tests
+evaluate each distinct plan (and each sensitivity policy) once.
+
+Baselines (v2 §30, D22): **USER** = `START → enabled stops in input_position order → FINISH` (the
+user-facing BEFORE), **OPTIMIZED** = the optimized route around the driver's selection (AFTER), and
+**ALGORITHM** = the greedy seed before local improvement, kept internal and never shown as BEFORE.
+The report computes these from a **copy** of the demo plan carrying a first-stop selection, because
+a committed route requires the driver's decision (I4/D32); the demo plan itself is never mutated.
 
 ## 6. Errors vs violations (D26)
 
@@ -381,17 +499,24 @@ visible attribution; `core/` never references them.
 | 1, 2 | `tests/model/test_route_plan.py` (model invariants), timeline tests |
 | 3, 4, 17 | `validate_order` tests (exactly-once, no disabled, no loss/duplication) |
 | 5, 6 | `tests/model/test_first_stop.py` (the driver's choice; provenance records how it was made, never by the engine) |
-| 7–10 | `tests/engine/test_first_stop_evaluation.py` (A/B/C criteria of the *recommendation*), `tests/demo/test_report.py` (departure sweep) |
-| 11–14 | `tests/time/test_timeline.py` |
+| 7–10 | `tests/engine/test_first_stop_evaluation.py` (the *recommendation*), `tests/time/test_timeline.py` |
+| 11–14 | `tests/engine/test_first_stop_evaluation.py` (complete-route feasibility, ranking, rejected candidates), `tests/model/test_first_stop.py` |
 | 15, 16 | `tests/time/test_tz_strict_validation.py` |
-| 18 | Stage 2 (local search monotonicity) |
-| 19 | Stage 2/5 |
-| 20 | `tests/demo/test_report.py` (report determinism, sweep determinism) |
+| 18 | `tests/engine/test_optimizer.py` (local-search monotonicity, fingerprints), `tests/engine/test_optimizer_evaluation.py` (complete-route metrics, baselines) |
+| 19 | `tests/engine/test_optimizer_performance.py`, `tests/engine/test_optimizer.py` (demo-plan 31-enabled-stops measurement) |
+| 20 | `tools/benchmark_optimizer.py` (~100-stop measurement, no prefilter), `tests/engine/test_optimizer_performance.py` |
 | 21 | Stage 3 (SQLite round-trip) |
-| — | `tests/test_core_isolation.py` (D1/§22), `tests/tools/test_doctor.py` (D12), `tests/engine/test_cost.py` (D13/D31), `tests/demo/*` (spec §24) |
+| 24, 33 | `tests/demo/test_dataset.py` (fixture shape and calibration: 31 enabled + 1 disabled stop, the early-closing bottleneck, short services and the 10m default, determinism), `tests/demo/test_report.py` (the four §33 claims: nearest/farthest are not the recommendation, the departure sweep changes it, complete-route quality decides; the computed least-driving comparison; the rejected-candidate diagnostics; the D31 weight sensitivity), `tests/demo/test_synthetic_matrix.py` |
+| — | `tests/test_core_isolation.py` (D1/§22), `tests/tools/test_doctor.py` (D12), `tests/engine/test_cost.py` (D13/D31), `tests/tools/test_workspace_fingerprint.py` |
 
 - The suite prints a warning and uses a detected system TZif tree when `tzdata` is unavailable, so
   the DST tests are meaningful on an offline machine; the real fix remains `pip install tzdata`.
+- The demo-scale exhaustive evaluation costs several seconds per plan. `demo/report.py` memoizes the
+  evaluation, the departure sweep, the D31 weight-sensitivity policies and the recommendation
+  preview, so the report and the demo tests evaluate each distinct plan (and each sensitivity
+  policy) once instead of once per assertion. `tests/demo/test_report.py` still costs about a minute
+  and is the slowest module in the suite; that is the measured cost of evaluating 31 complete routes
+  exhaustively, not a prefilter or a shortcut.
 
 ## 9. Extension points
 
@@ -400,13 +525,15 @@ visible attribution; `core/` never references them.
 | 0 ✅ | foundation: docs, domain skeleton, time layer, strict DST, error taxonomy, doctor, tests, storage schema proposal |
 | 1 ✅ | cost scoring over implemented components, deterministic demo dataset (~30 stops), synthetic matrix, 04:00 / 08:00 scenario, candidate evaluation, numeric demo report |
 | 1.5 ✅ | semantics migration off the revoked AUTO model: RECOMMEND/MANUAL, recommendation vs driver decision, `awaiting_first_stop_choice` (D4–D11, D32) |
-| 2 | recommendation engine over **complete route outcomes** + optimizer + remaining-route term + top-K + driver-choice actions + caching + performance measurement |
+| 2 ✅ | complete-route evaluation (FINISH leg included) + deterministic optimizer (greedy seed, 2-opt/Or-opt improvement, leg cache) + **exhaustive** complete-route first-stop recommendation with top-K and rejected-candidate diagnostics + recommendation and route fingerprints + the three baselines + the ~100-stop benchmark + the complete-route demo narrative (U1–U5) |
+| 2 (deferred) | incremental / delta complete-route evaluator to remove the ~100-stop latency the owner accepted in D34. Recorded, **not implemented**: no prefilter, no approximation and no shortcut may be introduced before it is benchmarked |
 | 3 | SQLite repositories behind the approved schema |
 | 4 | API transport + web UI (map, timeline panel, summary, override controls) |
 | 5 | reoptimization after each served stop, active-leg protection groundwork |
 
 ## 10. Explicit non-goals of the current stages
 
-Stage 0 and Stage 1 deliberately contain no optimizer, no route selection, no pinning, no demo UI,
-no SQLite code, no API, no geocoding, no routing provider, no traffic, no side-of-road logic, no
-active-leg handling and no LLM integration.
+Stages 0–2 deliberately contain no demo UI, no SQLite code, no API, no geocoding, no routing
+provider, no traffic, no side-of-road logic, no active-leg handling, no LLM integration, no
+automatic commitment of a recommendation, and no candidate prefilter or approximation. The
+incremental / delta evaluator is deferred (see §9) and must not be implemented as part of Stage 2.

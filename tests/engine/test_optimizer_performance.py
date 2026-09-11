@@ -619,7 +619,8 @@ class ExhaustiveNeighbourhoodTests(unittest.TestCase):
 
     * the shipped search is compared, on small (12/30-stop) plans and several first-stop selections,
       against the U2 full-neighbourhood search above, and must never be lexicographically worse;
-    * on the 30-stop demo plan and the ~100-stop scale fixture the same comparison is made, gated
+    * on the 30-stop demo plan (31 enabled stops of 32) and the ~100-stop scale fixture the same
+      comparison is made, gated
       behind ``ROUTEPILOT_SLOW_TESTS`` because it is the heavy part of this module (U3 fix 5);
     * it must report that it examined the whole neighbourhood on a small plan, and it must stay
       deterministic;

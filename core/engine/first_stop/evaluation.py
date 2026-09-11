@@ -398,14 +398,21 @@ def evaluate_first_stop_candidates(
     (the frozen STOP/FINISH travel and distance snapshots, the per-stop input positions and the
     precomputed service-window table with its arrival-clock rows), because
     :meth:`~core.engine.optimizer.route_problem.RouteProblem.with_first_stop` constructs a fresh
-    problem for each candidate. Measured for the 30-stop demo plan
-    (:func:`demo.dataset.build_demo_plan`, 30 candidates, 30 optimizer runs):
-    ``core.time.tz.resolve_local_datetime`` is called **3462** times - 270 local-midnight day
-    boundaries (30 candidate problems x 9 prepared dates, re-resolved per candidate because that
-    boundary is not memoized), 72 distinct fixed-window resolutions charged to the prepared
-    window tables (the process-wide memo answers the other 2898 lookups on that path), and 3120
-    inside the authoritative per-candidate route evaluation (1800 ``resolve_service_window``
-    calls). Nothing here depends on the prepared tables being shared.
+    problem for each candidate. Measured on the current fixture, the demo plan
+    (:func:`demo.dataset.build_demo_plan`; 31 enabled stops of 32 - 1 disabled) has
+    31 candidates, 31 optimizer runs:
+    ``core.time.tz.resolve_local_datetime`` is called **3681** times - 279 local-midnight day
+    boundaries (31 candidate problems x 9 prepared dates, re-resolved per candidate because that
+    boundary is not memoized), 54 distinct fixed-window resolutions charged to the prepared
+    window tables (the process-wide memo answered the other 2457 lookups on that path), and 3348
+    inside the authoritative per-candidate route evaluation. Those 3348 are the two wall-clock
+    times (open and close) of the 1674 ``core.time.tz.resolve_service_window`` calls that really
+    resolve a fixed window; the route pass makes 1922 such calls in total, the other 248 being
+    unrestricted or unknown windows that resolve nothing. Nothing here depends on the prepared
+    tables being shared. These are measurements of this fixture, not a bound: a changed plan
+    changes them, and
+    ``DemoScaleTests.test_the_measured_timezone_resolution_count_matches_the_docstring`` re-measures
+    them so the numbers here cannot go stale again.
 
     The plan is never mutated: the recommendation is derived, advisory state (D4/D32/I5), so
     ``plan.first_stop_state`` stays ``awaiting_first_stop_choice`` afterwards.
@@ -449,7 +456,8 @@ def evaluate_first_stop_candidates(
     # candidates genuinely share is the one leg cache below - every leg is priced once and the
     # reuse is measured in ``cache_stats`` - and the process-wide timezone-resolution memo
     # ``route_problem._resolve_local_cached``. See ``evaluate_first_stop_candidates``'s docstring
-    # for the measured cost of the rebuild on the 30-stop demo plan.
+    # for the measured cost of the rebuild on the current demo plan (31 enabled stops, 32 stops,
+    # 1 disabled).
     base_problem = build_problem(
         plan=plan,
         travel_matrix=travel_matrix,

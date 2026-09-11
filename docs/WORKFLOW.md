@@ -162,6 +162,16 @@ model and tool overhead.
 |---|---|---|---|
 | — | — | *(no false PASS recorded yet)* | — |
 
+### Owner-approved gate exceptions
+
+One row per time the normal gate (Reviewer PASS **and** Supervisor verification before a commit) was
+deliberately not applied, with the owner's explicit approval. These are **not** false PASSes: the
+Reviewer's verdict was honest in every one of them.
+
+| Date | Unit | Gate not applied | Why, and with whose approval | What the Supervisor did instead |
+|---|---|---|---|---|
+| 2026-09-11 | U5 (demo narrative and docs) | no second independent review of the final text-only fix | The final fix cycle returned REVISE on two stale demo-plan count labels (`tools/benchmark_optimizer.py`) after the substantive review of the same tree had already passed; the Stage 2 child-call ceiling was spent, and the owner raised it from 36 to **37 for exactly one Builder call and no further Reviewer call**. | Read the diff, then re-ran the authoritative verification on the frozen tree: `unittest discover` (449 tests, OK, 5 skipped), `compileall`, `doctor` (OK with the accepted `tzdata` warning), `demo.report`, `tools/benchmark_optimizer.py` (`ACCEPTED_BOUND_MET=true`) and the opt-in slow quality comparison (31 tests, OK). The commit message and this row record the missing step; the two label texts themselves were independently reviewed in the preceding cycle as defects, so only their **fix** lacks a review. |
+
 ---
 
 ## 8. Owner communication

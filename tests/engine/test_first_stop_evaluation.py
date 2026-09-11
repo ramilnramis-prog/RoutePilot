@@ -29,12 +29,15 @@ import subprocess
 import sys
 import unittest
 from datetime import time
+from unittest import mock
 
+from core.engine.first_stop import evaluation as evaluation_module
 from core.engine.first_stop.evaluation import (
     evaluate_first_stop_candidates,
     ranking_key,
     score_of,
 )
+from core.engine.optimizer import route_problem
 from core.model.cost_policy import (
     CostComponent,
     demo_provisional_policy,
@@ -45,6 +48,7 @@ from core.model.ids import StopId
 from core.model.service_window import ServiceWindow, WindowEndPolicy
 from core.model.solution import ViolationKind
 from core.time import timeline as timeline_engine
+from core.time import tz
 from core.validation.errors import InvalidCostPolicyError, StopNotGeocodedError
 from demo.dataset import HEADLINE_STOP_IDS, build_demo_plan
 from demo.synthetic_matrix import demo_matrix
@@ -679,7 +683,12 @@ class PolicyAndErrorTests(unittest.TestCase):
 
 
 class DemoScaleTests(unittest.TestCase):
-    """One demo-scale run: the engine's answer on the ~30-stop scenario (v2 section 33)."""
+    """One demo-scale run: the engine's answer on the ~30-stop scenario (v2 section 33).
+
+    The demo fixture is calibrated (Stage 2 unit U5) so that at least one fully feasible complete
+    route exists and a real ranking is produced. This test pins the engine-level answer: exhaustive,
+    honest, and a recommendation rather than a selection.
+    """
 
     def test_the_demo_plan_is_evaluated_exhaustively_and_honestly(self) -> None:
         policy = demo_provisional_policy()
@@ -690,12 +699,115 @@ class DemoScaleTests(unittest.TestCase):
         self.assertEqual(report.optimizer_runs, len(plan.active_stops()))
         self.assertIn(HEADLINE_STOP_IDS["disabled"], report.disabled_stop_ids)
         self.assertGreater(report.cache_stats.hits, 0)
-        # The demo's synthetic day cannot serve every hard window inside one working route, and
-        # the engine says so instead of promoting an infeasible candidate (v2 section 14).
-        self.assertIsNone(report.recommended_stop_id)
-        self.assertIs(report.status, RecommendationStatus.NO_FULLY_FEASIBLE_ROUTE)
-        self.assertEqual(len(report.rejected), len(plan.active_stops()))
-        self.assertTrue(report.diagnostics)
+        # A ranked top-K exists, every ranked candidate is completely feasible, and the engine
+        # never applies the recommendation: the driver decides (D4/D32).
+        self.assertIs(report.status, RecommendationStatus.RECOMMENDED)
+        self.assertGreaterEqual(len(report.ranked), 5)
+        self.assertIsNotNone(report.recommended_stop_id)
+        self.assertTrue(all(candidate.feasible for candidate in report.ranked))
+        self.assertTrue(all(not candidate.violating_stop_ids for candidate in report.ranked))
+        self.assertEqual(
+            len(report.ranked) + len(report.rejected), len(plan.active_stops())
+        )
+        self.assertIsNone(plan.first_service_stop.selected_stop_id)
+        self.assertIs(plan.first_stop_state, FirstStopState.AWAITING_FIRST_STOP_CHOICE)
+
+
+class MeasuredTimezoneResolutionTests(unittest.TestCase):
+    """The measured numbers in ``evaluate_first_stop_candidates``'s docstring are re-counted (U5).
+
+    The docstring states a measurement of the shipped fixture, so a fixture change must fail here
+    instead of leaving a stale claim in the source (the U5 review found exactly that: 30/3462/270
+    still written while the shipped fixture had 31 candidates and 3681 calls). The count is taken
+    around a real evaluation and compared with the docstring text, so the two cannot disagree.
+
+    ``resolve_local_datetime`` is counted through :mod:`core.time.tz` - the same module attribute
+    ``_build_window_table``, ``_resolve_local_cached`` and ``resolve_service_window`` call - and the
+    process-wide memo is cleared first, so the count is deterministic rather than dependent on which
+    test ran before. Clearing a memo of pure conversions changes no answer.
+    """
+
+    def setUp(self) -> None:
+        self.plan = build_demo_plan()
+
+    def test_the_measured_timezone_resolution_count_matches_the_docstring(self) -> None:
+        day_boundaries = 0
+        memo_resolutions = 0
+        route_resolutions = 0
+        service_windows = 0
+        resolving_service_windows = 0
+        resolutions = 0
+        real_resolve_local_datetime = tz.resolve_local_datetime
+        real_resolve_service_window = tz.resolve_service_window
+        real_cached = route_problem._resolve_local_cached
+        docstring = evaluation_module.evaluate_first_stop_candidates.__doc__
+        assert docstring is not None
+        # Line wrapping must not decide this: compare against the unwrapped text.
+        unwrapped_docstring = " ".join(docstring.split())
+        # The document contract: the counts printed in the docstring.
+        self.assertIn("31 candidates, 31 optimizer runs", unwrapped_docstring)
+        self.assertIn("31 candidate problems x 9 prepared dates", unwrapped_docstring)
+
+        def counting_resolution(*args, **kwargs):
+            nonlocal resolutions, day_boundaries, memo_resolutions, route_resolutions
+            resolutions += 1
+            caller = sys._getframe(1).f_code.co_name
+            if caller == "_build_window_table":
+                day_boundaries += 1
+            elif caller == "_resolve_local_cached":
+                memo_resolutions += 1
+            else:
+                route_resolutions += 1
+            return real_resolve_local_datetime(*args, **kwargs)
+
+        def counting_service_window(*args, **kwargs):
+            nonlocal service_windows, resolving_service_windows
+            service_windows += 1
+            resolved = real_resolve_service_window(*args, **kwargs)
+            if resolved is not None:
+                resolving_service_windows += 1
+            return resolved
+
+        real_cached.cache_clear()
+        before = real_cached.cache_info()
+        with (
+            mock.patch.object(tz, "resolve_local_datetime", counting_resolution),
+            mock.patch.object(tz, "resolve_service_window", counting_service_window),
+        ):
+            report = evaluate_first_stop_candidates(plan=self.plan, travel_matrix=demo_matrix())
+        after = real_cached.cache_info()
+        memo_hits = after.hits - before.hits
+        memo_misses = after.misses - before.misses
+
+        self.assertEqual(report.candidates_evaluated, len(self.plan.active_stops()))
+        self.assertEqual(report.candidates_evaluated, 31)
+        self.assertEqual(len(report.ranked), 26)
+        self.assertEqual(len(report.ranked) + len(report.rejected), 31)
+        # 31 candidate problems x 9 prepared dates: the local-midnight boundary is not memoized.
+        self.assertEqual(day_boundaries, report.candidates_evaluated * 9)
+        self.assertEqual(day_boundaries, 279)
+        self.assertEqual(memo_misses, 54)
+        self.assertEqual(memo_resolutions, memo_misses)
+        self.assertEqual(memo_hits, 2457)
+        self.assertEqual(resolutions, 3681)
+        self.assertEqual(route_resolutions, 3348)
+        self.assertEqual(day_boundaries + memo_resolutions + route_resolutions, resolutions)
+        # The route pass calls ``resolve_service_window`` 1922 times; only the 1674 fixed windows
+        # resolve, and each resolves exactly two wall-clock times (open and close).
+        self.assertEqual(service_windows, 1922)
+        self.assertEqual(resolving_service_windows, 1674)
+        self.assertEqual(resolving_service_windows * 2, route_resolutions)
+        for reported in (
+            "**3681**",
+            "279 local-midnight day",
+            "54 distinct fixed-window",
+            "and 3348 inside the authoritative per-candidate route evaluation",
+            "the 1674 ``core.time.tz.resolve_service_window`` calls",
+            "makes 1922 such calls in total",
+        ):
+            with self.subTest(reported=reported):
+                self.assertIn(reported, unwrapped_docstring)
+        self.assertIn("2457 lookups on that path", unwrapped_docstring)
 
 
 # --------------------------------------------------------------------------- #

@@ -385,8 +385,16 @@ do it.
 - The only weighted policy in the project is `demo_provisional_v1`
   (`travel_time = 1`, `waiting_time = 2`), marked `provisional` in code and in every report.
 - These numbers are **not product truth**: they exist to demonstrate the architecture. The demo
-  report shows their sensitivity, including the degenerate 1:1 case where every candidate that
-  arrives before opening ties exactly and the tie-break hands the choice to the nearest stop.
+  report shows their sensitivity **over the complete-route outcomes** - travel weight fixed at 1,
+  waiting weight 1.0 / 1.5 / 2.0 / 3.0, each row the recommended first stop of an exhaustive
+  evaluation under that policy (`demo.report.weight_sensitivity`).
+- The **degenerate 1:1 case** is reported, and what it shows on the demo fixture is recorded here so
+  the claim is not stale: at waiting weight 1.0 four candidates (`S09-ALWAYS-OPEN`,
+  `S23-UNKNOWN-HOURS2`, `S08-UNKNOWN-HOURS`, `S19-ALWAYS-OPEN2`) tie at the winning objective
+  30 840, and the documented ranking key `(score, complete duration, input_position, stop_id)` -
+  **not** the objective - hands the recommendation to `S09-ALWAYS-OPEN`. At 1.5, 2.0 and 3.0 the
+  recommendation is `S25-ON-OPENING`, so the demo really does show the provisional weight changing
+  the answer rather than only decorating it.
 - The capability gate still applies: a weight may only be set for a component whose status is
   `implemented`, so nothing unimplemented can be scored silently.
 - Status: `approved`. Spec: §10, §24.
@@ -478,42 +486,48 @@ the unlocked-choice question (v2 §5 makes that state invalid, so D5 now says a 
 pinned); order-override persistence (D30, versioned JSON); the specification conflict (v2 published
 as the current Source of Truth, v1 kept unchanged as history).
 
-## Stage 2 change set — required by v2, not yet implemented
+## Stage 2 change set — status
 
-Recorded so nothing is silently dropped; each item is a real model or engine change:
+Recorded so nothing is silently dropped. Each item is a real model or engine change. **Stage 2 is
+complete** (units U1–U5); the status of every item is recorded here, and the one item that is still
+open is marked OPEN.
 
 1. **Complete-route candidate metrics** (v2 §12): first-leg travel, first-stop ETA, waiting and
    service start, complete travel time, complete waiting time, total service time, complete route
    duration, estimated final arrival at FINISH, hard-window violations, objective breakdown. This
    also changes `feasible` from first-leg feasibility to **complete-route** feasibility (v2 §14).
-2. **`no_fully_feasible_route`** must be produced with the rejected candidates and their violating
-   stops and reasons (v2 §14). The status exists in the domain already; the engine does not yet
-   compute complete routes, so nothing produces it.
+   **DONE** (U1/U4; `core.engine.first_stop.evaluation`, `core.model.first_stop.FirstStopCandidate`).
+2. **`no_fully_feasible_route`** produced with the rejected candidates, their violating stops and
+   their reasons (v2 §14). **DONE** (U4; `FirstStopEvaluationReport.rejected` + `diagnostics` +
+   `reasons_for`). The demo report prints them grouped by candidate with the violating stop ids, and
+   the shipped fixture exercises the path (`S32-EARLY-CLOSE` rejects 5 of 31 candidates at 04:00).
 3. **Route fingerprint** (v2 §7, §35): `RoutePlan.inputs_fingerprint()` deliberately excludes the
-   driver's decision; the committed route needs its own fingerprint that *does* depend on the
-   selected first stop. Add it to the plan/run model and to `route_optimization_runs`.
-4. ~~**`input_position` on `RouteStop`** (v2 §25, §30)~~ **Done** in the spec-alignment commit
-   (D33): the field exists, is unique per plan, allows gaps, is never rewritten, and
-   `RoutePlan.user_baseline_order()` provides the BEFORE baseline.
-5. **Objective model** (v2 §16): the real model is elapsed time (travel + waiting + service), with
-   any preference for less idle waiting expressed as a configurable soft preference rather than a
-   universal multiplier. The provisional `travel_time = 1 / waiting_time = 2` demo policy stays
-   marked provisional until then.
-6. **Exhaustive candidate evaluation with measured performance** (v2 §20): evaluate the complete route
-   for **every** feasible candidate, with no fixed K prefilter, and a deterministic benchmark harness.
-   Targets for ~100 stops: ≤ ~3 s preferred, ≤ ~5 s acceptable. If the budget is exceeded: measure
-   the bottleneck, improve caching/reuse/algorithm, benchmark again, and only then propose
-   prefiltering or approximation as an explicit decision.
-   The ~100-stop loop currently exceeds that budget and is **accepted as an interim limitation**
-   (D34); removing the latency is scheduled to a dedicated later Stage 2 unit that builds an
-   incremental / delta complete-route evaluator. No prefilter or approximation is authorized
-   meanwhile.
+   driver's decision; the committed route has its own fingerprint that *does* depend on the selected
+   first stop. **DONE** (U2; `core.engine.optimizer.route_fingerprint`).
+4. **`input_position` on `RouteStop`** (v2 §25, §30). **DONE** in the spec-alignment commit (D33).
+5. **Objective model** (v2 §16) — **OPEN, unchanged by Stage 2**. The real model is elapsed time
+   (travel + waiting + service), with any preference for less idle waiting expressed as a
+   configurable soft preference rather than a universal multiplier. That model is **not implemented
+   and not decided**: the objective actually in force today is still the configured **provisional
+   policy of D31** (`demo_provisional_v1`, `travel_time = 1`, `waiting_time = 2`) applied to the
+   complete route's measured breakdown, and every report says so and shows that policy's
+   sensitivity (D31). Adopting the elapsed-time model with a soft waiting preference therefore
+   remains a **future decision for the owner**, not a Stage 2 outcome. Nothing in Stage 2 may be read
+   as settling this item, and no weight was tuned to produce a demo winner.
+6. **Exhaustive candidate evaluation with measured performance** (v2 §20): evaluate the complete
+   route for **every** feasible candidate, with no fixed-K prefilter, and a deterministic benchmark
+   harness. **DONE** (U3/U4; `tools/benchmark_optimizer.py`). The ~100-stop loop exceeds the
+   ≤ ~5 s acceptable target and is **accepted as an interim limitation** (D34); removing that
+   latency is the one **DEFERRED** Stage 2 deliverable - a dedicated later unit builds an
+   **incremental / delta complete-route evaluator**. Until it lands, no prefilter, no shortlist and
+   no approximation is authorized, and the candidate set stays exhaustive.
 7. **Optimizer guarantees** (v2 §21): START fixed, FINISH fixed, driver-selected first stop fixed,
    every enabled stop exactly once, disabled stops excluded, hard-window feasibility explicit, no
    accepted local-search move may worsen the accepted objective, deterministic tie-breaking.
+   **DONE** (U2/U3; `core.engine.optimizer`).
 8. **Three baselines** (v2 §30): USER (`input_position` order), OPTIMIZED (around the driver's
-   selection), ALGORITHM (greedy seed before local improvement). Keep the algorithm baseline out of
-   user-facing BEFORE/AFTER.
+   selection), ALGORITHM (greedy seed before local improvement). **DONE** (U2/U3; the algorithm
+   baseline stays out of user-facing BEFORE/AFTER, and the demo report shows all three).
 
 ## Environment notes (machine-specific, not product decisions)
 

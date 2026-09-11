@@ -69,12 +69,12 @@ class DemoSyntheticMatrixTests(unittest.TestCase):
     def test_headline_travel_times_are_exact(self) -> None:
         origin = self.plan.departure_point
         expected = {
-            HEADLINE_STOP_IDS["nearest"]: 20 * M,
-            HEADLINE_STOP_IDS["near_second"]: 45 * M,
-            HEADLINE_STOP_IDS["far_before_opening"]: 3 * T + 55 * M,
-            HEADLINE_STOP_IDS["farthest"]: 5 * T,
-            HEADLINE_STOP_IDS["on_opening"]: 4 * T,
-            HEADLINE_STOP_IDS["edge_window"]: 6 * T + 5 * M,
+            HEADLINE_STOP_IDS["nearest"]: 7 * M,
+            HEADLINE_STOP_IDS["near_second"]: 16 * M,
+            HEADLINE_STOP_IDS["far_before_opening"]: 118 * M,
+            HEADLINE_STOP_IDS["farthest"]: 132 * M,
+            HEADLINE_STOP_IDS["on_opening"]: 128 * M,
+            HEADLINE_STOP_IDS["late_opener"]: 72 * M,
         }
         for stop_id, seconds in expected.items():
             with self.subTest(stop=stop_id):

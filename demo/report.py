@@ -1,24 +1,40 @@
-"""Numeric demo report (spec sections 1, 24, 25; Stage 2 U4 wiring).
+"""Complete-route demo report (Stage 2 unit U5; v2 sections 12-16, 20, 25, 30, 33, 35).
 
-Prints, deterministically:
+**DEMO / SYNTHETIC DATA.** Everything printed here comes from the invented stops of
+:mod:`demo.dataset` and the synthetic travel matrix of :mod:`demo.synthetic_matrix`. It is not
+real addresses, not real opening hours and not road routing, and it is labelled as such everywhere.
 
-* the demo plan and its provenance warning;
-* the input route (the order as supplied by the user = the product's BEFORE baseline);
-* first-leg timelines for the notable stops;
-* candidate first legs for every possible first stop, plus the top 5;
-* why the first-leg view is neither the nearest nor the farthest stop;
-* the effect of changing the departure time;
-* sensitivity to the provisional waiting weight;
-* the window-end policy (D29) and what it changes;
-* the data-quality caveat for stops whose business hours are unknown.
+What the report shows, in the order the spec asks for it:
 
-**Interim, and stated rather than hidden (U4/U5):** the recommendation engine now ranks
-**complete-route** outcomes (``core.engine.first_stop.evaluation``, v2 sections 12-14). This
-report still narrates the Stage 1 *first-leg* view, because that narrative is what the demo's
-A-G acceptance criteria pin; the demo narrative refresh is a later unit (U5). The first-leg
-numbers here are produced by the same timeline arithmetic and the same cost policy the engine
-uses - :func:`candidate_first_leg_view` - so they cannot drift from the engine's own per-leg
-figures.
+* the plan (departure, START, FINISH, enabled/disabled stops) and the engine's **status**;
+* the **recommended first stop** with the complete-route metrics of v2 section 12;
+* a **top-5 ranking by complete route outcome** - ``START -> candidate -> optimized remaining
+  stops -> FINISH``, with the FINISH leg included (v2 section 15);
+* the **complete route** the recommended candidate would produce, stop by stop;
+* the **nearest** and the **farthest** candidate with their complete outcomes and their rank, and
+  an explicit explanation of why the recommendation wins (v2 section 33);
+* the **USER** baseline against the **OPTIMIZED** route, and the internal **ALGORITHM** baseline
+  (v2 section 30, D22);
+* the **departure-time sweep** 04:00-08:00, which shows that the recommendation changes;
+* the **sensitivity of the provisional objective** to its waiting weight (D31), computed over the
+  same complete-route outcomes, including the degenerate 1:1 case;
+* the **rejected candidates** with their violating stop ids (v2 section 14, D9);
+* the **route fingerprint** and the **recommendation fingerprint**, and the difference between
+  them once a first stop is selected (v2 section 7, D33);
+* the deterministic work counters (candidates evaluated, optimizer runs, leg-cache hits/misses/
+  entries), the measured ~30-stop evaluation runtime, and the recorded ~100-stop benchmark
+  (v2 section 20, D34).
+
+Two things are deliberate and worth stating up front:
+
+1. **Nothing here is applied.** The engine *recommends*; the driver decides (D4/D32/I5). The plan
+   stays in ``awaiting_first_stop_choice``, and the complete routes shown for a single candidate
+   (the recommendation, the baselines, the fingerprint comparison) are previews computed from
+   **copies** of the plan that carry a first-stop selection. The demo plan itself is never changed.
+2. **The report is deterministic.** Everything except the two measured wall-clock lines is a pure
+   function of the plan, the synthetic matrix and the configured cost policy, and identical inputs
+   print an identical report. The wall-clock lines are only present when a caller measures them
+   (:func:`main` does) and are marked as machine-dependent.
 
 Run: ``python -m demo.report``
 """
@@ -33,20 +49,24 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from core.engine.cost import breakdown_as_tuple, score_breakdown
-from core.engine.providers import TravelMatrix
+from core.engine.first_stop.evaluation import (
+    FirstStopEvaluationReport,
+    evaluate_first_stop_candidates,
+)
+from core.engine.optimizer.optimize import optimize
+from core.engine.optimizer.route_evaluation import RouteEvaluation, evaluate_order
+from core.engine.optimizer.route_fingerprint import route_fingerprint
+from core.engine.optimizer.route_problem import build_problem
 from core.model.cost_policy import (
     DEMO_TRAVEL_TIME_WEIGHT,
     CostComponent,
     RouteCostPolicy,
     demo_provisional_policy,
 )
-from core.model.ids import PlanId, StopId
+from core.model.first_stop import FirstStopCandidate, FirstStopIntent
+from core.model.ids import StopId
 from core.model.route_plan import RoutePlan
 from core.model.route_stop import RouteStop
-from core.model.solution import StopTimeline, Violation
-from core.model.service_window import ServiceWindow, WindowEndPolicy
-from core.time import timeline as timeline_engine
 from core.time import tz, tzdata
 from core.validation.errors import TZDATA_INSTALL_COMMAND
 from demo.dataset import (
@@ -61,37 +81,56 @@ from demo.dataset import (
 from demo.synthetic_matrix import DEMO_MATRIX_DISCLAIMER, demo_matrix
 
 __all__ = [
+    "BENCHMARK_COMMAND",
+    "DEMO_EVALUATION_RUNTIME_BUDGET_SEC",
     "DEPARTURE_SWEEP_HOURS",
+    "RECORDED_BENCHMARK",
     "WEIGHT_SENSITIVITY_RATIOS",
+    "BaselineComparison",
     "DepartureOutcome",
-    "FirstLegCandidate",
-    "FirstLegReport",
-    "UnknownHoursDistortion",
-    "UnknownHoursRow",
+    "EvaluationTimings",
+    "RecordedBenchmark",
     "WeightSensitivityRow",
+    "baseline_comparison",
     "build_report",
-    "candidate_first_leg_view",
+    "complete_travel_rank",
+    "demo_evaluation",
     "departure_sweep",
+    "fewest_driving_ids",
     "format_duration",
     "main",
-    "stops_without_fixed_window",
-    "unknown_hours_distortion",
+    "objective_winner_sentence",
+    "recommendation_preview",
+    "rejected_candidate_lines",
     "weight_sensitivity",
-    "window_end_policy_comparison",
 ]
 
-#: Local departure hours shown in the departure-time sweep.
+#: Local departure hours shown in the departure-time sweep (v2 section 33).
 DEPARTURE_SWEEP_HOURS = (4, 5, 6, 7, 8)
 
-#: waiting:travel ratios shown in the sensitivity section (1.0 demonstrates the degeneracy).
+#: How many alternatives the ranking section shows (v2 section 13: "approximately 3-5").
+TOP_K = 5
+
+#: The waiting:travel ratios the sensitivity section evaluates over the complete-route objective
+#: (D31: the demo report must show the provisional weights' sensitivity, including the degenerate
+#: 1:1 case where the waiting weight equals the travel weight).
 WEIGHT_SENSITIVITY_RATIOS = (1.0, 1.5, 2.0, 3.0)
 
-_SEPARATOR = "=" * 100
-_SUBSEPARATOR = "-" * 100
+#: v2 section 20's "acceptable for the early product" target for ~100 stops is 5 s. The demo plan has
+#: 31 enabled stops and its exhaustive evaluation is measured around that boundary (see the printed
+#: runtime); the runtime is **printed**, never asserted as a correctness rule (v2 section 20 calls
+#: these engineering targets, not correctness rules).
+DEMO_EVALUATION_RUNTIME_BUDGET_SEC = 5.0
+
+#: The exact command that produces the ~100-stop figures below.
+BENCHMARK_COMMAND = "python tools/benchmark_optimizer.py --stop-count 100"
+
+_SEPARATOR = "=" * 112
+_SUBSEPARATOR = "-" * 112
 
 
 # --------------------------------------------------------------------------- #
-# formatting
+# formatting helpers
 # --------------------------------------------------------------------------- #
 def format_duration(seconds: int) -> str:
     """``14100`` -> ``3h55m``, ``2700`` -> ``45m``."""
@@ -123,783 +162,1134 @@ def _window_text(stop: RouteStop) -> str:
 def _policy_text(policy: RouteCostPolicy) -> str:
     weights = ", ".join(
         f"{component.value}={weight:g}"
-        for component, weight in sorted(policy.weights.items(), key=lambda i: i[0].value)
+        for component, weight in sorted(policy.weights.items(), key=lambda item: item[0].value)
     )
     marker = " - PROVISIONAL DEMO WEIGHTS, not product truth" if policy.provisional else ""
     return f"{policy.name} ({weights}){marker}"
 
 
+def _distance_km(metres: float) -> str:
+    return f"{metres / 1000.0:.1f}km"
+
+
+def _performance_stop_count_line(
+    active: tuple[RouteStop, ...], disabled: tuple[RouteStop, ...], plan: RoutePlan
+) -> str:
+    """The scale label above the performance counters: the **enabled** count and the total.
+
+    Only enabled stops are candidates (D20), so a "31-stop demo plan" label on a plan that holds 32
+    stops was wrong: the counters below it measure the 31 enabled stops. Both counts are printed,
+    taken from the plan itself, so the label cannot disagree with the counters or with the plan
+    shape printed above it. The counts are passed in rather than imported, so the helper states the
+    shape of whatever plan the report was built for.
+    """
+    return f"  {len(active)} enabled stops ({len(plan.stops)} stops, {len(disabled)} disabled)"
+
+
+@dataclass(frozen=True)
+class CompositeDriving:
+    """Where a candidate's **complete** driving sits among the candidates actually compared.
+
+    ``rank`` counts the candidates whose complete route drives **strictly less**, so a tie is
+    reported as the joint position it is ("2 candidates drive the same or less") instead of a
+    fabricated sole rank. ``of`` is the size of the compared set and ``minimum``/``maximum`` are
+    its extremes, so a sentence such as "least of the driving compared" is printed only when it is
+    true of this run (reviewer finding: a stale superlative is a false claim).
+    """
+
+    rank: int
+    of: int
+    minimum: int
+    maximum: int
+    tied_ids: tuple[StopId, ...]
+
+
+def _component(candidate: FirstStopCandidate, component: CostComponent) -> float:
+    """The measured value of one objective component of a candidate (0.0 when not carried)."""
+    for name, value in candidate.explanation:
+        if name == component.value:
+            return float(value)
+    return 0.0
+
+
+def _fewest(driving: CompositeDriving) -> str:
+    """``1st``/``2nd``/``3rd``/``4th``... for a 1-based rank of the complete-driving comparison."""
+    within_teens = driving.rank < 20
+    suffix = {1: "st", 2: "nd", 3: "rd"}.get(
+        driving.rank if within_teens else driving.rank % 10, "th"
+    )
+    return f"{driving.rank}{suffix}"
+
+
+def _driving_of(
+    candidate: FirstStopCandidate, compared: Sequence[FirstStopCandidate]
+) -> CompositeDriving:
+    own = candidate.complete_travel_time
+    less = [other for other in compared if other.complete_travel_time < own]
+    tied = tuple(
+        other.stop_id for other in compared if other.complete_travel_time == own
+    )
+    travels = [other.complete_travel_time for other in compared] or [own]
+    return CompositeDriving(
+        rank=len(less) + 1,
+        of=len(compared),
+        minimum=min(travels),
+        maximum=max(travels),
+        tied_ids=tied,
+    )
+
+
+def complete_travel_rank(
+    report: FirstStopEvaluationReport, stop_id: StopId
+) -> CompositeDriving | None:
+    """Where one candidate's complete driving sits among the candidates the ranking compares.
+
+    The compared set is the **ranked** candidates when there is a ranking - a rejected candidate has
+    no complete route to compare fairly - and every evaluated candidate otherwise. The result is
+    derived from the report's own numbers, so a printed superlative about "least driving" cannot go
+    stale: it is computed, not remembered.
+    """
+    candidate = report.find(stop_id)
+    if candidate is None:
+        return None
+    compared = report.ranked or tuple(report.rejected)
+    if not compared:
+        return None
+    return _driving_of(candidate, compared)
+
+
+def fewest_driving_ids(report: FirstStopEvaluationReport) -> tuple[StopId, ...]:
+    """The ids of the candidates whose complete route drives the least (ties included), ascending."""
+    compared = report.ranked or tuple(report.rejected)
+    if not compared:
+        return ()
+    fewest = min(candidate.complete_travel_time for candidate in compared)
+    return tuple(
+        sorted(
+            candidate.stop_id
+            for candidate in compared
+            if candidate.complete_travel_time == fewest
+        )
+    )
+
+
 # --------------------------------------------------------------------------- #
-# analysis
+# evaluation (memoized: the exhaustive loop costs seconds, and the report is a pure
+# function of the plan, the matrix and the policy)
+# --------------------------------------------------------------------------- #
+_EVALUATION_CACHE: dict[str, FirstStopEvaluationReport] = {}
+_SWEEP_CACHE: dict[tuple[str, tuple[int, ...]], tuple["DepartureOutcome", ...]] = {}
+_PREVIEW_CACHE: dict[tuple[str, str], "RecommendationPreview"] = {}
+
+
+def _plan_key(plan: RoutePlan) -> str:
+    """The memo key of a plan: its recommendation fingerprint (v2 section 7).
+
+    ``inputs_fingerprint`` covers everything a recommendation depends on - departure time and
+    location, the stop set with its windows and durations, priorities, finish, cost policy and the
+    timezone-data version - so two plans that differ in any way that can change an answer can never
+    share a memo entry, and a variant plan used by a test can never receive the demo plan's result.
+    """
+    return plan.inputs_fingerprint()
+
+
+def demo_evaluation(plan: RoutePlan) -> FirstStopEvaluationReport:
+    """The exhaustive complete-route evaluation of one plan, memoized.
+
+    The exhaustive loop of v2 section 20 costs several seconds at ~30 stops, so the report (and the
+    tests that read it) evaluate each distinct plan once. The result is a pure function of the plan,
+    the synthetic matrix and the configured policy, so memoizing it cannot change an answer.
+    """
+    key = _plan_key(plan)
+    cached = _EVALUATION_CACHE.get(key)
+    if cached is None:
+        cached = evaluate_first_stop_candidates(plan=plan, travel_matrix=demo_matrix())
+        _EVALUATION_CACHE[key] = cached
+    return cached
+
+
+# --------------------------------------------------------------------------- #
+# the departure-time sweep
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class DepartureOutcome:
-    """Result of evaluating the demo plan at one departure time.
-
-    ``recommended_*`` describes what RoutePilot would propose - never a selection. The driver makes
-    the first-stop decision (D4/D32).
-    """
+    """One departure hour of the sweep: what the engine recommends, and its complete route."""
 
     local_hour: int
     departure: datetime
-    recommended_id: str | None
-    recommended_score: float
-    recommended_travel: int
-    recommended_wait: int
-    runner_up_id: str | None
-    runner_up_score: float | None
-    recommended_note: str = ""
-
-
-@dataclass(frozen=True)
-class WeightSensitivityRow:
-    """Recommendation under one waiting:travel ratio."""
-
-    waiting_weight: float
-    recommended_id: str | None
-    recommended_score: float
-    note: str
-
-
-def evaluate(
-    *,
-    plan: RoutePlan,
-    policy: RouteCostPolicy | None = None,
-) -> FirstLegReport:
-    """The demo's first-leg view of every candidate of one plan (interim, see the module docstring)."""
-    return candidate_first_leg_view(
-        plan=plan, travel_matrix=demo_matrix(), policy=policy
-    )
-
-
-# --------------------------------------------------------------------------- #
-# interim first-leg view of the candidates (the engine ranks complete routes)
-# --------------------------------------------------------------------------- #
-@dataclass(frozen=True)
-class FirstLegCandidate:
-    """One candidate timed and priced on its **first leg** only (the Stage 1 view, D31).
-
-    Interim and local to the demo: the recommendation engine ranks complete-route outcomes
-    (v2 sections 12-14). The fields are exactly the timeline's, so they cannot drift from the
-    engine's own per-leg arithmetic, and ``violation`` is the timeline's explicit violation.
-    """
-
-    stop_id: StopId
-    timeline: StopTimeline
-    distance_m: float
-    cost_breakdown: tuple[tuple[CostComponent, float], ...]
-    score: float
-    violation: Violation | None = None
-
-    # ---- delegated timeline facts (single source of truth) ------------- #
-    @property
-    def feasible(self) -> bool:
-        return not self.timeline.is_infeasible
-
-    @property
-    def travel_time(self) -> int:
-        return self.timeline.travel_time
-
-    @property
-    def waiting_time(self) -> int:
-        return self.timeline.waiting_time
-
-    @property
-    def estimated_arrival(self) -> datetime:
-        return self.timeline.estimated_arrival
-
-    @property
-    def service_start(self) -> datetime:
-        return self.timeline.service_start
-
-    @property
-    def estimated_departure(self) -> datetime:
-        return self.timeline.estimated_departure
-
-    @property
-    def service_window_start(self) -> datetime | None:
-        return self.timeline.service_window_start
-
-    @property
-    def service_window_end(self) -> datetime | None:
-        return self.timeline.service_window_end
-
-    @property
-    def window_end_policy(self) -> WindowEndPolicy | None:
-        return self.timeline.window_end_policy
-
-    @property
-    def lateness(self) -> int:
-        return self.timeline.lateness
-
-    @property
-    def finish_overtime(self) -> int:
-        return self.timeline.finish_overtime
-
-    def component(self, component: CostComponent) -> float:
-        """Measured value of one cost component (0.0 when not part of the breakdown)."""
-        for candidate_component, value in self.cost_breakdown:
-            if candidate_component is component:
-                return value
-        return 0.0
-
-
-@dataclass(frozen=True)
-class FirstLegReport:
-    """Every candidate's first leg: feasible candidates ranked, infeasible ones separated.
-
-    A local, interim view (see the module docstring). ``ranked`` orders by
-    ``(score, travel_time, stop_id)`` - the Stage 1 tie-break - and ``infeasible`` holds the
-    candidates whose first leg misses a hard window.
-    """
-
-    plan_id: PlanId
-    inputs_fingerprint: str
-    ranked: tuple[FirstLegCandidate, ...]
-    infeasible: tuple[FirstLegCandidate, ...]
-    disabled_stop_ids: tuple[StopId, ...]
-
-    def recommended(self) -> FirstLegCandidate | None:
-        return self.ranked[0] if self.ranked else None
-
-    @property
-    def recommended_stop_id(self) -> StopId | None:
-        recommended = self.recommended()
-        return recommended.stop_id if recommended is not None else None
-
-    def nearest(self) -> FirstLegCandidate | None:
-        if not self.ranked:
-            return None
-        return min(self.ranked, key=lambda candidate: (candidate.travel_time, candidate.stop_id))
-
-    def farthest(self) -> FirstLegCandidate | None:
-        if not self.ranked:
-            return None
-        return min(self.ranked, key=lambda candidate: (-candidate.travel_time, candidate.stop_id))
-
-    def find(self, stop_id: StopId) -> FirstLegCandidate | None:
-        for candidate in self.ranked:
-            if candidate.stop_id == stop_id:
-                return candidate
-        for candidate in self.infeasible:
-            if candidate.stop_id == stop_id:
-                return candidate
-        return None
-
-    def rank_of(self, stop_id: StopId) -> int | None:
-        for position, candidate in enumerate(self.ranked, start=1):
-            if candidate.stop_id == stop_id:
-                return position
-        return None
-
-    def top(self, count: int) -> tuple[FirstLegCandidate, ...]:
-        return self.ranked[:count]
-
-
-def candidate_first_leg_view(
-    *,
-    plan: RoutePlan,
-    travel_matrix: TravelMatrix,
-    policy: RouteCostPolicy | None = None,
-) -> FirstLegReport:
-    """Time and price every candidate's **first leg** only.
-
-    Interim demo view, kept because the demo's A-G narrative is about the first-leg degeneracy
-    (Stage 1, D31); the engine itself ranks complete routes. The timing is
-    :func:`core.time.timeline.compute_stop_timeline` and the pricing is
-    :func:`core.engine.cost.score_breakdown` with the configured policy, so neither number is a
-    second model of the engine's arithmetic.
-    """
-    cost_policy = policy if policy is not None else plan.cost_policy
-    tzinfo = plan.load_timezone()
-    candidates: list[FirstLegCandidate] = []
-
-    for stop in plan.active_stops():
-        timeline = timeline_engine.compute_stop_timeline(
-            plan=plan,
-            stop=stop,
-            departure_from_previous=plan.departure_time,
-            previous_point=plan.departure_point,
-            travel_provider=travel_matrix,
-            tzinfo=tzinfo,
-        )
-        location = stop.location
-        assert location is not None  # compute_stop_timeline raises otherwise
-        distance_m = float(travel_matrix.distance_meters(plan.departure_point, location))
-        breakdown = {
-            CostComponent.TRAVEL_TIME: float(timeline.travel_time),
-            CostComponent.WAITING_TIME: float(timeline.waiting_time),
-            CostComponent.DISTANCE: distance_m,
-        }
-        candidates.append(
-            FirstLegCandidate(
-                stop_id=stop.id,
-                timeline=timeline,
-                distance_m=distance_m,
-                cost_breakdown=breakdown_as_tuple(breakdown),
-                score=score_breakdown(breakdown, cost_policy),
-                violation=timeline_engine.violation_for(timeline),
-            )
-        )
-
-    ranked = tuple(
-        sorted(
-            (candidate for candidate in candidates if candidate.feasible),
-            key=lambda candidate: (candidate.score, candidate.travel_time, candidate.stop_id),
-        )
-    )
-    infeasible = tuple(
-        sorted(
-            (candidate for candidate in candidates if not candidate.feasible),
-            key=lambda candidate: (candidate.travel_time, candidate.stop_id),
-        )
-    )
-    return FirstLegReport(
-        plan_id=plan.id,
-        inputs_fingerprint=plan.inputs_fingerprint(),
-        ranked=ranked,
-        infeasible=infeasible,
-        disabled_stop_ids=tuple(stop.id for stop in plan.disabled_stops()),
-    )
+    status: str
+    recommended_id: StopId | None
+    first_leg: int | None
+    complete_duration: int | None
+    complete_waiting: int | None
+    ranked: int
+    rejected: int
+    note: str = ""
 
 
 def departure_sweep(
-    *,
-    hours: tuple[int, ...] = DEPARTURE_SWEEP_HOURS,
-    policy: RouteCostPolicy | None = None,
+    *, plan: RoutePlan | None = None, hours: tuple[int, ...] = DEPARTURE_SWEEP_HOURS
 ) -> tuple[DepartureOutcome, ...]:
-    """Evaluate the demo plan at several local departure hours."""
+    """Evaluate one plan at several local departure hours (v2 section 33).
+
+    Nothing is selected at any hour: each row is a **recommendation** for that departure time, and
+    the row says so when the recommendation differs from the 04:00 one. ``plan`` defaults to the
+    demo plan. Memoized per plan and hour tuple: the sweep costs one exhaustive evaluation per hour,
+    and it is a pure function of the plan.
+    """
+    base_plan = build_demo_plan() if plan is None else plan
+    key = (_plan_key(base_plan), hours)
+    cached = _SWEEP_CACHE.get(key)
+    if cached is not None:
+        return cached
+    outcomes = _run_sweep(base_plan, hours)
+    _SWEEP_CACHE[key] = outcomes
+    return outcomes
+
+
+def _run_sweep(
+    base_plan: RoutePlan, hours: tuple[int, ...]
+) -> tuple[DepartureOutcome, ...]:
     outcomes: list[DepartureOutcome] = []
+    baseline_report = demo_evaluation(
+        dataclasses.replace(base_plan, departure_time=demo_departure_time_at(hours[0]))
+    )
+    baseline = baseline_report.recommended_stop_id
+    previous: StopId | None = baseline
+    previous_hour = hours[0]
     for hour in hours:
-        plan = build_demo_plan(departure_time=demo_departure_time_at(hour))
-        report = evaluate(plan=plan, policy=policy)
+        plan = dataclasses.replace(
+            base_plan, departure_time=demo_departure_time_at(hour)
+        )
+        report = demo_evaluation(plan)
         recommended = report.recommended()
-        if recommended is None:
-            outcomes.append(
-                DepartureOutcome(hour, plan.departure_time, None, 0.0, 0, 0, None, None)
-            )
-            continue
-        runner_up = report.ranked[1] if len(report.ranked) > 1 else None
         note = ""
-        stop = plan.stop_by_id(recommended.stop_id)
-        if stop.service_window.window_kind.value == "unknown":
-            note = "hours unknown: no opening constraint applies"
-        elif recommended.waiting_time == 0:
-            note = "arrives at or after opening: no waiting"
+        if recommended is None:
+            note = "no fully feasible complete route at this departure time"
+        elif hour != hours[0] and recommended.stop_id != previous:
+            note = f"changed from {previous} at {previous_hour:02d}:00"
         outcomes.append(
             DepartureOutcome(
                 local_hour=hour,
                 departure=plan.departure_time,
-                recommended_id=recommended.stop_id,
-                recommended_score=recommended.score,
-                recommended_travel=recommended.travel_time,
-                recommended_wait=recommended.waiting_time,
-                runner_up_id=runner_up.stop_id if runner_up else None,
-                runner_up_score=runner_up.score if runner_up else None,
-                recommended_note=note,
+                status=report.status.value,
+                recommended_id=recommended.stop_id if recommended else None,
+                first_leg=recommended.travel_time if recommended else None,
+                complete_duration=(
+                    recommended.estimated_complete_route_duration if recommended else None
+                ),
+                complete_waiting=(
+                    recommended.complete_waiting_time if recommended else None
+                ),
+                ranked=len(report.ranked),
+                rejected=len(report.rejected),
+                note=note,
             )
         )
+        if recommended is not None:
+            previous = recommended.stop_id
+            previous_hour = hour
     return tuple(outcomes)
+
+
+# --------------------------------------------------------------------------- #
+# the recommendation's own complete route and the baselines (preview only)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class RecommendationPreview:
+    """The complete route the recommended candidate would produce, plus the two baselines.
+
+    Everything here is computed from a **copy** of the demo plan that carries a first-stop
+    selection, so the committed-route machinery (which requires the driver's decision, I4/D32) can
+    be exercised without the demo applying anything. The demo plan itself is never changed.
+    """
+
+    selected_plan: RoutePlan
+    stop_id: StopId
+    evaluation: RouteEvaluation
+    algorithm_evaluation: RouteEvaluation
+    user_evaluation: RouteEvaluation
+    order: tuple[StopId, ...]
+    seed_objective: int
+    final_objective: int
+    accepted_moves: int
+    search_evaluations: int
+    screened_moves: int
+    budget_exhausted: bool
+    route_fingerprint: str
+
+
+@dataclass(frozen=True)
+class BaselineComparison:
+    """USER vs OPTIMIZED vs ALGORITHM, with what the optimization saved (v2 section 30)."""
+
+    user: RouteEvaluation
+    optimized: RouteEvaluation
+    algorithm: RouteEvaluation
+
+    @property
+    def saved_time(self) -> int:
+        return self.user.metrics.duration_sec - self.optimized.metrics.duration_sec
+
+    @property
+    def saved_distance(self) -> float:
+        return self.user.metrics.distance_m - self.optimized.metrics.distance_m
+
+    @property
+    def saved_waiting(self) -> int:
+        return self.user.metrics.waiting_sec - self.optimized.metrics.waiting_sec
+
+
+def recommendation_preview(plan: RoutePlan, stop_id: StopId) -> RecommendationPreview:
+    """Preview the complete route of one candidate, with both baselines, on a plan copy.
+
+    Memoized: the preview runs the optimizer once, and it is a pure function of the plan and the
+    chosen candidate (the demo plan is never mutated).
+    """
+    key = (_plan_key(plan), stop_id)
+    cached = _PREVIEW_CACHE.get(key)
+    if cached is not None:
+        return cached
+    preview = _build_preview(plan, stop_id)
+    _PREVIEW_CACHE[key] = preview
+    return preview
+
+
+def _build_preview(plan: RoutePlan, stop_id: StopId) -> RecommendationPreview:
+    selected_plan = dataclasses.replace(
+        plan, first_service_stop=FirstStopIntent.manual_choice(stop_id)
+    )
+    problem = build_problem(
+        plan=selected_plan, travel_matrix=demo_matrix(), first_stop_id=stop_id
+    )
+    optimized = optimize(problem)
+    matrix = problem.legs
+    user_evaluation = evaluate_order(
+        plan=selected_plan,
+        travel_matrix=matrix,
+        order=selected_plan.user_baseline_order(),
+    )
+    return RecommendationPreview(
+        selected_plan=selected_plan,
+        stop_id=stop_id,
+        evaluation=optimized.evaluation,
+        algorithm_evaluation=optimized.algorithm_evaluation,
+        user_evaluation=user_evaluation,
+        order=optimized.order,
+        seed_objective=optimized.local_search.seed_objective,
+        final_objective=optimized.local_search.final_objective,
+        accepted_moves=len(optimized.local_search.accepted_moves),
+        search_evaluations=optimized.local_search.evaluations,
+        screened_moves=optimized.local_search.screened_moves,
+        budget_exhausted=optimized.local_search.budget_exhausted,
+        route_fingerprint=route_fingerprint(selected_plan, optimized.order),
+    )
+
+
+def baseline_comparison(preview: RecommendationPreview) -> BaselineComparison:
+    """The three baselines of one previewed route (v2 section 30, D22)."""
+    return BaselineComparison(
+        user=preview.user_evaluation,
+        optimized=preview.evaluation,
+        algorithm=preview.algorithm_evaluation,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# sensitivity of the provisional objective (D31)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class WeightSensitivityRow:
+    """What the demo plan recommends at 04:00 under one waiting weight (D31).
+
+    The row is computed over the **complete-route** outcomes of that policy, so it shows the
+    sensitivity of the objective the product actually ranks with - not a leftover first-leg view.
+    """
+
+    waiting_weight: float
+    travel_weight: float
+    recommended_id: StopId | None
+    recommended_score: float
+    complete_duration: int
+    complete_waiting: int
+    tied_with_recommendation: int
+    note: str
 
 
 def weight_sensitivity(
     *,
+    plan: RoutePlan | None = None,
     ratios: tuple[float, ...] = WEIGHT_SENSITIVITY_RATIOS,
     travel_weight: float = DEMO_TRAVEL_TIME_WEIGHT,
 ) -> tuple[WeightSensitivityRow, ...]:
-    """Recommended stop at 04:00 for several waiting:travel ratios (the demo weights are provisional)."""
+    """The recommended first stop at 04:00 for several waiting weights (D31).
+
+    The demo weights are provisional, so the report shows what they do: each ratio re-ranks the
+    **same** complete routes under a policy ``travel_weight = 1``, ``waiting_time = ratio``. The
+    degenerate 1:1 case is included, and its row says how many candidates tie at the winning score
+    and which documented ranking key broke the tie, because the tie-break - not the objective -
+    decides the answer there. Nothing is tuned: the ratios are fixed inputs of the report, and the
+    payload plan is never mutated.
+    """
+    base_plan = build_demo_plan() if plan is None else plan
     rows: list[WeightSensitivityRow] = []
     for ratio in ratios:
         policy = demo_provisional_policy(
             travel_time_weight=travel_weight, waiting_time_weight=ratio
         )
-        report = evaluate(plan=build_demo_plan(cost_policy=policy), policy=policy)
-        recommended = report.recommended()
-        note = ""
-        if recommended is not None and ratio == travel_weight:
-            ties = [
-                evaluation
-                for evaluation in report.ranked
-                if abs(evaluation.score - recommended.score) < 1e-9
+        evaluated = demo_evaluation(dataclasses.replace(base_plan, cost_policy=policy))
+        recommended = evaluated.recommended()
+        ties = (
+            [
+                candidate
+                for candidate in evaluated.ranked
+                if abs(candidate.score - recommended.score) < 1e-9
             ]
+            if recommended is not None
+            else []
+        )
+        if recommended is None:
+            note = "no fully feasible complete route under this weight"
+        elif len(ties) > 1:
             note = (
-                f"degenerate: {len(ties)} candidates tie at {recommended.score:.0f}; the tie-break "
-                "(shortest first leg) hands the recommendation to the nearest stop"
+                f"DEGENERATE 1:1 case: {len(ties)} candidates tie at "
+                f"{recommended.score:.0f}; the documented ranking key (score, complete duration, "
+                "input_position, stop_id) breaks the tie"
             )
-        elif recommended is not None:
-            note = "waiting is penalised, so arriving close to opening is recommended"
+        else:
+            note = "waiting is penalised, so arriving near opening is recommended"
         rows.append(
             WeightSensitivityRow(
                 waiting_weight=ratio,
+                travel_weight=travel_weight,
                 recommended_id=recommended.stop_id if recommended else None,
                 recommended_score=recommended.score if recommended else 0.0,
+                complete_duration=(
+                    recommended.estimated_complete_route_duration if recommended else 0
+                ),
+                complete_waiting=recommended.complete_waiting_time if recommended else 0,
+                tied_with_recommendation=len(ties),
                 note=note,
             )
         )
     return tuple(rows)
 
 
-def window_end_policy_comparison() -> tuple[tuple[WindowEndPolicy, str, bool, str], ...]:
-    """The same stop, same window, both end policies (D29).
+# --------------------------------------------------------------------------- #
+# rejected candidates (v2 section 14, D9)
+# --------------------------------------------------------------------------- #
+def rejected_candidate_lines(report: FirstStopEvaluationReport) -> tuple[str, ...]:
+    """One line per rejected candidate: its own id and the stops that violate its complete route.
 
-    Returns rows of ``(policy, summary, feasible, violation_message)``.
+    Grouped **by candidate**, because that is the question a driver asks ("what went wrong when I
+    start there?"). Each rejected candidate carries its violating stop ids explicitly, so an
+    infeasible candidate is never presented as a valid route (v2 section 14).
     """
-    zone = tzdata.load_timezone(DEMO_TIMEZONE)
-    rows: list[tuple[WindowEndPolicy, str, bool, str]] = []
-    for policy in (
-        WindowEndPolicy.SERVICE_FINISH_BEFORE_END,
-        WindowEndPolicy.SERVICE_START_BEFORE_END,
-    ):
-        plan = build_demo_plan(window_end_policy=policy)
-        evaluation = evaluate(plan=plan).find(HEADLINE_STOP_IDS["edge_window"])
-        assert evaluation is not None
-        summary = (
-            f"travel {format_duration(evaluation.travel_time)}, "
-            f"ETA {_clock(evaluation.estimated_arrival, zone)}, "
-            f"window {_clock(evaluation.service_window_start, zone)}-"
-            f"{_clock(evaluation.service_window_end, zone)}, "
-            f"start {_clock(evaluation.service_start, zone)}, "
-            f"finish {_clock(evaluation.estimated_departure, zone)}, "
-            f"lateness {format_duration(evaluation.lateness)}, "
-            f"finish_overtime {format_duration(evaluation.finish_overtime)}"
+    lines: list[str] = []
+    for candidate in report.rejected:
+        reasons = report.reasons_for(candidate.stop_id)
+        violating = ", ".join(candidate.violating_stop_ids) or "-"
+        detail = "; ".join(reason.reason for reason in reasons) or (
+            "complete route violates a hard service window"
         )
-        message = evaluation.violation.message if evaluation.violation else ""
-        rows.append((policy, summary, evaluation.feasible, message))
-    return tuple(rows)
-
-
-@dataclass(frozen=True)
-class UnknownHoursRow:
-    """A stop with no fixed window, as travelled."""
-
-    stop_id: str
-    window_text: str
-    travel: int
-    score: float
-    rank: int | None
-
-
-@dataclass(frozen=True)
-class UnknownHoursDistortion:
-    """The same stop, same distance, with known hours vs with its hours unknown."""
-
-    stop_id: str
-    window_text: str
-    score_known: float
-    rank_known: int | None
-    travel: int
-    score_if_unknown: float
-    rank_if_unknown: int | None
-
-
-def stops_without_fixed_window() -> tuple[UnknownHoursRow, ...]:
-    """Every stop with unknown or unrestricted hours, with its cost and rank as travelled."""
-    plan = build_demo_plan()
-    report = evaluate(plan=plan)
-    rows: list[UnknownHoursRow] = []
-    for stop in plan.active_stops():
-        if stop.service_window.is_fixed:
-            continue
-        evaluation = report.find(stop.id)
-        assert evaluation is not None
-        rows.append(
-            UnknownHoursRow(
-                stop_id=stop.id,
-                window_text=stop.service_window.describe(),
-                travel=evaluation.travel_time,
-                score=evaluation.score,
-                rank=report.rank_of(stop.id),
-            )
+        lines.append(
+            f"REJECTED {candidate.stop_id:<22} complete duration "
+            f"{format_duration(candidate.estimated_complete_route_duration):>7}  "
+            f"violating stops: {violating}\n"
+            f"         {detail}"
         )
-    return tuple(rows)
+    return tuple(lines)
 
 
-def unknown_hours_distortion(*, stop_key: str = "nearest") -> UnknownHoursDistortion:
-    """Cost and rank of a stop with known hours vs the same stop with unknown hours.
+# --------------------------------------------------------------------------- #
+# the objective superlative: it must name the ranked set it is true of
+# --------------------------------------------------------------------------- #
+def objective_winner_sentence(report: FirstStopEvaluationReport) -> str:
+    """The "why the recommendation wins" claim, computed from the ranking it is about.
 
-    Removing the opening hours removes every reason to wait, so a nearby stop becomes the cheapest
-    candidate purely because nothing is known about it. This is the distortion the demo makes
-    visible: unknown hours must be resolved before a route is trusted (spec sections 7 and 16).
+    The objective is only defined over the **fully feasible ranked** candidates: a rejected
+    candidate is never ranked and its infeasible score is not comparable with a feasible one (v2
+    section 14, D9). So the superlative names that ranked set and the rejected count explicitly, and
+    it is derived from the report's own ``ranked``/``rejected`` sets - it cannot be read as ranking
+    an infeasible route, and it cannot go stale with the fixture.
+
+    The claimed minimum is **printed**, not merely asserted in prose: it is ``min`` of the ranked
+    candidates' scores, so a reader can check the claim against the ranking the sentence names
+    instead of having to take the word "lowest" on trust.
     """
-    plan = build_demo_plan()
-    report = evaluate(plan=plan)
-    stop_id = HEADLINE_STOP_IDS[stop_key]
-    known = report.find(stop_id)
-    assert known is not None
-
-    unknown_stop = dataclasses.replace(
-        plan.stop_by_id(stop_id), service_window=ServiceWindow.unknown()
-    )
-    unknown_plan = dataclasses.replace(
-        plan,
-        stops=tuple(
-            unknown_stop if existing.id == stop_id else existing for existing in plan.stops
-        ),
-    )
-    unknown_report = evaluate(plan=unknown_plan)
-    unknown = unknown_report.find(stop_id)
-    assert unknown is not None
-
-    return UnknownHoursDistortion(
-        stop_id=stop_id,
-        window_text=plan.stop_by_id(stop_id).service_window.describe(),
-        score_known=known.score,
-        rank_known=report.rank_of(stop_id),
-        travel=known.travel_time,
-        score_if_unknown=unknown.score,
-        rank_if_unknown=unknown_report.rank_of(stop_id),
+    lowest_ranked_score = min(candidate.score for candidate in report.ranked)
+    return (
+        f"- the lowest objective of the {len(report.ranked)} ranked fully feasible candidates "
+        f"is {lowest_ranked_score:.0f} "
+        f"({len(report.rejected)} of the {report.candidates_evaluated} evaluated are REJECTED, "
+        "never ranked and carry no comparable score)."
     )
 
 
 # --------------------------------------------------------------------------- #
-# report
+# the recorded ~100-stop benchmark
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class RecordedBenchmark:
+    """A previous, clearly labelled measurement of the ~100-stop exhaustive loop.
+
+    The report does **not** re-run the ~100-stop benchmark: it takes minutes, and pretending a
+    recorded figure is a live measurement would be exactly the kind of claim this project refuses.
+    The command is printed next to the numbers, with the machine note, so anyone can reproduce them
+    (v2 section 20, D34).
+    """
+
+    measured_on: str
+    stop_count: int
+    candidates: int
+    total_seconds: float
+    seconds_per_candidate: float
+    route_evaluations: int
+    accepted_moves: int
+    cache_hits: int
+    cache_misses: int
+    cache_entries: int
+    candidates_at_ceiling: int
+    accepted_interim_limit_sec: float
+    spec_target_met: bool
+
+
+#: The last measurement taken on this development machine with
+#: ``python tools/benchmark_optimizer.py --stop-count 100`` (2026-09-11). Wall-clock figures are
+#: machine-dependent; every other number is deterministic (the benchmark proves it by repeating
+#: the loop and comparing the counters).
+RECORDED_BENCHMARK = RecordedBenchmark(
+    measured_on="2026-09-11 (this development machine, `--stop-count 100`)",
+    stop_count=97,
+    candidates=97,
+    total_seconds=78.66,
+    seconds_per_candidate=0.811,
+    route_evaluations=1_940_000,
+    accepted_moves=97,
+    cache_hits=1_957_848,
+    cache_misses=0,
+    cache_entries=9_801,
+    candidates_at_ceiling=97,
+    accepted_interim_limit_sec=150.0,
+    spec_target_met=False,
+)
+
+
+# --------------------------------------------------------------------------- #
+# the measured runtimes of this report
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class EvaluationTimings:
+    """Wall-clock measurements taken by :func:`main` (machine-dependent, never part of the report).
+
+    ``demo_evaluation`` and each sweep row are memoized, so a timing is recorded only when that
+    evaluation was actually computed in this process.
+    """
+
+    demo_seconds: float | None
+    sweep_seconds: float | None
+
+
+# --------------------------------------------------------------------------- #
+# the report
 # --------------------------------------------------------------------------- #
 def _candidate_row(
     position: int | str,
-    evaluation: FirstLegCandidate,
+    candidate: FirstStopCandidate,
     zone: ZoneInfo,
     stop: RouteStop,
 ) -> str:
-    rank = f"{position:>3}"
     return (
-        f"{rank}  {evaluation.stop_id:<22} "
-        f"{format_duration(evaluation.travel_time):>7}  "
-        f"{_clock(evaluation.estimated_arrival, zone):>5}  "
-        f"{_window_text(stop):<14}  "
-        f"{format_duration(evaluation.waiting_time):>7}  "
-        f"{_clock(evaluation.service_start, zone):>5}  "
-        f"{_clock(evaluation.estimated_departure, zone):>5}  "
-        f"{'yes' if evaluation.feasible else 'NO':>3}  "
-        f"{evaluation.score:>10.0f}  "
-        f"{evaluation.component(CostComponent.TRAVEL_TIME):>9.0f}  "
-        f"{evaluation.component(CostComponent.WAITING_TIME):>9.0f}"
+        f"{position:>3}  {candidate.stop_id:<22} "
+        f"{format_duration(candidate.travel_time):>7}  "
+        f"{_clock(candidate.estimated_arrival, zone):>5}  "
+        f"{_window_text(stop):<15}  "
+        f"{format_duration(candidate.waiting_time):>7}  "
+        f"{_clock(candidate.estimated_service_start, zone):>5}  "
+        f"{format_duration(candidate.complete_travel_time):>7}  "
+        f"{format_duration(candidate.complete_waiting_time):>7}  "
+        f"{format_duration(candidate.total_service_time):>7}  "
+        f"{format_duration(candidate.estimated_complete_route_duration):>7}  "
+        f"{_clock(candidate.estimated_finish, zone):>6}  "
+        f"{_component(candidate, CostComponent.TRAVEL_TIME):>9.0f}  "
+        f"{_component(candidate, CostComponent.WAITING_TIME):>8.0f}  "
+        f"{candidate.score:>9.0f}"
     )
 
 
 def _candidate_header() -> str:
     return (
-        f"{'#':>3}  {'stop':<22} {'travel':>7}  {'ETA':>5}  {'window':<14}  "
-        f"{'wait':>7}  {'start':>5}  {'finish':>5}  {'fea':>3}  {'score':>10}  "
-        f"{'travel_c':>9}  {'wait_c':>9}"
+        f"{'#':>3}  {'stop':<22} {'1st leg':>7}  {'ETA':>5}  {'window':<15}  "
+        f"{'wait':>7}  {'start':>5}  {'c.trav':>7}  {'c.wait':>7}  {'c.svc':>7}  "
+        f"{'c.dur':>7}  {'FINISH':>6}  {'travel*w':>9}  {'wait*w':>8}  {'score':>9}"
     )
 
 
-def build_report() -> str:
-    """The complete deterministic demo report as text."""
-    zone = tzdata.load_timezone(DEMO_TIMEZONE)
-    plan = build_demo_plan()
-    matrix = demo_matrix()
-    report = evaluate(plan=plan)
-    lines: list[str] = []
+def _role_candidate(
+    report: FirstStopEvaluationReport, role: str
+) -> FirstStopCandidate | None:
+    return report.find(HEADLINE_STOP_IDS[role])
 
+
+def _candidate_complete_summary(
+    candidate: FirstStopCandidate, zone: ZoneInfo, rank: int | None, ranked_total: int
+) -> str:
+    rank_text = f"rank #{rank} of {ranked_total}" if rank else "REJECTED"
+    return (
+        f"{candidate.stop_id:<22} {rank_text:<15} "
+        f"first leg {format_duration(candidate.travel_time):>7} "
+        f"wait {format_duration(candidate.waiting_time):>7} | "
+        f"complete: travel {format_duration(candidate.complete_travel_time):>7} "
+        f"waiting {format_duration(candidate.complete_waiting_time):>7} "
+        f"service {format_duration(candidate.total_service_time):>7} "
+        f"duration {format_duration(candidate.estimated_complete_route_duration):>7} "
+        f"FINISH {_clock(candidate.estimated_finish, zone):>5} "
+        f"score {candidate.score:>9.0f}"
+    )
+
+
+def build_report(
+    *, plan: RoutePlan | None = None, timings: EvaluationTimings | None = None
+) -> str:
+    """The whole deterministic demo report as text.
+
+    ``plan`` defaults to the demo plan; passing another plan renders the same sections for it (which
+    is how the fully infeasible case is covered). ``timings`` only adds the two measured wall-clock
+    lines. Leaving it out keeps the output a pure function of the inputs, which is what the
+    determinism test compares.
+    """
+    zone = tzdata.load_timezone(DEMO_TIMEZONE)
+    plan = build_demo_plan() if plan is None else plan
+    report = demo_evaluation(plan)
     active = plan.active_stops()
     disabled = plan.disabled_stops()
     fixed_08 = [
-        stop for stop in active if stop.service_window.is_fixed and stop.service_window.describe().startswith("08:00")
+        stop
+        for stop in active
+        if stop.service_window.is_fixed
+        and stop.service_window.describe().startswith("08:00")
     ]
 
+    lines: list[str] = []
     lines.append(_SEPARATOR)
-    lines.append("RoutePilot demo scenario - DEMO / SYNTHETIC DATA")
+    lines.append("RoutePilot demo - COMPLETE-ROUTE first-stop recommendation - DEMO / SYNTHETIC DATA")
     lines.append(DEMO_WARNING)
     lines.append(DEMO_MATRIX_DISCLAIMER)
+    lines.append(
+        "Contract: PRODUCT_SPEC_v2 sections 12-15 (a complete route is START -> candidate -> "
+        "optimized remaining stops -> FINISH, FINISH leg included), 20 (exhaustive candidates), "
+        "25/30 (baselines), 33 (what the demo must prove), 35 (fingerprints); decisions D4/D32 "
+        "(recommendation is not selection), D22 (baselines), D29 (window end policy), D34 "
+        "(interim ~100-stop latency)."
+    )
     lines.append(_SEPARATOR)
     lines.append("")
-    lines.append(f"plan              : {plan.id}")
-    lines.append(f"time zone         : {plan.timezone} (service date {DEMO_SERVICE_DATE.isoformat()})")
+
+    # ---- plan ----------------------------------------------------------- #
+    lines.append("PLAN")
+    lines.append(f"  plan              : {plan.id}")
     lines.append(
-        f"departure         : {_clock(plan.departure_time, zone)} local "
+        f"  time zone         : {plan.timezone} (service date {DEMO_SERVICE_DATE.isoformat()})"
+    )
+    lines.append(
+        f"  departure         : {_clock(plan.departure_time, zone)} local "
         f"({plan.departure_time.isoformat()}) from {plan.departure.label}"
     )
-    lines.append(f"finish            : {plan.finish.label} (fixed, never reordered)")
     lines.append(
-        f"stops             : {len(plan.stops)} total, {len(active)} enabled, "
+        f"  START             : {plan.departure.label} - where driving begins, never a service "
+        "stop (I1)"
+    )
+    lines.append(
+        f"  FINISH            : {plan.finish.label} - fixed, never reordered, its leg IS part of "
+        "every complete route (I2, v2 section 15)"
+    )
+    lines.append(
+        f"  stops             : {len(plan.stops)} total, {len(active)} enabled, "
         f"{len(disabled)} disabled, {len(fixed_08)} opening at 08:00"
     )
     lines.append(
-        f"default service   : {format_duration(DEMO_DEFAULT_SERVICE_DURATION)} "
-        "(used when a stop's duration is unknown)"
+        f"  disabled stops    : {', '.join(str(stop.id) for stop in disabled) or '-'} "
+        "(excluded from optimization, never candidates - D20; they keep their input_position)"
     )
-    lines.append(f"window end policy : {plan.window_end_policy.value} (plan default, D29)")
     lines.append(
-        f"first stop        : {plan.first_stop_state.value} - the driver decides; nothing is "
-        "applied automatically (D4/D32)"
+        f"  default service   : {format_duration(DEMO_DEFAULT_SERVICE_DURATION)} per stop when a "
+        "stop has no duration of its own"
     )
-    lines.append(f"cost policy       : {_policy_text(plan.cost_policy)}")
-    lines.append("")
-
-    # ---- input route (the user's BEFORE order) ------------------------- #
-    lines.append(_SUBSEPARATOR)
-    lines.append("INPUT ROUTE - the order exactly as supplied by the user (the product's BEFORE)")
-    lines.append(_SUBSEPARATOR)
     lines.append(
-        f"{'pos':>3}  {'stop':<22} {'travel from depot':>17}  {'window':<14}  "
-        f"{'service':>7}  {'prio':>4}  {'state':<8}  address"
+        f"  window end policy : {plan.window_end_policy.value} (plan default, D29) - service must "
+        "FINISH before the closing time"
     )
-    for stop in plan.stops:
-        # `pos` is the stop's immutable input_position: the BEFORE baseline order (v2 section 30).
-        evaluation = report.find(stop.id)
-        travel = format_duration(evaluation.travel_time) if evaluation else "-"
-        duration = (
-            format_duration(stop.service_duration)
-            if stop.service_duration is not None
-            else f"default {format_duration(DEMO_DEFAULT_SERVICE_DURATION)}"
-        )
-        state = "enabled" if stop.enabled else "DISABLED"
-        lines.append(
-            f"{stop.input_position:>3}  {stop.id:<22} {travel:>17}  {_window_text(stop):<14}  "
-            f"{duration:>7}  "
-            f"{(stop.priority if stop.priority is not None else '-'):>4}  {state:<8}  "
-            f"{stop.raw_address}"
-        )
-    lines.append("")
-
-    # ---- notable timelines --------------------------------------------- #
-    lines.append(_SUBSEPARATOR)
-    lines.append("FIRST-LEG TIMELINE for notable stops (spec section 7 fields)")
-    lines.append(_SUBSEPARATOR)
     lines.append(
-        f"{'stop':<22} {'role':<22} {'travel':>7}  {'ETA':>5}  {'opens':>5}  "
-        f"{'wait':>7}  {'start':>5}  {'finish':>5}  {'feasible':<9} policy"
+        f"  first-stop state  : {plan.first_stop_state.value} - a recommendation is not a "
+        "selection; nothing is applied automatically (D4/D32/I5)"
     )
-    roles = {
-        HEADLINE_STOP_IDS["nearest"]: "nearest",
-        HEADLINE_STOP_IDS["far_before_opening"]: "far, arrives early",
-        HEADLINE_STOP_IDS["on_opening"]: "arrives at opening",
-        HEADLINE_STOP_IDS["farthest"]: "farthest",
-        HEADLINE_STOP_IDS["tight_window"]: "tight window",
-        HEADLINE_STOP_IDS["edge_window"]: "end-policy edge case",
-        HEADLINE_STOP_IDS["unknown_hours"]: "hours unknown",
-    }
-    for stop_id, role in roles.items():
-        evaluation = report.find(stop_id)
-        if evaluation is None:
-            continue
-        policy_label = (
-            evaluation.window_end_policy.value if evaluation.window_end_policy else "-"
-        )
-        lines.append(
-            f"{stop_id:<22} {role:<22} {format_duration(evaluation.travel_time):>7}  "
-            f"{_clock(evaluation.estimated_arrival, zone):>5}  "
-            f"{_clock(evaluation.service_window_start, zone):>5}  "
-            f"{format_duration(evaluation.waiting_time):>7}  "
-            f"{_clock(evaluation.service_start, zone):>5}  "
-            f"{_clock(evaluation.estimated_departure, zone):>5}  "
-            f"{'yes' if evaluation.feasible else 'NO':<9} {policy_label}"
-        )
-    lines.append("")
-
-    # ---- all candidates ------------------------------------------------- #
-    lines.append(_SUBSEPARATOR)
+    lines.append(f"  cost policy       : {_policy_text(plan.cost_policy)}")
     lines.append(
-        f"ALL CANDIDATE FIRST STOPS by cost ({len(report.ranked)} feasible, "
-        f"{len(report.infeasible)} infeasible; costs in seconds x weight)"
+        "  objective         : the configured policy over the COMPLETE route's measured "
+        "breakdown: travel_time x 1 + waiting_time x 2 (distance weight is 0; service time is "
+        "identical for every candidate, so it is reported, never scored)"
     )
-    lines.append(_SUBSEPARATOR)
-    lines.append(_candidate_header())
-    for position, evaluation in enumerate(report.ranked, start=1):
-        lines.append(
-            _candidate_row(position, evaluation, zone, plan.stop_by_id(evaluation.stop_id))
-        )
-    for evaluation in report.infeasible:
-        stop = plan.stop_by_id(evaluation.stop_id)
-        lines.append(_candidate_row("--", evaluation, zone, stop))
     lines.append("")
-    for evaluation in report.infeasible:
-        lines.append(f"INFEASIBLE  {evaluation.stop_id}: {evaluation.violation.message}")
-    if report.disabled_stop_ids:
+
+    # ---- status --------------------------------------------------------- #
+    lines.append("STATUS AND WORK")
+    lines.append(
+        f"  status            : {report.describe_status()}"
+    )
+    lines.append(
+        f"  candidate set     : {report.candidates_evaluated} evaluated = "
+        f"{len(report.ranked)} fully feasible (ranked) + {len(report.rejected)} rejected "
+        "(exhaustive: one optimizer run per enabled stop, no prefilter, no shortlist - v2 section "
+        "20, D34)"
+    )
+    lines.append(
+        f"  optimizer runs    : {report.optimizer_runs} (one complete-route optimization per "
+        "candidate)"
+    )
+    lines.append(
+        f"  leg cache         : {report.cache_stats.hits} hits, {report.cache_stats.misses} "
+        f"misses, {report.cache_stats.entries} entries "
+        f"({report.cache_stats.lookups} leg questions)"
+    )
+    lines.append(
+        f"  fingerprints      : recommendation {report.inputs_fingerprint} (decision-independent, "
+        "v2 section 7)"
+    )
+    if timings is not None:
+        demo_seconds = (
+            "not measured in this process (result memoized from an earlier call)"
+            if timings.demo_seconds is None
+            else f"{timings.demo_seconds:.2f}s"
+        )
+        sweep_seconds = (
+            "not measured in this process"
+            if timings.sweep_seconds is None
+            else f"{timings.sweep_seconds:.2f}s"
+        )
         lines.append(
-            "EXCLUDED    disabled stops never become candidates: "
-            + ", ".join(report.disabled_stop_ids)
+            f"  ~30-stop runtime  : exhaustive evaluation {demo_seconds} (v2 section 20 acceptable "
+            f"target <= {DEMO_EVALUATION_RUNTIME_BUDGET_SEC:.0f}s, reported not asserted); "
+            f"departure sweep {sweep_seconds}"
+        )
+        lines.append(
+            "                      MEASURED WALL CLOCK, machine-dependent - the only non-"
+            "deterministic lines in this report"
+        )
+    else:
+        lines.append(
+            "  ~30-stop runtime  : not measured in this call; run "
+            "`python -m demo.report` to measure it against the v2 section 20 acceptable target "
+            f"(<= {DEMO_EVALUATION_RUNTIME_BUDGET_SEC:.0f}s, reported not asserted)"
         )
     lines.append("")
 
-    # ---- top 5 ---------------------------------------------------------- #
-    lines.append(_SUBSEPARATOR)
-    lines.append("TOP 5 CANDIDATES (the answer to 'what are the candidate costs?')")
-    lines.append(_SUBSEPARATOR)
-    lines.append(_candidate_header())
-    for position, evaluation in enumerate(report.top(5), start=1):
-        lines.append(
-            _candidate_row(position, evaluation, zone, plan.stop_by_id(evaluation.stop_id))
-        )
-    lines.append("")
-
-    # ---- nearest / farthest / recommendation ---------------------------- #
+    # ---- the recommended first stop ------------------------------------- #
     recommended = report.recommended()
-    nearest = report.nearest()
-    farthest = report.farthest()
-    assert recommended is not None and nearest is not None and farthest is not None
-    lines.append(_SUBSEPARATOR)
-    lines.append("WHY THE RECOMMENDATION IS NEITHER THE NEAREST NOR THE FARTHEST")
-    lines.append(_SUBSEPARATOR)
-    for label, evaluation in (
+    lines.append("RECOMMENDED FIRST STOP")
+    if recommended is None:
+        lines.append(
+            f"  none: no candidate produced a fully feasible complete route "
+            f"(status {report.status.value}) - an infeasible candidate is never presented as a "
+            "valid route (v2 section 14)"
+        )
+        lines.append("")
+        lines.append("REJECTED / INFEASIBLE CANDIDATES (v2 section 14, D9)")
+        lines.extend(
+            rejected_candidate_lines(report)
+            or ["  none recorded, which cannot happen while the status is not 'recommended'"]
+        )
+        lines.append("")
+        lines.append("PERFORMANCE (v2 section 20, D34)")
+        lines.append(
+            f"{_performance_stop_count_line(active, disabled, plan)} : "
+            f"{report.candidates_evaluated} candidates, {report.optimizer_runs} optimizer runs, "
+            f"{report.cache_stats.lookups} leg questions "
+            f"({report.cache_stats.hits} hits / {report.cache_stats.misses} misses, "
+            f"{report.cache_stats.entries} entries)."
+        )
+        lines.append("")
+        return "\n".join(_closing_lines(lines, report))
+
+    recommended_stop = plan.stop_by_id(recommended.stop_id)
+    lines.append(
+        f"  stop              : "
+        f"{_candidate_complete_summary(recommended, zone, 1, len(report.ranked))}"
+    )
+    lines.append(
+        f"  address           : {recommended_stop.raw_address} ({_window_text(recommended_stop)})"
+    )
+    lines.append(
+        f"  first-leg detail  : travel {format_duration(recommended.travel_time)}, ETA "
+        f"{_clock(recommended.estimated_arrival, zone)}, opens "
+        f"{_clock(recommended.service_window_start, zone)}, waiting "
+        f"{format_duration(recommended.waiting_time)}, service start "
+        f"{_clock(recommended.estimated_service_start, zone)}"
+    )
+    lines.append(
+        "  objective          : travel_time "
+        f"{_component(recommended, CostComponent.TRAVEL_TIME):.0f} x 1 + waiting_time "
+        f"{_component(recommended, CostComponent.WAITING_TIME):.0f} x 2 = {recommended.score:.0f} "
+        "(provisional demo policy, D31)"
+    )
+    lines.append(
+        "  hard windows      : "
+        + (
+            "none violated - the complete route is fully feasible (v2 section 14)"
+            if recommended.feasible
+            else "VIOLATED at " + ", ".join(recommended.violating_stop_ids)
+        )
+    )
+    lines.append("")
+
+    # ---- top-K ---------------------------------------------------------- #
+    lines.append(
+        f"TOP {TOP_K} CANDIDATES BY COMPLETE ROUTE OUTCOME (v2 sections 12/13; the FINISH leg is "
+        "included in every c.* figure)"
+    )
+    lines.append(_candidate_header())
+    for position, candidate in enumerate(report.top(TOP_K), start=1):
+        lines.append(
+            _candidate_row(position, candidate, zone, plan.stop_by_id(candidate.stop_id))
+        )
+    lines.append(
+        "  ranking key       : (score, complete duration, input_position, stop_id) - deterministic, "
+        "so a tie cannot hand the recommendation to an arbitrary stop (v2 section 30, D33)"
+    )
+    lines.append("")
+
+    # ---- the recommendation's complete route ---------------------------- #
+    preview = recommendation_preview(plan, recommended.stop_id)
+    lines.append(
+        f"COMPLETE ROUTE THE RECOMMENDATION WOULD PRODUCE - {recommended.stop_id} "
+        "(PREVIEW ONLY: nothing is committed, the driver has not chosen - D4/D32)"
+    )
+    lines.append(
+        f"{'#':>3}  {'stop':<22} {'arrive':>6}  {'opens':>5}  {'wait':>7}  {'start':>5}  "
+        f"{'svc':>5}  {'depart':>6}  {'window':<15}  {'late':>5}"
+    )
+    for position, timeline in enumerate(preview.evaluation.timelines, start=1):
+        stop = plan.stop_by_id(timeline.stop_id)
+        lines.append(
+            f"{position:>3}  {timeline.stop_id:<22} "
+            f"{_clock(timeline.estimated_arrival, zone):>6}  "
+            f"{_clock(timeline.service_window_start, zone):>5}  "
+            f"{format_duration(timeline.waiting_time):>7}  "
+            f"{_clock(timeline.service_start, zone):>5}  "
+            f"{format_duration(timeline.service_duration):>5}  "
+            f"{_clock(timeline.estimated_departure, zone):>6}  "
+            f"{_window_text(stop):<15}  "
+            f"{format_duration(timeline.lateness):>5}"
+        )
+    lines.append(
+        f"    {'FINISH':<22} {_clock(preview.evaluation.metrics.finish_arrival, zone):>6}"
+        f"   complete duration "
+        f"{format_duration(preview.evaluation.metrics.duration_sec)}"
+    )
+    lines.append(
+        f"  complete route    : {len(preview.order)} stops, distance "
+        f"{_distance_km(preview.evaluation.metrics.distance_m)}, violations "
+        f"{len(preview.evaluation.violations)}"
+    )
+    lines.append("")
+
+    # ---- nearest / farthest / why --------------------------------------- #
+    nearest = _role_candidate(report, "nearest")
+    farthest = _role_candidate(report, "farthest")
+    lines.append(
+        "NEAREST vs FARTHEST vs THE RECOMMENDATION - COMPLETE OUTCOMES (v2 section 33)"
+    )
+    for label, candidate in (
         ("nearest      ", nearest),
         ("recommended  ", recommended),
         ("farthest     ", farthest),
     ):
-        rank = report.rank_of(evaluation.stop_id)
+        if candidate is None:  # pragma: no cover - the fixture always contains both roles
+            continue
         lines.append(
-            f"{label} {evaluation.stop_id:<22} rank #{rank:<3} "
-            f"travel {format_duration(evaluation.travel_time):>7}  "
-            f"wait {format_duration(evaluation.waiting_time):>7}  "
-            f"score {evaluation.score:>10.0f}"
+            f"  {label} "
+            f"{_candidate_complete_summary(candidate, zone, report.rank_of(candidate.stop_id), len(report.ranked))}"
         )
     lines.append("")
+    if nearest is not None and farthest is not None:
+        nearest_driving = complete_travel_rank(report, nearest.stop_id)
+        farthest_driving = complete_travel_rank(report, farthest.stop_id)
+        assert nearest_driving is not None and farthest_driving is not None
+        lines.append(
+            f"  why the recommendation wins : {recommended.stop_id} reaches the first customer "
+            f"after {format_duration(recommended.travel_time)} of driving and waits "
+            f"{format_duration(recommended.waiting_time)}; its complete route drives "
+            f"{format_duration(recommended.complete_travel_time)}, waits "
+            f"{format_duration(recommended.complete_waiting_time)} and finishes in "
+            f"{format_duration(recommended.estimated_complete_route_duration)} "
+            f"{objective_winner_sentence(report)}"
+        )
+        lines.append(
+            f"  why the nearest loses      : {nearest.stop_id} is only "
+            f"{format_duration(nearest.travel_time)} away and drives "
+            f"{format_duration(nearest.complete_travel_time)} on its complete route - the "
+            f"{_fewest(nearest_driving)}-least complete driving of the {nearest_driving.of} ranked "
+            f"candidates (least {format_duration(nearest_driving.minimum)}, most "
+            f"{format_duration(nearest_driving.maximum)}) - but starting there means waiting "
+            f"{format_duration(nearest.waiting_time)} before the customer opens, so the complete "
+            f"route waits {format_duration(nearest.complete_waiting_time)} and scores "
+            f"{nearest.score:.0f}. The nearest first leg is the cheapest and the complete route is "
+            "still one of the worst: complete-route quality decides, not the first leg."
+        )
+        if farthest.feasible:
+            lines.append(
+                f"  why the farthest loses      : {farthest.stop_id} is "
+                f"{format_duration(farthest.travel_time)} away and opens at "
+                f"{_clock(farthest.service_window_start, zone)}; arriving there costs "
+                f"{format_duration(farthest.waiting_time)} of waiting, its complete route drives "
+                f"{format_duration(farthest.complete_travel_time)} and waits "
+                f"{format_duration(farthest.complete_waiting_time)}, and it scores "
+                f"{farthest.score:.0f} - rank #{report.rank_of(farthest.stop_id)} of "
+                f"{len(report.ranked)}. Driving further is not automatically better either."
+            )
+        else:
+            lines.append(
+                f"  why the farthest loses      : {farthest.stop_id} is "
+                f"{format_duration(farthest.travel_time)} away and opens at "
+                f"{_clock(farthest.service_window_start, zone)}; its complete route could not be "
+                f"served inside the hard windows at all - it is REJECTED, never ranked, with "
+                f"violating stops {', '.join(farthest.violating_stop_ids) or '-'} (v2 section 14). "
+                "Driving further is not automatically better, and an infeasible route is never "
+                "presented as a valid one."
+            )
+        lines.append(
+            f"  why it is not intermediate : {recommended.stop_id} wins on the complete route it "
+            f"produces - {format_duration(recommended.estimated_complete_route_duration)} - not on "
+            f"its first leg: {nearest.stop_id} reaches a first customer after only "
+            f"{format_duration(nearest.travel_time)} of driving and still ranks "
+            f"#{report.rank_of(nearest.stop_id)}."
+        )
+        farthest_rank_text = (
+            f"#{report.rank_of(farthest.stop_id)}" if farthest.feasible else "REJECTED"
+        )
+        lines.append(
+            f"  ranks                       : recommended #1, nearest "
+            f"#{report.rank_of(nearest.stop_id)}, farthest "
+            f"{farthest_rank_text} of {len(report.ranked)} ranked candidates; farthest is "
+            f"{'ranked' if farthest.feasible else 'rejected'}."
+        )
     lines.append(
-        f"why it is recommended : it reaches the opening time with the least driving - "
-        f"{format_duration(recommended.travel_time)} of driving and "
-        f"{format_duration(recommended.waiting_time)} of waiting, total {recommended.score:.0f}."
-    )
-    lines.append(
-        f"why nearest loses     : the {format_duration(nearest.travel_time)} leg is cheap, but "
-        f"{format_duration(nearest.waiting_time)} of dead waiting costs "
-        f"{nearest.component(CostComponent.WAITING_TIME):.0f} units, so it totals "
-        f"{nearest.score:.0f} and ranks #{report.rank_of(nearest.stop_id)}."
-    )
-    lines.append(
-        f"why farthest loses    : {format_duration(farthest.travel_time)} of driving saves no "
-        f"waiting at all (it already arrives after opening), so it totals {farthest.score:.0f} - "
-        f"{farthest.score - recommended.score:.0f} more than the recommendation."
-    )
-    lines.append("")
-    lines.append(
-        "NOTE: these are recommendations only. Nothing is applied and no working route is "
+        "  NOTE: these are recommendations only. Nothing is applied and no working route is "
         "committed; the driver chooses the first service stop (D4/D32)."
     )
     lines.append("")
-    groups: dict[str, list[int]] = {}
-    for evaluation in report.ranked:
-        if evaluation.waiting_time <= 0:
-            continue
-        stop = plan.stop_by_id(evaluation.stop_id)
-        if not stop.service_window.is_fixed:
-            continue
-        opening = _window_text(stop).split("-", 1)[0]
-        groups.setdefault(opening, []).append(evaluation.travel_time + evaluation.waiting_time)
-    if groups:
+
+    # ---- baselines ------------------------------------------------------ #
+    baselines = baseline_comparison(preview)
+    lines.append("BASELINES (v2 section 30, D22)")
+    lines.append(
+        f"  {'route':<34} {'duration':>9}  {'distance':>9}  {'waiting':>8}  {'travel':>8}  "
+        f"{'service':>8}  {'FINISH':>6}  feasible"
+    )
+    rows = (
+        ("USER (input_position order)", baselines.user),
+        (f"OPTIMIZED (around {recommended.stop_id})", baselines.optimized),
+        ("ALGORITHM (greedy seed, internal)", baselines.algorithm),
+    )
+    for label, evaluation in rows:
+        metrics = evaluation.metrics
         lines.append(
-            "structural note: a candidate that arrives before its opening has travel + waiting "
-            "fixed by that opening:"
+            f"  {label:<34} {format_duration(metrics.duration_sec):>9}  "
+            f"{_distance_km(metrics.distance_m):>9}  "
+            f"{format_duration(metrics.waiting_sec):>8}  "
+            f"{format_duration(metrics.travel_sec):>8}  "
+            f"{format_duration(metrics.service_sec):>8}  "
+            f"{_clock(metrics.finish_arrival, zone):>6}  "
+            f"{'yes' if metrics.feasible else 'NO'}"
         )
-        for opening in sorted(groups):
-            totals = ", ".join(
-                format_duration(total) for total in sorted(set(groups[opening]))
-            )
-            lines.append(
-                f"  opening {opening}: {len(groups[opening])} candidate(s), "
-                f"travel + waiting = {totals}"
-            )
-        lines.append(
-            "So within one opening time the first leg alone cannot rank candidates at all, and at a "
-            "1:1 weight ratio they tie exactly."
-        )
-        lines.append(
-            "That is why spec section 8 requires candidate quality to include the route AFTER the "
-            "candidate, and why the demo weights are marked provisional."
-        )
+    lines.append(
+        f"  saved by optimizing : {format_duration(baselines.saved_time)} of working time, "
+        f"{_distance_km(baselines.saved_distance)} of driving, "
+        f"{format_duration(baselines.saved_waiting)} of waiting (the user's own order vs the "
+        f"optimized one - the product's BEFORE/AFTER, D22)"
+    )
+    lines.append(
+        f"  local search       : greedy seed objective "
+        f"{format_duration(preview.seed_objective)} -> final "
+        f"{format_duration(preview.final_objective)}; {preview.accepted_moves} accepted moves, "
+        f"{preview.search_evaluations} complete-route evaluations, "
+        f"{preview.screened_moves} moves screened, "
+        f"evaluation ceiling reached={preview.budget_exhausted}"
+    )
+    lines.append(
+        "  ALGORITHM is the greedy seed the optimizer started from. It is an internal quality "
+        "figure and is never shown as the driver's BEFORE route (D22)."
+    )
     lines.append("")
 
     # ---- departure sweep ------------------------------------------------ #
-    lines.append(_SUBSEPARATOR)
-    lines.append("EFFECT OF CHANGING DEPARTURE TIME")
-    lines.append(_SUBSEPARATOR)
+    lines.append("DEPARTURE-TIME SWEEP - THE RECOMMENDATION CHANGES WITH THE DEPARTURE (v2 section 33)")
     lines.append(
-        f"{'departure':<10} {'recommended':<22} {'travel':>7}  {'wait':>7}  {'score':>10}  "
-        f"{'runner-up':<22} {'score':>10}  note"
+        f"  {'departure':<10} {'status':<12} {'recommended':<22} {'first leg':>9}  "
+        f"{'complete':>8}  {'waiting':>8}  {'ranked':>6}  {'rejected':>8}  note"
     )
-    for outcome in departure_sweep():
+    sweep_outcomes = departure_sweep(plan=plan)
+    for outcome in sweep_outcomes:
         lines.append(
-            f"{outcome.local_hour:02d}:00      {str(outcome.recommended_id):<22} "
-            f"{format_duration(outcome.recommended_travel):>7}  "
-            f"{format_duration(outcome.recommended_wait):>7}  "
-            f"{outcome.recommended_score:>10.0f}  "
-            f"{str(outcome.runner_up_id):<22} "
-            f"{(outcome.runner_up_score if outcome.runner_up_score is not None else 0):>10.0f}  "
-            f"{outcome.recommended_note}"
+            f"  {outcome.local_hour:02d}:00      {outcome.status:<12} "
+            f"{str(outcome.recommended_id or '-'):<22} "
+            f"{(format_duration(outcome.first_leg) if outcome.first_leg is not None else '-'):>9}  "
+            f"{(format_duration(outcome.complete_duration) if outcome.complete_duration is not None else '-'):>8}  "
+            f"{(format_duration(outcome.complete_waiting) if outcome.complete_waiting is not None else '-'):>8}  "
+            f"{outcome.ranked:>6}  {outcome.rejected:>8}  {outcome.note}"
+        )
+    sweep_ids = [str(outcome.recommended_id) for outcome in sweep_outcomes]
+    sweep_pairs = ", ".join(
+        f"{outcome.local_hour:02d}:00 -> {stop_id}"
+        for outcome, stop_id in zip(sweep_outcomes, sweep_ids)
+    )
+    lines.append(
+        f"  The same {len(active)} customers, the same day: leaving later replaces pre-opening "
+        "driving with waiting, so the strongest complete route moves to a first stop closer to the "
+        f"depot for hours the gap still contains - {sweep_pairs}. Nothing is selected at any hour "
+        "(D4/D32)."
+    )
+    lines.append("")
+
+    # ---- fingerprints --------------------------------------------------- #
+    second_stop_id = next(
+        (
+            candidate.stop_id
+            for candidate in report.ranked
+            if candidate.stop_id != recommended.stop_id
+        ),
+        recommended.stop_id,
+    )
+    second_preview = recommendation_preview(plan, second_stop_id)
+    lines.append("FINGERPRINTS (v2 section 7, v2 section 35, D4/D33)")
+    lines.append(
+        f"  recommendation fingerprint (plan.inputs_fingerprint)      : "
+        f"{report.inputs_fingerprint}"
+    )
+    lines.append(
+        "    unchanged by the driver's choice: it covers the recommendation inputs (departure, "
+        "stops, windows, durations, priorities, finish, cost policy, timezone data), never the "
+        "selected first stop - so accepting a recommendation cannot make it look stale."
+    )
+    lines.append(
+        f"  same fingerprint after selecting {recommended.stop_id:<22}: "
+        f"{preview.selected_plan.inputs_fingerprint()}"
+    )
+    lines.append(
+        f"  route fingerprint, first stop {recommended.stop_id:<22}: {preview.route_fingerprint}"
+    )
+    lines.append(
+        f"  route fingerprint, first stop {second_stop_id:<22}: {second_preview.route_fingerprint}"
+    )
+    lines.append(
+        "  The committed route has its own fingerprint because it depends on the selected first "
+        "stop and on the route order; the recommendation fingerprint deliberately does not "
+        "(v2 section 7)."
+    )
+    lines.append("")
+
+    # ---- rejected candidates -------------------------------------------- #
+    lines.append("REJECTED / INFEASIBLE CANDIDATES (v2 section 14, D9)")
+    rejected_lines = rejected_candidate_lines(report)
+    if rejected_lines:
+        lines.append(
+            f"  {len(report.rejected)} of {report.candidates_evaluated} candidates have an "
+            "infeasible complete route. Grouped by candidate, each with the stop ids that violate "
+            "and the explicit reason; never ranked and never presented as a valid route (v2 "
+            "section 14, D13 amendment)."
+        )
+        lines.extend(rejected_lines)
+    else:
+        lines.append(
+            f"  none: all {report.candidates_evaluated} enabled stops produced a fully feasible "
+            "complete route, so the ranking above is the full ranking."
+        )
+        lines.append(
+            "  Hard infeasibility stays explicit and first-class (D13 amendment): a candidate whose "
+            "complete route missed a hard service window would be listed here, grouped by "
+            "candidate, with the violating stop ids and the reason, and never ranked or labelled a "
+            "valid route."
         )
     lines.append("")
 
-    # ---- weight sensitivity --------------------------------------------- #
-    lines.append(_SUBSEPARATOR)
-    lines.append("SENSITIVITY TO THE PROVISIONAL WAITING WEIGHT (departure 04:00)")
-    lines.append(_SUBSEPARATOR)
-    lines.append(f"{'wait/travel':>11}  {'recommended':<22} {'score':>10}  note")
-    for row in weight_sensitivity():
+    # ---- weight sensitivity (D31) --------------------------------------- #
+    lines.append(
+        "SENSITIVITY TO THE PROVISIONAL WAITING WEIGHT - COMPLETE-ROUTE OUTCOMES (D31)"
+    )
+    lines.append(
+        f"  {'wait w':>6}  {'recommended':<22} {'objective':>10}  {'complete':>8}  "
+        f"{'waiting':>8}  {'tied':>5}  note"
+    )
+    for sensitivity_row in weight_sensitivity(plan=plan):
         lines.append(
-            f"{row.waiting_weight:>11.2f}  {str(row.recommended_id):<22} "
-            f"{row.recommended_score:>10.0f}  {row.note}"
+            f"  {sensitivity_row.waiting_weight:>6.1f}  "
+            f"{str(sensitivity_row.recommended_id or '-'):<22} "
+            f"{sensitivity_row.recommended_score:>10.0f}  "
+            f"{format_duration(sensitivity_row.complete_duration):>8}  "
+            f"{format_duration(sensitivity_row.complete_waiting):>8}  "
+            f"{sensitivity_row.tied_with_recommendation:>5}  {sensitivity_row.note}"
         )
-    lines.append("")
-
-    # ---- window end policy ---------------------------------------------- #
-    lines.append(_SUBSEPARATOR)
     lines.append(
-        "WINDOW END POLICY (D29) - same stop, same window, different meaning of 'closes at'"
-    )
-    lines.append(_SUBSEPARATOR)
-    edge_stop = plan.stop_by_id(HEADLINE_STOP_IDS["edge_window"])
-    lines.append(f"stop {edge_stop.id}: window {_window_text(edge_stop)}, service 20m")
-    for policy, summary, feasible, message in window_end_policy_comparison():
-        lines.append(f"  {policy.value:<26} feasible={'yes' if feasible else 'NO':<4} {summary}")
-        if message:
-            lines.append(f"  {'':<26} {message}")
-    lines.append("")
-
-    # ---- unknown hours caveat ------------------------------------------- #
-    lines.append(_SUBSEPARATOR)
-    lines.append("DATA-QUALITY CAVEAT: what unknown business hours do to the objective")
-    lines.append(_SUBSEPARATOR)
-    lines.append(
-        "Stops with no fixed window are candidates too; nothing is invented for them, so they "
-        "price as travel only:"
-    )
-    lines.append(f"{'stop':<24} {'window':<20} {'travel':>7}  {'score':>10}  {'rank':>5}")
-    for row in stops_without_fixed_window():
-        rank_text = f"#{row.rank}" if row.rank is not None else "infeasible"
-        lines.append(
-            f"{row.stop_id:<24} {row.window_text:<20} {format_duration(row.travel):>7}  "
-            f"{row.score:>10.0f}  {rank_text:>5}"
-        )
-    distortion = unknown_hours_distortion()
-    lines.append("")
-    lines.append(
-        f"distortion check - the same stop ({distortion.stop_id}, "
-        f"{format_duration(distortion.travel)} from the depot), only its hours differ:"
-    )
-    lines.append(
-        f"  hours {distortion.window_text:<16} -> score {distortion.score_known:>10.0f}, "
-        f"rank #{distortion.rank_known}"
-    )
-    lines.append(
-        f"  hours {'unknown':<16} -> score {distortion.score_if_unknown:>10.0f}, "
-        f"rank #{distortion.rank_if_unknown}"
-    )
-    lines.append(
-        "Knowing nothing about a stop makes it look cheaper than every stop with hours, because "
-        "there is no opening to wait for."
-    )
-    lines.append(
-        "Unknown hours must be resolved before a route is trusted (spec sections 7 and 16)."
+        "  PROVISIONAL WEIGHTS, NOT PRODUCT TRUTH (D31): travel_time stays 1 and only waiting_time "
+        "changes, over the same complete routes and the same exhaustive candidate set. No weight was "
+        "tuned to produce a winner, and each row is a recommendation only."
     )
     lines.append("")
 
-    # ---- determinism ----------------------------------------------------- #
-    lines.append(_SUBSEPARATOR)
+    # ---- performance ---------------------------------------------------- #
+    lines.append("PERFORMANCE (v2 section 20, D34)")
+    lines.append(
+        f"{_performance_stop_count_line(active, disabled, plan)} : "
+        f"{report.candidates_evaluated} candidates, {report.optimizer_runs} optimizer runs, "
+        f"{report.cache_stats.lookups} leg questions "
+        f"({report.cache_stats.hits} hits / {report.cache_stats.misses} misses, "
+        f"{report.cache_stats.entries} entries)."
+    )
+    lines.append(
+        "  measured runtime   : printed in the STATUS AND WORK section when the caller measures it "
+        f"(`python -m demo.report`). v2 section 20's acceptable target for ~100 stops is "
+        f"<= {DEMO_EVALUATION_RUNTIME_BUDGET_SEC:.0f}s; that is an engineering target, not a "
+        "correctness rule."
+    )
+    benchmark = RECORDED_BENCHMARK
+    lines.append(
+        f"  ~100-stop benchmark: RECORDED measurement ({benchmark.measured_on}), not a live run of "
+        f"this report. Reproduce it with `{BENCHMARK_COMMAND}`."
+    )
+    lines.append(
+        f"    stops {benchmark.stop_count} enabled -> candidates {benchmark.candidates}, "
+        f"{benchmark.candidates_at_ceiling} truncated by the per-candidate evaluation ceiling; "
+        f"warm exhaustive loop {benchmark.total_seconds:.2f}s "
+        f"({benchmark.seconds_per_candidate * 1000:.0f}ms per candidate), "
+        f"{benchmark.route_evaluations} route evaluations, {benchmark.accepted_moves} accepted "
+        f"moves, leg cache {benchmark.cache_hits} hits / {benchmark.cache_misses} misses / "
+        f"{benchmark.cache_entries} entries."
+    )
+    lines.append(
+        f"    The v2 section 20 <= {DEMO_EVALUATION_RUNTIME_BUDGET_SEC:.0f}s target is "
+        f"{'met' if benchmark.spec_target_met else 'NOT met'} at that scale; the owner accepted the "
+        f"measured latency as an interim limitation (D34) with an asserted regression guard of "
+        f"{benchmark.accepted_interim_limit_sec:.0f}s, and the candidate set stays exhaustive - no "
+        "prefilter, no weight tuning, no neighbourhood cut."
+    )
+    lines.append("")
+
+    return "\n".join(_closing_lines(lines, report))
+
+
+def _closing_lines(lines: list[str], report: FirstStopEvaluationReport) -> list[str]:
     lines.append("DETERMINISM")
-    lines.append(_SUBSEPARATOR)
-    lines.append(f"inputs_fingerprint : {report.inputs_fingerprint}")
     lines.append(
-        "Identical inputs give an identical ranking, score and fingerprint; the tie-break is "
-        "(score, travel_time, stop_id) on this first-leg view."
+        "  Identical plan + synthetic matrix + cost policy print an identical report: no "
+        "wall-clock, no randomness and no network enter the numbers. The only machine-dependent "
+        "lines are the measured runtimes, which are clearly marked and only present when measured."
     )
     lines.append(
-        "NOTE: the recommendation engine itself ranks COMPLETE route outcomes "
-        "(START -> candidate -> optimized remaining stops -> FINISH, v2 sections 12-14), and a "
-        "candidate whose complete route misses a hard window is never ranked. This report still "
-        "narrates the Stage 1 first-leg view; refreshing that narrative is a later unit."
+        f"  Ranking is exhaustive and deterministic: {report.ranked_ids()[:3]}... "
+        f"({len(report.ranked)} ranked candidates), key (score, complete duration, input_position, "
+        "stop_id)."
     )
     lines.append(_SEPARATOR)
-    return "\n".join(lines)
+    return lines
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -911,7 +1301,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(
         prog="demo.report",
-        description="Print the RoutePilot demo scenario with candidate costs.",
+        description=(
+            "Print the RoutePilot demo scenario with complete-route first-stop recommendations."
+        ),
     )
     parser.add_argument(
         "--allow-system-tzdata",
@@ -933,7 +1325,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
 
-    print(build_report())
+    import time as timer
+
+    started = timer.perf_counter()
+    demo_evaluation(build_demo_plan())
+    demo_seconds = timer.perf_counter() - started
+
+    started = timer.perf_counter()
+    departure_sweep()
+    sweep_seconds = timer.perf_counter() - started
+
+    print(
+        build_report(
+            timings=EvaluationTimings(
+                demo_seconds=demo_seconds, sweep_seconds=sweep_seconds
+            )
+        )
+    )
     return 0
 
 

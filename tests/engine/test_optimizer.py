@@ -1060,13 +1060,13 @@ class SolveRouteTests(unittest.TestCase):
 
         solution = solve_route(plan=plan, travel_matrix=matrix)
 
-        self.assertEqual(len(solution.order), 30)
+        self.assertEqual(len(solution.order), len(plan.active_stops()))
         self.assertEqual(solution.order[0], StopId(selected))
         self.assertEqual(
             sorted(solution.order), sorted(some_stop.id for some_stop in plan.active_stops())
         )
         self.assertNotIn(StopId(HEADLINE_STOP_IDS["disabled"]), solution.order)
-        self.assertEqual(len(solution.timelines), 30)
+        self.assertEqual(len(solution.timelines), len(plan.active_stops()))
         self.assertIsNotNone(solution.user_baseline)
         self.assertIsNotNone(solution.algorithm_baseline)
         self.assertIs(solution.user_baseline.baseline_kind, BaselineKind.USER_SUPPLIED)
@@ -1131,7 +1131,7 @@ class SolveRouteTests(unittest.TestCase):
 
 
 class DeterminismAndScaleTests(unittest.TestCase):
-    """Repeated runs agree exactly; the 30-stop demo plan has a measured duration."""
+    """Repeated runs agree exactly; the demo plan (31 enabled stops of 32) has a measured duration."""
 
     def test_optimize_is_deterministic_across_repeated_runs(self) -> None:
         plan = chaos_plan()
@@ -1176,16 +1176,18 @@ class DeterminismAndScaleTests(unittest.TestCase):
         result = optimize(problem)
         elapsed = timer.perf_counter() - started
 
-        self.assertEqual(len(result.order), 30)
+        # The demo plan ("~30 stops") is 31 enabled stops in the current calibration, so this
+        # asserts the plan's own shape rather than a hard-coded count.
+        self.assertEqual(len(result.order), len(plan.active_stops()))
         self.assertEqual(result.order[0], StopId("S05-FARTHEST"))
         print(
-            f"[benchmark] 30-stop optimize: {elapsed:.3f}s, "
+            f"[benchmark] {len(plan.active_stops())}-stop demo optimize: {elapsed:.3f}s, "
             f"{result.local_search.evaluations} route evaluations, "
             f"{len(result.local_search.accepted_moves)} accepted moves, "
             f"{result.cache_stats.describe()}",
             file=sys.stderr,
         )
-        self.assertLess(elapsed, 120.0, "a 30-stop optimize must stay an interactive operation")
+        self.assertLess(elapsed, 120.0, "a full demo-plan optimize must stay an interactive operation")
 
     def test_problem_requires_an_enabled_selected_first_stop(self) -> None:
         plan = simple_plan()
@@ -1199,7 +1201,7 @@ class DeterminismAndScaleTests(unittest.TestCase):
 
 
 def _demo_plan_with_selected_first_stop(stop_id: str):
-    """The deterministic 30-stop demo plan with an explicit driver selection (D32)."""
+    """The deterministic demo plan (31 enabled stops of 32) with an explicit driver selection (D32)."""
     return dataclasses.replace(
         build_demo_plan(), first_service_stop=FirstStopIntent.manual_choice(stop_id)
     )

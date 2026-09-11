@@ -249,9 +249,21 @@ class DatasetMeasurement:
 def _measure_pass(plan: RoutePlan, matrix, cache: LegCache) -> OptimizerLoopMeasurement:
     """One exhaustive pass over every eligible first-stop candidate, on a shared leg cache.
 
-    Every candidate gets its own prepared :class:`RouteProblem` - a different driver-selected
-    first stop is a different problem - but all of them share the one leg cache and the base
-    problem's frozen travel table, so the legs the matrix already answered are never asked again.
+    What is shared and what is rebuilt, stated exactly (U4 review; corrected claim, not a silent
+    one). **Shared across the candidates:** the one :class:`~core.engine.optimizer.cache.LegCache`
+    passed in - every leg is priced once, so the measured pass asks the matrix nothing the warm-up
+    did not already answer - and the process-wide timezone-resolution memo
+    ``core.engine.optimizer.route_problem._resolve_local_cached``. **Rebuilt per candidate:**
+    :func:`~core.engine.optimizer.route_problem.build_problem` builds a **fresh**
+    :class:`~core.engine.optimizer.route_problem.RouteProblem` for every candidate (a different
+    driver-selected first stop is a different problem), so its prepared tables - the frozen
+    STOP/FINISH travel and distance snapshots, the per-stop input positions and the precomputed
+    service-window table - are prepared again for each candidate. The earlier wording here claimed
+    the candidates shared "the base problem's frozen travel table"; they do not, and nothing in the
+    loop depends on it (U4 review). The measured cost of that rebuild on the 32-stop demo plan (31
+    enabled stops, 1 disabled) is
+    documented in :func:`core.engine.first_stop.evaluation.evaluate_first_stop_candidates`.
+
     That is what a real caller evaluating every candidate does (v2 section 20: the bound applies
     "after the travel matrix already exists").
 
@@ -380,7 +392,9 @@ def format_report(measurements: Sequence[DatasetMeasurement]) -> str:
         "stops); decision D34 (owner-accepted interim ~100-stop latency, no approximation).",
         f"Provenance: {SCALE_WARNING}",
         "Method: two exhaustive passes over one shared leg cache; the first warms every leg, "
-        "the second is measured ('after the travel matrix already exists').",
+        "the second is measured ('after the travel matrix already exists'). Each candidate still "
+        "gets its own freshly prepared problem; only the leg cache and the process-wide timezone "
+        "memo are shared (see _measure_pass).",
         "Claims kept apart: the candidate set is exhaustive (every enabled stop, no prefilter); "
         "each candidate's search is the full U2 neighbourhood with a deterministic evaluation "
         "ceiling, and the runs it truncated are counted above.",
@@ -411,7 +425,13 @@ def format_report(measurements: Sequence[DatasetMeasurement]) -> str:
 
 
 def _datasets(stop_count: int, *, include_scale: bool, include_demo: bool):
-    """The benchmark's datasets: the scale fixture and/or the ~30-stop demo plan."""
+    """The benchmark's datasets: the scale fixture and/or the ~30-stop demo plan.
+
+    The demo label's counts are read from the demo plan object itself, in the same
+    "31 enabled stops (32 stops, 1 disabled)" shape the demo report prints, so the printed label
+    cannot drift away from the plan it names (see
+    :mod:`tests.tools.test_benchmark_optimizer_labels`).
+    """
     if include_scale:
         yield (
             f"scale fixture, {stop_count} stops (DEMO/SYNTHETIC)",
@@ -420,9 +440,18 @@ def _datasets(stop_count: int, *, include_scale: bool, include_demo: bool):
             "deterministic synthetic benchmark fixture of demo/scale_dataset.py",
         )
     if include_demo:
+        demo_plan = build_demo_plan()
+        # The label is rendered from the plan object's own counts (enabled / total / disabled) in
+        # the same shape the demo report prints, so it cannot disagree with the plan it names. The
+        # plan's scale is the approximate "~30 stops" the spec vocabulary uses, but the printed
+        # count is exact.
+        enabled = len(demo_plan.active_stops())
+        total = len(demo_plan.stops)
+        disabled = len(demo_plan.disabled_stops())
         yield (
-            "demo plan, 30 enabled stops (DEMO/SYNTHETIC)",
-            build_demo_plan(),
+            f"demo plan, {enabled} enabled stops ({total} stops, {disabled} disabled) "
+            "(DEMO/SYNTHETIC)",
+            demo_plan,
             demo_matrix(),
             "deterministic demo plan of demo/dataset.py",
         )
