@@ -1,7 +1,11 @@
-# RoutePilot — Storage Schema (PROPOSAL ONLY)
+# RoutePilot — Storage Schema (APPROVED)
 
-> **Status: proposal, refined during Stage 1.** Per D14, **no SQLite code may be written until this
-> document is reviewed and explicitly approved.** Nothing here is implemented.
+> **Status: APPROVED by the owner on 2026-09-11 as the Stage 3 implementation schema.** Stage 3
+> (persistent storage, SQLite repositories) is authorized under D38, and this schema is the
+> implementation target for Stage 3 units **U9–U12** (U9 storage skeleton + migrations + schema;
+> U10 plan & stop persistence with exact round-trip; U11 immutable run history + settings; U12
+> end-to-end round-trip demo + documentation). The document was refined during Stage 1 and approved
+> as written; its technical content is unchanged by the approval.
 
 Target: SQLite, stdlib `sqlite3` (no ORM). Storage lives in `storage/` and depends on `core/`;
 `core/` never imports storage. Repository interfaces are defined as Protocols in `core/` and
@@ -224,9 +228,9 @@ Proposed Protocols in `core/` (implemented in `storage/sqlite/`):
 - `RouteOptimizationRunRepository`: `append(run)`, `list_for_plan(plan_id)`, `latest(plan_id)`
 - `AppSettingsRepository`: `get(key)`, `set(key, value)`
 
-Save/load must round-trip a plan exactly (`RoutePlan == loaded RoutePlan`) — spec §27.21. Loading is
-where the domain re-validates every value object, so a hand-edited database fails loudly instead of
-producing a half-valid plan.
+Save/load must round-trip a plan exactly (`RoutePlan == loaded RoutePlan`) — Product Spec v2 section
+36 ("SQLite round-trip once storage is implemented"). Loading is where the domain re-validates every
+value object, so a hand-edited database fails loudly instead of producing a half-valid plan.
 
 ## 8. Deliberately not stored
 
@@ -241,18 +245,27 @@ producing a half-valid plan.
 
 1. ~~**Order overrides**: normalized table vs JSON.~~ **Resolved (D30):** versioned JSON envelope
    now; a normalized table only when drag/reorder and position constraints actually appear.
-2. **Timeline snapshot for audit**: store per-run timelines (JSON) or rely on recomputation with the
+2. ~~**Timeline snapshot for audit**: store per-run timelines (JSON) or rely on recomputation with the
    run's `inputs_fingerprint` + `cost_policy_json` + `tzdata_version`? Proposal: recompute; add a
-   snapshot only if audit requirements demand it.
+   snapshot only if audit requirements demand it.~~ **Resolved by the owner on 2026-09-11:
+   RECOMPUTE.** Complete derived timelines are **never** persisted. The authoritative reproducibility
+   metadata that **is** persisted is the inputs fingerprint, the route fingerprint,
+   `cost_policy_json`, the timezone/tzdata metadata, and the stored route/result metrics the approved
+   schema requires; derived timelines may be recomputed from those stored authoritative inputs
+   (D38).
 3. **Multi-plan / multi-driver future**: `driver_id`, `vehicle_id`, org scoping — out of scope now,
    but the plan table should not need restructuring to add them.
 4. **Settings scope**: global `app_settings` now; per-user/per-organization later.
-5. **Retention**: how many optimization runs to keep per plan (proposal: keep all in the demo, add a
-   retention policy when real volumes appear).
+5. ~~**Retention**: how many optimization runs to keep per plan (proposal: keep all in the demo, add a
+   retention policy when real volumes appear).~~ **Resolved by the owner on 2026-09-11: KEEP ALL
+   RUNS** for the portfolio/demo MVP. There is no retention policy and no automatic cleanup; the
+   question is revisited only when real usage/volume exists (D38).
 
 ## 10. Implementation status
 
-This document is a **design proposal only**. Per D14, no SQLite code exists and none will be written
-until this schema is explicitly approved. The Stage 1 refinements recorded above — the window end
-policy on the plan and per stop (D29) and the versioned order-override envelope (D30) — are part of
-the proposal, not of an implementation.
+This schema was **APPROVED by the owner on 2026-09-11 as the Stage 3 implementation schema**, and
+Stage 3 (persistent storage, SQLite repositories) is **authorized under D38** and executes as units
+U8–U12; this schema is the implementation target of units U9–U12. The Stage 1 refinements recorded
+above — the window end policy on the plan and per stop (D29) and the versioned order-override
+envelope (D30) — were added as part of the proposal and are carried into the approved schema
+unchanged. Approval authorizes the implementation; the code itself is written by units U9–U12.

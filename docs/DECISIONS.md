@@ -7,14 +7,16 @@ and unchanged. Precedence (v2 section 37): the current specification plus explic
 decisions in this registry control future implementation; this registry records *how* we decided to
 do it.
 
-- Registry revision: **D1–D37**, approved 2026-09-11 (Stage 0, extended during Stage 1; D4–D11
+- Registry revision: **D1–D38**, approved 2026-09-11 (Stage 0, extended during Stage 1; D4–D11
   amended when the AUTO semantics were revoked; D5/D9/D16 aligned with v2 sections 5, 14 and 23;
   D33 added for `input_position`; D34 records the owner-accepted interim ~100-stop latency and is
   amended by D36, which moves the performance target to ~50 enabled stops; D35 settles the default
   SMART_ROUTE objective as the complete elapsed route duration with the owner's deterministic 5-key
   ranking, and supersedes D31 for the default; D36 records the owner's Stage 2.1 scale decision;
   D37 records the owner's Stage 2.2 sections 1–6 authorization of the bounded exact
-  incremental-evaluation performance follow-up that landed as U7).
+  incremental-evaluation performance follow-up that landed as U7; D38 records the owner's approval of
+  `docs/STORAGE_SCHEMA.md` as the Stage 3 implementation schema and the Stage 3 authorization as units
+  U8–U12, and amends D14).
 - Status values: `approved` (settled), `amended` (settled with a recorded change), `deferred` (recorded, not implemented).
 
 ---
@@ -199,14 +201,22 @@ do it.
 
 ## D14 — Storage
 
+> **Amended 2026-09-11 (D38): the schema is APPROVED and storage implementation is AUTHORIZED.**
+> `docs/STORAGE_SCHEMA.md` is approved as the Stage 3 implementation schema, and Stage 3
+> (persistent storage, SQLite repositories) is authorized as units U8–U12. The bullets below stay in
+> force; only the "deferred / no SQLite code exists yet" wording is amended by this note.
+
 - SQLite for the initial version.
 - Entities to plan for: route plans, route stops, route optimization runs, application settings.
 - The exact schema is **proposed before implementation** and implemented only after approval.
 - Storage code never leaks into optimization logic; `core/` never imports storage.
-- Storage implementation is **deferred**: the schema refinements of D29 (window end policy on the
-  plan and per stop) and D30 (versioned order-override JSON) are recorded in the proposal, but no
-  SQLite code exists yet.
-- Status: `approved` (proposal reviewed and refined; implementation still deferred). Spec: §26.
+- Storage implementation **was deferred until the schema was approved**: the schema refinements of
+  D29 (window end policy on the plan and per stop) and D30 (versioned order-override JSON) were
+  recorded in the proposal while no SQLite code existed. **Amended 2026-09-11 (D38):** the schema is
+  now approved and implementation is authorized under Stage 3 (units U9–U12); when this decision was
+  written no SQLite code existed, and the code is written by those units.
+- Status: `approved` (the proposal is now the approved Stage 3 implementation schema and
+  implementation is authorized under D38; the deferral recorded above is historical). Spec: §26.
 
 ## D15 — Providers and map configuration
 
@@ -684,6 +694,55 @@ do it.
   ceiling and its accepted interim bound (`ACCEPTED_INTERIM_LOOP_LIMIT_SEC`) remain in force. D34 is
   amended by this decision only as to *how* a complete route is priced.
 - Status: `approved`. Spec: §20. Owner authorization: Stage 2.2, sections 1–6.
+
+---
+
+## D38 — Stage 3 authorization: SQLite storage behind the approved schema (owner decision)
+
+> **Authorization.** This decision records two owner decisions of **2026-09-11**: (1)
+> `docs/STORAGE_SCHEMA.md` is **APPROVED as the Stage 3 implementation schema**, and (2) **Stage 3
+> (persistent storage, SQLite repositories) is authorized**, to execute as units **U8–U12** — **U8**
+> this record and the schema approval; **U9** storage skeleton + migrations + schema; **U10** plan &
+> stop persistence with exact round-trip; **U11** immutable run history + settings; **U12**
+> end-to-end round-trip demo + documentation. It amends D14 and resolves approved-schema open
+> questions 2 and 5.
+
+- **The schema is approved, not proposed.** `docs/STORAGE_SCHEMA.md` is the Stage 3 implementation
+  schema and the implementation target of units U9–U12. Approval changes no technical content: SQLite
+  via stdlib `sqlite3`, no ORM, storage under `storage/` depending on `core/`, repository Protocols
+  defined in `core/` and implemented in `storage/sqlite/`.
+- **Open question 2 = RECOMPUTE.** Complete derived timelines are **never** persisted. The
+  authoritative reproducibility metadata that **is** persisted is: the inputs fingerprint, the route
+  fingerprint, `cost_policy_json`, the timezone/tzdata metadata, and the stored route/result metrics
+  the approved schema requires. Derived timelines may be recomputed from those stored authoritative
+  inputs.
+- **Open question 5 = KEEP ALL RUNS** for the portfolio/demo MVP. There is **no retention policy and
+  no automatic cleanup**; the question is revisited only when real usage/volume exists.
+- **Stage 3 non-negotiables, as owner-stated:**
+  - `core/` must never import storage; storage may depend on `core/`;
+  - START/FINISH are plan locations, never fake stop rows;
+  - `input_position` remains immutable provenance;
+  - a recommendation is not a driver decision;
+  - `recommended_stop_id` is never persisted as plan state;
+  - first-stop selection semantics are unchanged;
+  - service windows stay local wall-clock values and must be revalidated with strict DST semantics
+    after loading;
+  - optimization runs are append-only immutable history;
+  - no ORM; no UI/API work; no map/provider work; no optimizer-performance work; no change to the D35
+    objective or to the ranking semantics; no database files committed to git.
+- **Stage 3 acceptance list (the owner's 12 items):** 1) plan round-trip; 2) run round-trip;
+  3) settings repository; 4) ordered and idempotent migrations; 5) invalid / hand-edited rows fail
+  loudly; 6) `input_position` and decision semantics survive reload exactly; 7) recomputed
+  fingerprints/results match the stored authoritative state; 8) no `recommended_stop_id` plan-state
+  persistence; 9) `core` dependency-purity tests green; 10) full authoritative suite green;
+  11) PRODUCT_SPEC files byte-unchanged; 12) docs accurate.
+- **Stage 3 autonomous budget:** a **hard cap of 16 child-agent calls**, never raised automatically;
+  if the budget is exhausted, Stage 3 **stops** and the exact state is reported instead of continuing.
+- **D14 is amended by this decision**, and D30's "storage implementation remains deferred" note is
+  historical for the same reason: the approval recorded here is the approval both entries were
+  waiting for. No other decision changes, and nothing in this decision re-opens the D35 objective,
+  the D36/D37 scale and performance records, or the D13/D16/D29/D30/D33 semantics the schema encodes.
+- Status: `approved`. Spec: §26, §36. Owner authorization: Stage 3, units U8–U12 (2026-09-11).
 
 ---
 
