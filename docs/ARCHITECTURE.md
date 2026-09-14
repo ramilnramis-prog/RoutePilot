@@ -27,8 +27,8 @@ scales** (D37).
 ## 1. Layers and the dependency rule
 
 ```
-web/      HTML/CSS/JS + Leaflet/OSM tiles        (later)  -- never imported by core
-api/      transport: stdlib http.server -> FastAPI (later) -- depends on core
+web/      HTML/CSS/JS + Leaflet/OSM tiles        (pending, U15) -- never imported by core
+api/      transport: stdlib http.server (Stage 4, U13) -> FastAPI later -- depends on core
 storage/  SQLite repositories                    (Stage 3) -- depends on core, never the reverse
 demo/     deterministic demo dataset + synthetic matrix + demo report -- depends on core
 tools/    doctor, benchmark and developer utilities -- may inspect core, never imported by it
@@ -127,7 +127,10 @@ revoked AUTO model (D4/D32). `core/engine/optimizer/`, `core/engine/first_stop/e
 `demo/report.py` and `tools/benchmark_optimizer.py` are **Stage 2**. `storage/` (the migration runner
 and the three SQLite repositories), `core/repositories.py` (their pure Protocol ports) and
 `demo/storage_roundtrip.py` are **Stage 3** (U9–U12, D38), so storage code now exists; `core/` still
-contains none, and there is still no API and no UI.
+contains none. **Stage 4 has started and its first unit is delivered (U13, D39):** the API exists
+under `api/` (the stdlib `http.server` transport, the framework-agnostic service layer, the JSON
+contracts, the error mapping and static-asset serving), while the **UI does not exist yet** - `web/`
+is **still pending** and belongs to **U15**. `core/` contains neither an API nor any UI code.
 
 ## 3. Domain model
 
@@ -639,7 +642,7 @@ visible attribution; `core/` never references them.
 | 2 ✅ | complete-route evaluation (FINISH leg included) + deterministic optimizer (greedy seed, 2-opt/Or-opt improvement, leg cache) + **exhaustive** complete-route first-stop recommendation with top-K and rejected-candidate diagnostics + recommendation and route fingerprints + the three baselines + the complete elapsed-duration default objective with the owner's deterministic 5-key ranking (D35) + the scale decision (**~50 enabled stops is the primary MVP target**, D36) with the portfolio fixture and the ~100-stop stress benchmark + the complete-route demo narrative (U1–U6, U6b) + the exact incremental complete-route evaluator (U7) |
 | 2.2 ✅ | the **exact incremental / delta complete-route evaluator** (U7): prefix reuse from the base route's evaluated state at the move's own divergence, plus the FINISH leg, with the reference full pass kept intact as the comparison baseline and an opt-in slow equivalence gate. Same moves, same order, same accept/reject decisions, same `evaluations` ceiling - about 2.5x lower latency at the portfolio and stress scales and about 2.2x on the ~30-stop demo plan (D37) |
 | 3 ✅ | SQLite storage behind the approved schema (D38, U9–U12): `storage/sqlite/migrations/0001_init.sql` (the approved DDL, byte-unchanged) + `storage/sqlite/database.py` (connection helper, ordered and idempotent migration runner) + `core/repositories.py` (the pure Protocol ports) + `storage/sqlite/route_plan_repository.py` (plan/stop persistence, exact round-trip), `storage/sqlite/optimization_run_repository.py` (append-only immutable run history) and `storage/sqlite/app_settings_repository.py` (settings key/value store) + the end-to-end round-trip demo `python -m demo.storage_roundtrip`. No ORM, no new dependency, `core/` imports no storage module, no database file committed |
-| 4 | API transport + web UI (map, timeline panel, summary, override controls) |
+| 4 | API transport + web UI (map, timeline panel, summary, override controls). **U13 delivered:** the `api/` transport (stdlib `http.server`), the framework-agnostic service layer, the JSON contracts, the error mapping and static-asset serving (D39). **U15 still owns `web/`** - the UI does not exist yet |
 | 5 | reoptimization after each served stop, active-leg protection groundwork |
 
 ## 10. Explicit non-goals of the current stages

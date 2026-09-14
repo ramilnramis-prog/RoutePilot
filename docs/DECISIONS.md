@@ -7,7 +7,7 @@ and unchanged. Precedence (v2 section 37): the current specification plus explic
 decisions in this registry control future implementation; this registry records *how* we decided to
 do it.
 
-- Registry revision: **D1–D38**, approved 2026-09-11 (Stage 0, extended during Stage 1; D4–D11
+- Registry revision: **D1–D39**, approved 2026-09-11 (Stage 0, extended during Stage 1; D4–D11
   amended when the AUTO semantics were revoked; D5/D9/D16 aligned with v2 sections 5, 14 and 23;
   D33 added for `input_position`; D34 records the owner-accepted interim ~100-stop latency and is
   amended by D36, which moves the performance target to ~50 enabled stops; D35 settles the default
@@ -16,7 +16,8 @@ do it.
   D37 records the owner's Stage 2.2 sections 1–6 authorization of the bounded exact
   incremental-evaluation performance follow-up that landed as U7; D38 records the owner's approval of
   `docs/STORAGE_SCHEMA.md` as the Stage 3 implementation schema and the Stage 3 authorization as units
-  U8–U12, and amends D14).
+  U8–U12, and amends D14; D39 records the owner's Stage 4 authorization of the API transport and web
+  UI as units U13–U17).
 - Status values: `approved` (settled), `amended` (settled with a recorded change), `deferred` (recorded, not implemented).
 
 ---
@@ -762,7 +763,7 @@ do it.
   | 2 | run round-trip | `tests/storage/test_optimization_run_repository.py` (`RoundTripTests`); demo §4 |
   | 3 | settings repository | `tests/storage/test_app_settings_repository.py`; demo §5 |
   | 4 | ordered, idempotent migrations | `tests/storage/test_migrations.py` |
-  | 5 | invalid / hand-edited rows fail loudly | the hand-edit matrices of all three storage test modules (`StoredPayloadValidationTests` in the plan and run modules, the settings module's stored-bytes matrix) |
+  | 5 | invalid / hand-edited rows fail loudly | the hand-edit matrices of all three storage test modules (`LoadValidationTests` in the plan module, `StoredPayloadValidationTests` in the run module, the settings module's stored-bytes matrix) |
   | 6 | `input_position` and decision semantics survive reload | `test_input_position_survives_update_disable_and_append`, `test_an_accepted_recommendation_selection_round_trips`, `test_a_plan_awaiting_the_first_stop_choice_round_trips_with_no_selection` |
   | 7 | recomputed fingerprints/results match the stored authoritative state | `test_a_reloaded_plan_evaluates_and_optimizes_identically`, `tests/demo/test_storage_roundtrip.py`; demo §3 and §6 |
   | 8 | no `recommended_stop_id` plan-state persistence | `test_a_stored_plan_never_carries_a_recommendation`, `test_computing_a_recommendation_never_writes_a_selection_to_storage` |
@@ -776,6 +777,70 @@ do it.
   **open questions 3 and 4 remain open**, and the D36/D37 scale and performance record is untouched —
   the ~50-stop latency limitation is unchanged by Stage 3.
 - Status: `approved`. Spec: §26, §36. Owner authorization: Stage 3, units U8–U12 (2026-09-11).
+
+---
+
+## D39 — Stage 4 authorization: API transport + web UI (owner decision)
+
+> **Authorization.** This decision records the owner's **Stage 4** decisions: Stage 4 (API transport
+> and web UI) is **authorized** and executes as units **U13–U17** (below). It amends nothing that
+> preceded it; D1, D15, D16, D19, D21, D26, D32, D36 and D38 continue to govern the areas Stage 4
+> touches.
+
+- **(a) Transport.** Stage 4 is a stdlib **`http.server`** transport plus a **framework-agnostic
+  application/service layer**. FastAPI remains a **FUTURE transport replacement only** (D1); **no
+  FastAPI and no other Python web framework may be added in Stage 4**, and no new dependency may be
+  added at all.
+- **(b) Frontend.** Static **HTML + CSS + vanilla JavaScript**: **no npm, no bundler, no frontend
+  framework, no build step**, and the `web/` assets are served by the **same local Stage 4 server**.
+- **(c) Map.** Option **(i)**: **Leaflet with an OSM-compatible tile provider configured at browser
+  runtime**. The tile URL, the attribution and the max zoom come from **approved configuration**;
+  attribution **stays visible**; synthetic route geometry is explicitly labelled
+  **synthetic / straight-line** and is **never presented as road routing**; a Leaflet or tile failure
+  must **degrade honestly** while the non-map route / timeline / summary UI stays usable; **no
+  map-vendor dependency may enter `core/`**; and **no new Leaflet assets may be vendored during this
+  stage**.
+- **(d) MVP override controls (approved).** Show recommendation; accept the recommended first stop;
+  manually choose another first stop; cancel / unpin; disable stop; restore stop; change priority;
+  recalculate. **Explicitly out of scope:** drag / reorder, active-leg behaviour, reoptimization after
+  served stops, and other route modes.
+- **(e) Recommendation latency contract.** Synchronous computation; an explicit UI
+  loading / computing state; **per-plan single-flight** protection; a **documented bounded request**;
+  honest latency messaging; and **NO background job queue and no general async job/status subsystem**
+  unless implementation proves the synchronous contract cannot work. The **current ~8 s worst-case
+  portfolio latency is an accepted MVP limitation** (D36/D37, unchanged), and a **fabricated or
+  partial route must never be returned**.
+- **(f) Budget, units, demo checklist and non-negotiables.** A **hard cap of 20 child-agent calls**
+  for Stage 4, never raised automatically; if the budget is exhausted, Stage 4 **stops** and the exact
+  state is reported instead of continuing.
+  - **Stage 4 units.** **U13** API transport + framework-agnostic service layer + JSON contracts +
+    error mapping + static-asset serving; **U14** recommendation, selection and route endpoints;
+    **U15** `web/` shell, map, timeline panel and summary; **U16** override controls and recalculate;
+    **U17** end-to-end demo and Stage 4 documentation.
+  - **Portfolio demo checklist.** Start the server locally; open it in a browser; open or create the
+    DEMO/SYNTHETIC plan; request a recommendation; understand that it is only a recommendation;
+    inspect the alternatives and the rejected candidates; accept the recommendation or choose another
+    stop; see the selection pinned **with its provenance**; see the ordered route with ETA / waiting /
+    service / FINISH; compare **BEFORE vs AFTER**; disable / restore a stop or change a priority and
+    recalculate; inspect the immutable run history.
+  - **Non-negotiables.** Recommendation is **not** a decision; `recommended_stop_id` is **never** plan
+    state; first-stop mode / provenance / pinned semantics are **preserved**; SQLite is authoritative
+    **only** for persisted state; timelines and live recommendations are **recomputed**; `core/`
+    imports **no** API, UI or storage module; the API contains **no** business formulas; `web/`
+    contains **no** business formulas; `SMART_ROUTE` is the **only** implemented route mode; **no**
+    optimizer changes; **no** storage-schema changes; **no** real routing, geocoding or traffic calls;
+    **no** LLM; **no** auth or multi-user; and **no** committed database artifacts.
+- **Amendment 2026-09-14 (implementation): U13 is delivered; U14–U17 are pending.** The Stage 4
+  transport, the framework-agnostic service layer, the JSON request/response contracts, the
+  documented error mapping and static-asset serving landed under `api/`
+  (`api/http_server.py`, `api/serialization.py`, `api/services.py`, `api/serve.py`) with their tests in
+  `tests/api/`. The transport serves `GET /api/health`, `GET|POST /api/plans`,
+  `GET|PUT /api/plans/{id}` and `GET|PUT /api/settings/{key}`, maps every failure through the
+  documented error-code table, answers the declared later-unit paths with `501` instead of faking
+  them, and serves `web/` (which does not exist yet) without a code change. No UI file, no new
+  dependency and no `core/` change was part of U13. The remaining units stay as listed in (f) above:
+  **U14–U17 pending**, with **U15** still owning `web/`.
+- Status: `approved`. Spec: §15, §19, §23, §25, §26, §36. Owner authorization: Stage 4, units U13–U17.
 
 ---
 
