@@ -735,8 +735,9 @@ class ListGetDeleteTests(RepositoryTestCase):
     def _insert_run(self, plan_id: str) -> None:
         """One run row, so the cascade to ``route_optimization_runs`` is proved (U11 owns the repo).
 
-        The run repository does not exist yet, so the row is written with raw SQL; every NOT NULL
-        column of the approved schema is satisfied literally.
+        The row is written with raw SQL on purpose: this module tests the plan write path and must
+        not borrow the run repository's own write path (``storage.sqlite.optimization_run_repository``,
+        U11). Every NOT NULL column of the approved schema is satisfied literally.
         """
         now = "2026-09-11T05:00:00Z"
         with self.connection:

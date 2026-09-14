@@ -19,7 +19,13 @@ from __future__ import annotations
 
 from core.validation.errors import RoutePilotError
 
-__all__ = ["StorageError", "StorageMigrationError", "StoredPlanError"]
+__all__ = [
+    "StorageError",
+    "StorageMigrationError",
+    "StoredPlanError",
+    "StoredRunError",
+    "StoredSettingsError",
+]
 
 
 class StorageError(RoutePilotError):
@@ -59,4 +65,33 @@ class StoredPlanError(StorageError):
     :class:`~core.validation.errors.InvalidRouteStopError`, and an inconsistent first-stop decision
     raises :class:`~core.validation.errors.InvalidRoutePlanError`. Nothing is ever repaired
     silently and no default is ever substituted (D38 acceptance item 5).
+    """
+
+
+class StoredRunError(StorageError):
+    """A stored optimization-run row is not a faithful serialisation of a domain run (U11; D38).
+
+    Raised by :class:`storage.sqlite.optimization_run_repository.SqliteRouteOptimizationRunRepository`
+    while loading when the *stored bytes* of ``route_optimization_runs`` are unusable: a timestamp
+    that is not UTC ISO-8601 with ``Z`` or that names no real calendar instant, a missing NOT NULL
+    value, a stored cost-policy payload whose name is not a non-empty string, or a ``*_json`` column
+    that is not TEXT.
+
+    Payload *shape* problems raise
+    :class:`~core.validation.errors.InvalidOptimizationRunError`, because the domain owns the stored
+    shape and the run rules, and content that reaches a real value object (``RouteMetrics``,
+    ``Violation``, ``FirstStopCandidate``, ``RouteCostPolicy``) raises that object's own error - a
+    stored cost-policy name this build does not implement raises
+    :class:`~core.validation.errors.InvalidCostPolicyError`. This is the same division of labour as
+    :class:`StoredPlanError` (D26/D38).
+    """
+
+
+class StoredSettingsError(StorageError):
+    """A stored ``app_settings`` row is unusable, or a setting cannot be stored (U11; D38).
+
+    Raised when the key is empty or blank, when a value cannot be serialised as JSON at all, or when
+    a stored ``value_json`` is not valid JSON. The settings repository owns no setting's *meaning*:
+    it stores and returns JSON values, and the intended keys of schema section 6 are documented, not
+    policed.
     """

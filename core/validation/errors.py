@@ -20,6 +20,7 @@ Taxonomy::
     |   +-- InvalidServiceWindowError
     |   +-- InvalidRouteStopError
     |   +-- InvalidRoutePlanError
+    |   +-- InvalidOptimizationRunError
     |   +-- InvalidOrderError
     |   +-- StopNotGeocodedError
     |   +-- MissingServiceDurationError
@@ -52,6 +53,7 @@ __all__ = [
     "InvalidServiceWindowError",
     "InvalidRouteStopError",
     "InvalidRoutePlanError",
+    "InvalidOptimizationRunError",
     "InvalidCostPolicyError",
     "InvalidOrderError",
     "StopNotGeocodedError",
@@ -183,6 +185,18 @@ class InvalidRouteStopError(ValidationError):
 
 class InvalidRoutePlanError(ValidationError):
     """A ``RoutePlan`` violates a structural invariant (D10, D21)."""
+
+
+class InvalidOptimizationRunError(ValidationError):
+    """An optimization-run record or one of its stored payloads violates a run rule (U11; D38).
+
+    Raised by :mod:`core.model.optimization_run` for a run that cannot exist: a missing id or
+    fingerprint, an unknown ``run_kind``/``status``/``data_provenance``, a metric that is not a
+    whole non-negative second, a status that disagrees with the stored order or violations, top-K
+    candidates that are not the recommendation's own ranked ones, or a stored JSON payload whose
+    shape is not the approved one. Storage raises its own errors for malformed *stored bytes*
+    (``StoredRunError``); content that reaches a real value object raises that object's own error.
+    """
 
 
 class InvalidCostPolicyError(ValidationError):

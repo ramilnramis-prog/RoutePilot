@@ -1,11 +1,12 @@
-# RoutePilot — Storage Schema (APPROVED)
+# RoutePilot — Storage Schema (APPROVED, IMPLEMENTED)
 
-> **Status: APPROVED by the owner on 2026-09-11 as the Stage 3 implementation schema.** Stage 3
-> (persistent storage, SQLite repositories) is authorized under D38, and this schema is the
-> implementation target for Stage 3 units **U9–U12** (U9 storage skeleton + migrations + schema;
-> U10 plan & stop persistence with exact round-trip; U11 immutable run history + settings; U12
-> end-to-end round-trip demo + documentation). The document was refined during Stage 1 and approved
-> as written; its technical content is unchanged by the approval.
+> **Status: APPROVED by the owner on 2026-09-11 as the Stage 3 implementation schema, and
+> IMPLEMENTED by the Stage 3 units U9–U12.** Stage 3 (persistent storage, SQLite repositories) is
+> authorized under D38 and executed as units **U9** (storage skeleton + migrations + schema),
+> **U10** (plan & stop persistence with exact round-trip), **U11** (immutable run history +
+> settings) and **U12** (end-to-end round-trip demo + documentation); §10 names the shipped
+> artifacts. The document was refined during Stage 1 and approved as written; its technical content
+> is unchanged by the approval and unchanged by the implementation.
 
 Target: SQLite, stdlib `sqlite3` (no ORM). Storage lives in `storage/` and depends on `core/`;
 `core/` never imports storage. Repository interfaces are defined as Protocols in `core/` and
@@ -220,9 +221,9 @@ Intended keys: `default_timezone`, `doctor_mode`, `default_data_provenance`, `ti
 `tile_attribution`, `tile_max_zoom`. Tile configuration lives here so the map vendor stays
 configuration-isolated (D15) and never leaks into `core/`.
 
-## 7. Repository interfaces (to be implemented in Stage 3)
+## 7. Repository interfaces (implemented in `storage/sqlite/`)
 
-Proposed Protocols in `core/` (implemented in `storage/sqlite/`):
+The Protocols declared in `core/repositories.py` (implemented in `storage/sqlite/`):
 
 - `RoutePlanRepository`: `save(plan)`, `get(plan_id)`, `list()`, `delete(plan_id)`
 - `RouteOptimizationRunRepository`: `append(run)`, `list_for_plan(plan_id)`, `latest(plan_id)`
@@ -263,9 +264,30 @@ value object, so a hand-edited database fails loudly instead of producing a half
 
 ## 10. Implementation status
 
-This schema was **APPROVED by the owner on 2026-09-11 as the Stage 3 implementation schema**, and
-Stage 3 (persistent storage, SQLite repositories) is **authorized under D38** and executes as units
-U8–U12; this schema is the implementation target of units U9–U12. The Stage 1 refinements recorded
-above — the window end policy on the plan and per stop (D29) and the versioned order-override
-envelope (D30) — were added as part of the proposal and are carried into the approved schema
-unchanged. Approval authorizes the implementation; the code itself is written by units U9–U12.
+**IMPLEMENTED (Stage 3, units U9–U12).** This schema was **APPROVED by the owner on 2026-09-11 as
+the Stage 3 implementation schema**; it is authorized under **D38** and the code below now exists.
+The schema's technical content is exactly what was approved: the DDL is byte-unchanged from
+approval.
+
+| Artifact | Unit | What it is |
+|---|---|---|
+| `storage/sqlite/migrations/0001_init.sql` | U9 | the approved DDL for sections 2–6, applied by an ordered, idempotent runner |
+| `storage/sqlite/database.py` | U9 | connection helper (row factory, `PRAGMA foreign_keys = ON`) and the migration runner |
+| `core/repositories.py` | U10/U11 | the pure Protocols of section 7 — `core` declares them and never imports storage |
+| `storage/sqlite/route_plan_repository.py` | U10 | `SqliteRoutePlanRepository`: plan + stop persistence with an exact round-trip |
+| `storage/sqlite/optimization_run_repository.py` | U11 | `SqliteRouteOptimizationRunRepository`: append-only immutable run history |
+| `storage/sqlite/app_settings_repository.py` | U11 | `SqliteAppSettingsRepository`: the `app_settings` key/value store |
+| `demo/storage_roundtrip.py` | U12 | the end-to-end round-trip demo: `python -m demo.storage_roundtrip` |
+
+Verification lives in `tests/storage/test_migrations.py`, `tests/storage/test_route_plan_repository.py`,
+`tests/storage/test_optimization_run_repository.py`, `tests/storage/test_app_settings_repository.py`,
+`tests/demo/test_storage_roundtrip.py` and `tests/test_core_isolation.py`; the D38 acceptance-item
+map is recorded in `docs/DECISIONS.md`.
+
+The Stage 1 refinements recorded above — the window end policy on the plan and per stop (D29) and the
+versioned order-override envelope (D30) — were added as part of the proposal and were carried into the
+approved schema and into the implementation unchanged.
+
+Not implemented, and not claimed here: **no retention policy** (open question 5 = KEEP ALL RUNS, so
+every run is kept and nothing is cleaned up automatically), and open questions **3** (multi-plan /
+multi-driver scoping) and **4** (settings scope) remain **open**.

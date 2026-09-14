@@ -62,10 +62,20 @@ Implemented so far:
   asserted at a `≤ ~5 s` wall-clock second - the asserted guard at every measured scale, the primary
   MVP scale included, is the generous owner-accepted regression bound of D34 (~150 s);
 - error taxonomy split from violations, `tools/doctor.py`, and a deterministic offline test suite;
-- [`docs/STORAGE_SCHEMA.md`](docs/STORAGE_SCHEMA.md) — **proposal only**, no storage code.
+- **storage is implemented** (Stage 3, U9–U12, D38) behind the approved
+  [`docs/STORAGE_SCHEMA.md`](docs/STORAGE_SCHEMA.md): the ordered, idempotent migration runner and
+  the byte-unchanged approved DDL (`storage/sqlite/migrations/0001_init.sql`,
+  `storage/sqlite/database.py`), and three stdlib-`sqlite3` repositories implementing the pure
+  Protocols in `core/repositories.py` - plan and stops (`SqliteRoutePlanRepository`), append-only
+  immutable run history (`SqliteRouteOptimizationRunRepository`) and settings
+  (`SqliteAppSettingsRepository`). `python -m demo.storage_roundtrip` saves the shipped demo plan,
+  reloads it, re-runs the real engine on both, appends and reads back a real run and two settings,
+  all in an in-memory database. The D38 non-negotiables hold: `core/` never imports storage, there
+  is no ORM, no database file is committed, and a recommendation is never plan state.
 
-Not implemented yet (by design): SQLite persistence, web UI, map and routing providers, traffic,
-side-of-road logic and active-leg protection.
+Not implemented yet (by design): web UI, map and routing providers, traffic, side-of-road logic and
+active-leg protection. No retention policy exists for stored runs (every run is kept, D38), and the
+~50-stop latency limitation of D36/D37 is unchanged.
 
 **Every travel time and distance in the demo is synthetic** and is labelled as such. It is not road
 routing and must never be shown as such.
@@ -105,6 +115,7 @@ python tools/doctor.py --mode strict    # release/CI mode: missing tzdata is a F
 python -m unittest discover -s tests -t . -v
 
 python -m demo.report                   # the demo scenario: complete-route recommendation
+python -m demo.storage_roundtrip        # save/reload/run/read-back: the storage round trip
 python tools/benchmark_optimizer.py --stop-count 100   # the ~100-stop exhaustive loop (minutes)
 ```
 
@@ -141,7 +152,8 @@ core/     domain model, time layer, engine (cost scoring, complete-route optimiz
           first-stop recommendation) — no HTTP, no UI, no storage, no network
 demo/     deterministic demo dataset, synthetic travel matrix, scale fixtures (portfolio ~50 enabled
           stops and the ~100-stop stress reference), complete-route demo report
-storage/  SQLite persistence (later, proposal only)
+storage/  SQLite persistence on the approved schema: ordered migrations, the plan/stop repository,
+          the immutable run-history repository and the settings repository (Stage 3)
 api/      transport layer: stdlib http.server now, FastAPI later (later)
 web/      HTML/CSS/JS frontend with Leaflet + OSM tiles (later)
 tools/    doctor, the exhaustive first-stop benchmark (demo / portfolio / stress) and other
@@ -156,7 +168,7 @@ tests/    deterministic offline unittest suite
 1. **The specification is the Source of Truth.** `docs/PRODUCT_SPEC.md` is stored verbatim
    and is never rewritten as a summary.
 2. **Decisions are documented, not remembered.** `docs/DECISIONS.md` holds the approved
-   registry D1–D36 and is the only place a decision is considered settled.
+   registry D1–D38 and is the only place a decision is considered settled.
 3. **Start is not a service stop.** The departure location is where driving begins; it is
    never a customer task.
 4. **No invented business hours.** An unknown service window stays explicitly unknown.
@@ -179,6 +191,6 @@ tests/    deterministic offline unittest suite
 | 1.5 ✅ | semantics migration off the revoked AUTO model: RECOMMEND/MANUAL, recommendation vs driver decision, `awaiting_first_stop_choice` (D4–D11, D32) |
 | 2 ✅ | complete-route evaluation (FINISH leg included), deterministic optimizer with a measured leg cache, **exhaustive** complete-route first-stop recommendation with top-K and rejected-candidate diagnostics, recommendation and route fingerprints, the three baselines, the **complete elapsed-duration default objective with the owner's deterministic 5-key ranking** (D35), the **scale decision: ~50 enabled stops is the primary MVP target** with its portfolio fixture and the ~100-stop stress benchmark (D36), and the complete-route demo narrative (U1–U6, U6b) |
 | 2.2 ✅ | the **exact incremental / delta complete-route evaluator** (U7): prefix reuse plus the FINISH leg, identical semantics, about 2.5x lower latency at the portfolio and stress scales and about 2.2x on the ~30-stop demo plan; the reference full pass stays the comparison baseline and the opt-in slow equivalence gate proves it move by move |
-| 3 | SQLite storage + schema implementation + round-trip tests |
+| 3 ✅ | SQLite storage behind the approved schema (D38, U9–U12): ordered idempotent migrations, plan/stop persistence with an exact round-trip, append-only immutable run history, the settings store, the pure `core/repositories.py` ports, and the `python -m demo.storage_roundtrip` end-to-end demo |
 | 4 | API + web UI (map, timeline panel, route summary, top-K, override) |
 | 5 | reoptimization after each served stop + active-leg protection groundwork |

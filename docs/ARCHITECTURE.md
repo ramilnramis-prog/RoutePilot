@@ -29,7 +29,7 @@ scales** (D37).
 ```
 web/      HTML/CSS/JS + Leaflet/OSM tiles        (later)  -- never imported by core
 api/      transport: stdlib http.server -> FastAPI (later) -- depends on core
-storage/  SQLite repositories                    (later)  -- depends on core, never the reverse
+storage/  SQLite repositories                    (Stage 3) -- depends on core, never the reverse
 demo/     deterministic demo dataset + synthetic matrix + demo report -- depends on core
 tools/    doctor, benchmark and developer utilities -- may inspect core, never imported by it
 core/     domain model, time, engine              <-- depends on nothing but the stdlib
@@ -90,6 +90,9 @@ core/
       route_fingerprint.py the committed route's own digest (v2 section 7, D4)
   validation/
     errors.py          error taxonomy (D26)
+  repositories.py      the pure Protocol ports (plan, immutable run history, settings); declared in
+                       `core/`, implemented under `storage/`, and `core/` never imports them
+                       (Stage 3 U10/U11, D14/D38)
 
 demo/
   dataset.py           deterministic ~30-stop demo plan (DEMO/SYNTHETIC, spec section 24)
@@ -97,6 +100,17 @@ demo/
   scale_dataset.py     deterministic scale fixtures: the ~50-enabled-stop portfolio fixture (the
                        primary MVP target, D36) and the ~100-stop stress fixture
   report.py            complete-route demo report: `python -m demo.report`
+  storage_roundtrip.py end-to-end storage round-trip demo: `python -m demo.storage_roundtrip`
+                       (Stage 3 U12; in-memory only, real engine + real repositories)
+
+storage/
+  __init__.py          the storage error taxonomy (no I/O: importing it never opens a database)
+  sqlite/
+    database.py        connection helper + ordered, idempotent migration runner (Stage 3 U9)
+    migrations/0001_init.sql  the approved DDL, byte-unchanged (docs/STORAGE_SCHEMA.md sections 2-6)
+    route_plan_repository.py        plan + stop persistence, exact round-trip (U10)
+    optimization_run_repository.py  append-only immutable run history (U11)
+    app_settings_repository.py      the app_settings key/value store (U11)
 
 tools/
   doctor.py            environment health (D12)
@@ -110,8 +124,10 @@ tools/
 Stage status: `core/model`, `core/time`, `core/validation` and `core/engine/providers.py` are
 Stage 0; `core/engine/cost.py` and `demo/` are Stage 1, whose semantics were then migrated off the
 revoked AUTO model (D4/D32). `core/engine/optimizer/`, `core/engine/first_stop/evaluation.py`,
-`demo/report.py` and `tools/benchmark_optimizer.py` are **Stage 2**. There is still no storage code,
-no API and no UI.
+`demo/report.py` and `tools/benchmark_optimizer.py` are **Stage 2**. `storage/` (the migration runner
+and the three SQLite repositories), `core/repositories.py` (their pure Protocol ports) and
+`demo/storage_roundtrip.py` are **Stage 3** (U9–U12, D38), so storage code now exists; `core/` still
+contains none, and there is still no API and no UI.
 
 ## 3. Domain model
 
@@ -587,7 +603,7 @@ visible attribution; `core/` never references them.
 | 18 | `tests/engine/test_optimizer.py` (local-search monotonicity, fingerprints), `tests/engine/test_optimizer_evaluation.py` (complete-route metrics, baselines) |
 | 19 | `tests/engine/test_optimizer_performance.py`, `tests/engine/test_optimizer.py` (demo-plan 31-enabled-stops measurement) |
 | 20 | `tools/benchmark_optimizer.py` (demo plan + ~50-stop portfolio fixture + ~100-stop stress reference, all with no prefilter), `tests/engine/test_optimizer_performance.py`, `tests/tools/test_benchmark_optimizer_labels.py` |
-| 21 | Stage 3 (SQLite round-trip) |
+| 21 | `tests/storage/` (migrations, plan/stop round-trip, immutable run history, settings, hand-edited-row failures), `tests/demo/test_storage_roundtrip.py` and `python -m demo.storage_roundtrip` (Stage 3, U9–U12) |
 | 24, 33 | `tests/demo/test_dataset.py` (fixture shape and calibration: 31 enabled + 1 disabled stop, the early-closing bottleneck, short services and the 10m default, determinism), `tests/demo/test_report.py` (the four §33 claims: nearest/farthest are not the recommendation, the departure sweep changes it, complete-route quality decides; the computed least-driving comparison; the rejected-candidate diagnostics; the D35 objective-alignment audit; the D31 weight sensitivity; the D36 scale/performance block and its enabled counts), `tests/demo/test_synthetic_matrix.py` |
 | — | `tests/test_core_isolation.py` (D1/§22), `tests/tools/test_doctor.py` (D12), `tests/engine/test_cost.py` (D13/D31/D35), `tests/model/test_cost_policy.py` (D13/D16/D31/D35), `tests/tools/test_workspace_fingerprint.py` |
 
@@ -622,15 +638,18 @@ visible attribution; `core/` never references them.
 | 1.5 ✅ | semantics migration off the revoked AUTO model: RECOMMEND/MANUAL, recommendation vs driver decision, `awaiting_first_stop_choice` (D4–D11, D32) |
 | 2 ✅ | complete-route evaluation (FINISH leg included) + deterministic optimizer (greedy seed, 2-opt/Or-opt improvement, leg cache) + **exhaustive** complete-route first-stop recommendation with top-K and rejected-candidate diagnostics + recommendation and route fingerprints + the three baselines + the complete elapsed-duration default objective with the owner's deterministic 5-key ranking (D35) + the scale decision (**~50 enabled stops is the primary MVP target**, D36) with the portfolio fixture and the ~100-stop stress benchmark + the complete-route demo narrative (U1–U6, U6b) + the exact incremental complete-route evaluator (U7) |
 | 2.2 ✅ | the **exact incremental / delta complete-route evaluator** (U7): prefix reuse from the base route's evaluated state at the move's own divergence, plus the FINISH leg, with the reference full pass kept intact as the comparison baseline and an opt-in slow equivalence gate. Same moves, same order, same accept/reject decisions, same `evaluations` ceiling - about 2.5x lower latency at the portfolio and stress scales and about 2.2x on the ~30-stop demo plan (D37) |
-| 3 | SQLite repositories behind the approved schema |
+| 3 ✅ | SQLite storage behind the approved schema (D38, U9–U12): `storage/sqlite/migrations/0001_init.sql` (the approved DDL, byte-unchanged) + `storage/sqlite/database.py` (connection helper, ordered and idempotent migration runner) + `core/repositories.py` (the pure Protocol ports) + `storage/sqlite/route_plan_repository.py` (plan/stop persistence, exact round-trip), `storage/sqlite/optimization_run_repository.py` (append-only immutable run history) and `storage/sqlite/app_settings_repository.py` (settings key/value store) + the end-to-end round-trip demo `python -m demo.storage_roundtrip`. No ORM, no new dependency, `core/` imports no storage module, no database file committed |
 | 4 | API transport + web UI (map, timeline panel, summary, override controls) |
 | 5 | reoptimization after each served stop, active-leg protection groundwork |
 
 ## 10. Explicit non-goals of the current stages
 
-Stages 0–2 deliberately contain no demo UI, no SQLite code, no API, no geocoding, no routing
+Stages 0–2 deliberately contain no demo UI, no API, no geocoding, no routing
 provider, no traffic, no side-of-road logic, no active-leg handling, no LLM integration, no
-automatic commitment of a recommendation, and no candidate prefilter or approximation. The exact
+automatic commitment of a recommendation, and no candidate prefilter or approximation. **Stages 0–2
+also contained no SQLite code**; storage now exists under `storage/` (Stage 3, U9–U12, D38) as
+adapters behind the `core/repositories.py` ports, while `core/` itself still contains **no** SQLite
+code and no storage import. The exact
 incremental / delta evaluator is implemented (§9, U7) and changes only *how* a route is priced: it
 introduces no prefilter, no shortlist and no approximation, and the reference full pass remains the
 comparison baseline.

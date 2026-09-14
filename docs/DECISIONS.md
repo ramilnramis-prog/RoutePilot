@@ -205,6 +205,13 @@ do it.
 > `docs/STORAGE_SCHEMA.md` is approved as the Stage 3 implementation schema, and Stage 3
 > (persistent storage, SQLite repositories) is authorized as units U8–U12. The bullets below stay in
 > force; only the "deferred / no SQLite code exists yet" wording is amended by this note.
+>
+> **Note 2026-09-14: storage is now implemented.** Units U9–U12 landed (the implementation amendment
+> to D38 in this file records the acceptance evidence), so the code exists: `storage/sqlite/` holds
+> the migration runner and the three SQLite repositories, `core/repositories.py` declares their
+> Protocols (and still imports no storage module), and `python -m demo.storage_roundtrip` exercises
+> them end to end. The bullets below remain **verbatim and in force**; each one is now a property of
+> real code rather than an intention, and the DDL is byte-unchanged from approval.
 
 - SQLite for the initial version.
 - Entities to plan for: route plans, route stops, route optimization runs, application settings.
@@ -742,6 +749,32 @@ do it.
   historical for the same reason: the approval recorded here is the approval both entries were
   waiting for. No other decision changes, and nothing in this decision re-opens the D35 objective,
   the D36/D37 scale and performance records, or the D13/D16/D29/D30/D33 semantics the schema encodes.
+- **Amendment 2026-09-14 (implementation): the Stage 3 units U9–U12 landed.** The approved schema is
+  implemented and `docs/STORAGE_SCHEMA.md` §10 names the shipped artifacts
+  (`storage/sqlite/migrations/0001_init.sql`, `storage/sqlite/database.py`,
+  `storage/sqlite/route_plan_repository.py`, `storage/sqlite/optimization_run_repository.py`,
+  `storage/sqlite/app_settings_repository.py`, `core/repositories.py`,
+  `demo/storage_roundtrip.py`). Acceptance evidence for the owner's 12 items above:
+
+  | # | Acceptance item | Where it is verified |
+  |---|---|---|
+  | 1 | plan round-trip | `tests/storage/test_route_plan_repository.py` (`RoundTripTests`); `python -m demo.storage_roundtrip` §1 |
+  | 2 | run round-trip | `tests/storage/test_optimization_run_repository.py` (`RoundTripTests`); demo §4 |
+  | 3 | settings repository | `tests/storage/test_app_settings_repository.py`; demo §5 |
+  | 4 | ordered, idempotent migrations | `tests/storage/test_migrations.py` |
+  | 5 | invalid / hand-edited rows fail loudly | the hand-edit matrices of all three storage test modules (`StoredPayloadValidationTests` in the plan and run modules, the settings module's stored-bytes matrix) |
+  | 6 | `input_position` and decision semantics survive reload | `test_input_position_survives_update_disable_and_append`, `test_an_accepted_recommendation_selection_round_trips`, `test_a_plan_awaiting_the_first_stop_choice_round_trips_with_no_selection` |
+  | 7 | recomputed fingerprints/results match the stored authoritative state | `test_a_reloaded_plan_evaluates_and_optimizes_identically`, `tests/demo/test_storage_roundtrip.py`; demo §3 and §6 |
+  | 8 | no `recommended_stop_id` plan-state persistence | `test_a_stored_plan_never_carries_a_recommendation`, `test_computing_a_recommendation_never_writes_a_selection_to_storage` |
+  | 9 | `core` dependency purity | `tests/test_core_isolation.py`, `python tools/doctor.py` |
+  | 10 | full authoritative suite green | `python -m unittest discover -s tests -t .` -> `Ran 703 tests ... OK (skipped=16)` on 2026-09-14 |
+  | 11 | PRODUCT_SPEC files byte-unchanged | `git diff --stat -- docs/PRODUCT_SPEC.md docs/PRODUCT_SPEC_v2.md` prints nothing |
+  | 12 | docs accurate | `docs/STORAGE_SCHEMA.md` §10, this amendment, D14's note below, `docs/ARCHITECTURE.md` §§1/2/9/10, `README.md` |
+
+  No product scope beyond the authorization landed. In particular: **no retention policy** exists
+  (the schema's open question 5 is answered by refusing bad rows, never by cleaning up good ones),
+  **open questions 3 and 4 remain open**, and the D36/D37 scale and performance record is untouched —
+  the ~50-stop latency limitation is unchanged by Stage 3.
 - Status: `approved`. Spec: §26, §36. Owner authorization: Stage 3, units U8–U12 (2026-09-11).
 
 ---
