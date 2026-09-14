@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from core.validation.errors import RoutePilotError
 
-__all__ = ["StorageError", "StorageMigrationError"]
+__all__ = ["StorageError", "StorageMigrationError", "StoredPlanError"]
 
 
 class StorageError(RoutePilotError):
@@ -39,4 +39,24 @@ class StorageMigrationError(StorageError):
     is **not** one of these: ``schema_migrations`` stores only ``(version, applied_at_utc)``, so
     this mechanism records applied versions and never re-applies them, but it cannot detect that a
     released migration file was edited afterwards.
+    """
+
+
+class StoredPlanError(StorageError):
+    """A stored plan row is not a faithful serialisation of a domain plan (Stage 3 U10; D38).
+
+    Raised by :class:`storage.sqlite.route_plan_repository.SqliteRoutePlanRepository` while loading
+    when the *stored bytes* are unusable: malformed JSON in a ``*_json`` column, a missing or
+    unknown JSON key, an unknown order-override envelope version, a wall-clock column holding a
+    resolved instant, an ``enabled`` flag that is not 0/1, a timestamp that is not UTC ISO-8601
+    with ``Z``, a missing NOT NULL value, or a ``data_provenance`` this repository cannot accept.
+
+    This is deliberately **not** a substitute for domain validation. Content problems are raised by
+    the domain's own errors, because the load path constructs real domain objects: an unknown IANA
+    zone raises :class:`~core.validation.errors.UnknownTimezoneError`, an unknown cost-policy name
+    raises :class:`~core.validation.errors.InvalidCostPolicyError`, a rejected ``geocode_status`` /
+    ``service_status`` or a non-integer ``service_duration_sec`` raises
+    :class:`~core.validation.errors.InvalidRouteStopError`, and an inconsistent first-stop decision
+    raises :class:`~core.validation.errors.InvalidRoutePlanError`. Nothing is ever repaired
+    silently and no default is ever substituted (D38 acceptance item 5).
     """
