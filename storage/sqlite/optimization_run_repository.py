@@ -10,7 +10,9 @@ What this repository promises, and what it deliberately does not do
 **Append-only, by construction.** The class exposes exactly three methods - ``append``,
 ``list_for_plan`` and ``latest`` - and no update and no delete of a run. A stored run is a historical
 fact, so there is no API that could rewrite one; the approved MVP keeps every run (D38: KEEP ALL
-RUNS, no retention policy).
+RUNS, no retention policy). ``get(run_id)`` (added by Stage 4 U14) is an **additive read lookup**
+over the table's existing primary key - it is a read, it changes no stored byte, and the append-only
+guarantee is untouched.
 
 **One row per append, one transaction.** :meth:`SqliteRouteOptimizationRunRepository.append` writes
 exactly one ``route_optimization_runs`` row inside a single transaction, so a partially written run
@@ -119,6 +121,9 @@ __all__ = [
     "RUN_COLUMNS",
     "SqliteRouteOptimizationRunRepository",
 ]
+
+#: ``id`` is the table's primary key, so this returns at most one row.
+_RUN_BY_ID = "SELECT * FROM route_optimization_runs WHERE id = ? LIMIT 1"
 
 #: Cost policies this build implements, by name. A stored policy name is only meaningful when the
 #: build knows the policy that owns those weights - the reason an unknown name is refused on load
@@ -278,6 +283,20 @@ class SqliteRouteOptimizationRunRepository:
             f"{_RUN_REVERSE_ORDER} LIMIT 1",
             (str(plan_id),),
         ).fetchone()
+        if row is None:
+            return None
+        return self._run_from_row(row)
+
+    def get(self, run_id: RunId) -> OptimizationRun | None:
+        """One run by its own id, or ``None`` when no run has it.
+
+        An **additive read lookup**, not a change to the port or to the schema: the approved
+        ``route_optimization_runs`` table already has ``id`` as its primary key, so a run can be
+        addressed directly, and ``api``'s ``GET /api/runs/{id}`` needs exactly that. It reads one
+        row through the same ``_run_from_row`` path as every other read, so a hand-edited row fails
+        loudly here too and nothing is repaired or reordered.
+        """
+        row = self._connection.execute(_RUN_BY_ID, (str(run_id),)).fetchone()
         if row is None:
             return None
         return self._run_from_row(row)

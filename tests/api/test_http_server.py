@@ -126,10 +126,11 @@ class HealthTests(ServerBackedTestCase):
         self.assertEqual(database["identifier"], self.services.state.display_identifier)
         self.assertTrue(database["identifier"])
 
-    def test_health_states_that_u13_is_the_read_config_surface(self) -> None:
+    def test_health_states_which_units_are_implemented(self) -> None:
         payload = self.get("/api/health").json()
-        self.assertIn("U13", payload["read_only_units"])
-        self.assertIn("U14", payload["read_only_units"])
+        self.assertIn("U13", payload["implemented_units"])
+        self.assertIn("U14", payload["implemented_units"])
+        self.assertIn("U15", payload["implemented_units"])
 
     def test_health_is_json_safe(self) -> None:
         from api.serialization import is_json_safe
@@ -370,6 +371,85 @@ class ErrorMappingTests(ServerBackedTestCase):
                 error = self.assert_error(response, 405, "method_not_allowed")
                 self.assertIn("allowed method(s)", error["message"])
 
+    # -- an early error response survives the close ------------------------ #
+    def test_an_early_error_response_survives_an_unread_request_body(self) -> None:
+        """The transport never loses an error to the connection close (D26).
+
+        Every early refusal - the ``501`` of a declared-but-unimplemented path, the ``405`` of a
+        wrong method, the ``404`` of an unknown path and the static-asset ``405`` - is answered
+        before the request body would be read. With ``HTTP/1.0`` the response closes the connection,
+        and a socket closed while the client's declared body is still unread is *reset*
+        (``WSAECONNABORTED`` / ``10053`` on Windows) instead of shut down cleanly, so the client can
+        lose a response the server already sent. The transport now drains the declared body before
+        it answers.
+
+        This drives the transport with a raw socket rather than ``urllib`` so both interleavings are
+        deterministic: the body sent together with the headers (what ``urllib`` and ``curl`` do),
+        and the body sent while the refusal is being prepared. The client then reads the refusal
+        whole and keeps reading until the server closes it: a clean shutdown ends with zero bytes,
+        while a reset raises - which is the regression this test pins.
+        """
+        import socket
+        import time
+        from urllib.parse import urlsplit
+
+        self.create_demo_plan()
+        cases = (
+            ("POST", "/api/plans/demo-route-01/reoptimize", 501, "unsupported_capability"),
+            ("GET", "/api/plans/demo-route-01/optimize", 405, "method_not_allowed"),
+            ("POST", "/api/plans/demo-route-01/route", 405, "method_not_allowed"),
+            ("POST", "/api/plans/nope/bogus", 404, "unknown_path"),
+            ("POST", "/not-a-static-path.js", 405, "method_not_allowed"),
+        )
+        split = urlsplit(self.base_url)
+        body = json.dumps({"ignored": True}).encode("utf-8")
+        for body_first in (True, False):
+            for index, (method, path, status, code) in enumerate(cases):
+                with self.subTest(body_first=body_first, case=f"{index}:{method} {path}"):
+                    request = (
+                        f"{method} {path} HTTP/1.0\r\n"
+                        "Host: 127.0.0.1\r\n"
+                        "Content-Type: application/json\r\n"
+                        f"Content-Length: {len(body)}\r\n"
+                        "\r\n"
+                    ).encode("ascii")
+                    with socket.create_connection(
+                        (split.hostname, split.port), timeout=30
+                    ) as sock:
+                        sock.settimeout(30)
+                        sock.sendall(request + body if body_first else request)
+                        if not body_first:
+                            time.sleep(0.3)  # the refusal is being prepared; the body is unread
+                            sock.sendall(body)
+                        received = bytearray()
+                        while b"\r\n\r\n" not in received:
+                            chunk = sock.recv(4096)
+                            self.assertTrue(
+                                chunk, msg=f"the server closed without answering {path}"
+                            )
+                            received.extend(chunk)
+                        head, _, rest = bytes(received).partition(b"\r\n\r\n")
+                        declared = int(
+                            dict(
+                                line.split(": ", 1)
+                                for line in head.decode("iso-8859-1").split("\r\n")[1:]
+                            )["Content-Length"]
+                        )
+                        self.assertTrue(
+                            head.startswith(f"HTTP/1.0 {status} ".encode("ascii")),
+                            msg=head.decode("iso-8859-1"),
+                        )
+                        while len(rest) < declared:
+                            chunk = sock.recv(4096)
+                            self.assertTrue(
+                                chunk, msg=f"the response to {path} was truncated"
+                            )
+                            rest += chunk
+                        # A clean shutdown ends with zero bytes; a reset raises, losing the error.
+                        self.assertEqual(sock.recv(4096), b"", msg=f"the close after {path} reset")
+                    document = json.loads(rest.decode("utf-8"))
+                    self.assertEqual(document["error"]["code"], code)
+
     # -- 409 --------------------------------------------------------------- #
     def test_a_stop_change_that_carries_nothing_is_a_409(self) -> None:
         self.create_demo_plan()
@@ -441,26 +521,41 @@ class ErrorMappingTests(ServerBackedTestCase):
         response = self.post("/api/plans", body={"nonsense": 1})
         self.assert_error(response, 422, "invalid_input")
 
-    def test_the_u14_endpoints_are_501_not_404(self) -> None:
+    def test_the_u14_endpoints_are_implemented_not_501(self) -> None:
+        """U13 declared these paths as later-unit 501s; U14 implements them (docs/DECISIONS.md D39).
+
+        The recommendation is a live ``200``, a selection body is validated (``422`` here), a
+        cancellation with nothing selected is the documented ``409``, the route without a selection
+        is ``409 no_first_stop_selected`` and the history is an empty read-only ``200``.
+        """
         self.create_demo_plan()
         cases = (
-            ("GET", "/api/plans/demo-route-01/recommendation"),
-            ("POST", "/api/plans/demo-route-01/selection"),
-            ("DELETE", "/api/plans/demo-route-01/selection"),
-            ("GET", "/api/plans/demo-route-01/route"),
-            ("GET", "/api/plans/demo-route-01/runs"),
-            ("POST", "/api/plans/demo-route-01/reoptimize"),
+            ("GET", "/api/plans/demo-route-01/recommendation", 200, None),
+            ("POST", "/api/plans/demo-route-01/selection", 422, "invalid_input"),
+            ("DELETE", "/api/plans/demo-route-01/selection", 409, "illegal_state"),
+            (
+                "GET",
+                "/api/plans/demo-route-01/route",
+                409,
+                "no_first_stop_selected",
+            ),
+            ("GET", "/api/plans/demo-route-01/runs", 200, None),
         )
-        for method, path in cases:
+        for method, path, status, code in cases:
             with self.subTest(method=method, path=path):
-                response = self.request(method, path)
-                error = self.assert_error(response, 501, "unsupported_capability")
-                self.assertTrue(
-                    "U14" in error["message"] or "not implemented" in error["message"],
-                    msg=error["message"],
-                )
+                response = self.request(method, path, body={} if method == "POST" else None)
+                self.assertEqual(response.status, status, msg=response.text)
+                if code is not None:
+                    self.assertEqual(response.json()["error"]["code"], code)
 
-    def test_a_wrong_method_on_a_declared_u14_path_is_a_405(self) -> None:
+    def test_a_later_stage_endpoint_is_still_a_501(self) -> None:
+        """Reoptimization after a served stop is a later stage, and it is refused honestly."""
+        self.create_demo_plan()
+        response = self.post("/api/plans/demo-route-01/reoptimize", body={})
+        error = self.assert_error(response, 501, "unsupported_capability")
+        self.assertIn("not implemented", error["message"])
+
+    def test_a_wrong_method_on_a_u14_path_is_a_405(self) -> None:
         response = self.put("/api/plans/demo-route-01/recommendation", body={})
         self.assert_error(response, 405, "method_not_allowed")
 

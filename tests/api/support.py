@@ -7,14 +7,15 @@ no external network and no external service.
 Where the database lives
 ------------------------
 
-Each test gets its own SQLite database, and it is a **file** rather than an in-process
-``mode=memory`` URI. That is a deliberate, documented consequence of the storage boundary:
-:func:`storage.sqlite.database.connect` passes the identifier straight to
-``sqlite3.connect()`` **without** ``uri=True``, so a ``file:...?mode=memory&cache=shared`` string is
-treated as a filesystem path (SQLite would literally create a file named ``file:``). This suite must
-not change storage semantics, so it exercises the supported case instead: a real database file,
-opened from the gitignored ``var/`` directory through the same helper the server uses, and deleted
-at the end of the test class. The cleanliness test
+Each test gets its own SQLite **file**, opened from the gitignored ``var/`` directory through the
+same helper the server uses and deleted at the end of the test class, so two tests can never share a
+database.
+
+An in-process ``file:...?mode=memory&cache=shared`` URI is supported by
+:func:`storage.sqlite.database.connect` (it enables URI semantics for a ``file:`` identifier only),
+but it is deliberately **not** used here: a shared-cache in-memory database is keyed by its name
+**process-wide**, so two concurrently running test cases that picked the same name would silently
+share one database, while a file gives each case its own storage. The cleanliness test
 (``tests/storage/test_migrations.py::test_no_database_artifacts_in_the_repository``) runs *after*
 this module and must find nothing, so every scratch tree is removed in ``tearDownClass``.
 """
@@ -30,6 +31,7 @@ import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass
+from datetime import time
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +73,40 @@ def cleanup_scratch_root() -> None:
     shutil.rmtree(SCRATCH_ROOT, ignore_errors=True)
 
 
+# --------------------------------------------------------------------------- #
+# U14 fixtures: a DEMO/SYNTHETIC matrix variant and a constructed infeasible plan
+# --------------------------------------------------------------------------- #
+def build_infeasible_demo_plan(plan_id: str = "demo-unreachable"):
+    """A copy of the demo fixture whose stops all close before the driver can arrive.
+
+    Every enabled stop is given the same fixed window, ``01:00`` to ``02:00`` **local** on the plan's
+    service date, while the driver departs at ``04:00`` local (``demo.dataset``: 04:00 Europe/Moscow).
+    The window is therefore already closed for every candidate of every complete route - the earliest
+    possible arrival is the departure itself - so the engine evaluates all candidates and rejects all
+    of them on the stops they cannot serve. Nothing about the resulting payload is constructed by
+    hand; the engine produces it.
+
+    Returns ``(plan, window_stop_id)``.
+    """
+    from dataclasses import replace as dataclass_replace
+
+    from core.model.service_window import ServiceWindow, WindowKind
+    from demo.dataset import build_demo_plan
+
+    plan = build_demo_plan(plan_id=plan_id)
+    window = ServiceWindow(
+        window_kind=WindowKind.FIXED, start_local=time(1, 0), end_local=time(2, 0)
+    )
+    stops = tuple(
+        dataclass_replace(stop, service_window=window)
+        if stop.enabled
+        else stop  # a disabled stop keeps the fixture's own window: it is never routed
+        for stop in plan.stops
+    )
+    plan = dataclass_replace(plan, stops=stops)
+    return plan, plan.active_stops()[0].id
+
+
 @dataclass(frozen=True)
 class Response:
     """One HTTP response, parsed for assertions."""
@@ -95,12 +131,23 @@ class Response:
 class ApiServerTestCase(unittest.TestCase):
     """Base case: an in-process server on an ephemeral loopback port and a clean database."""
 
+    #: When ``True``, :meth:`setUp` keeps the database the class prepared in ``setUpClass`` instead
+    #: of creating a fresh one. A U14 case that prepares an expensive plan state (a selection and a
+    #: recorded run) sets this, so the tests can read that state without paying for it again.
+    use_prepared_database = False
+
     def setUp(self) -> None:
         self.scratch = new_scratch_directory()
         self.addCleanup(shutil.rmtree, self.scratch, True)
-        self.services = ApiServices(new_database_file(self.scratch))
+        self.services = self.make_services(
+            self.class_database if self.use_prepared_database else new_database_file(self.scratch)
+        )
         self.addCleanup(self.services.close)
         self.server = None
+
+    def make_services(self, identifier: str) -> ApiServices:
+        """The services this case runs. A U14 case may override it to inject a matrix fixture."""
+        return ApiServices(identifier)
 
     def start_server(self, *, static_root: Path | str | None = None) -> str:
         """Start the server on an ephemeral port; returns its base URL (no trailing slash)."""
@@ -160,6 +207,12 @@ class ApiServerTestCase(unittest.TestCase):
 
         ``body`` is JSON-encoded; ``raw_body`` is sent verbatim (for malformed-JSON tests). An HTTP
         error response is returned rather than raised, because the status code is under test.
+
+        The client timeout is generous **on purpose**: the U14 engine-facing endpoints recompute a
+        recommendation or a route synchronously and legitimately take seconds (31 complete routes on
+        the demo plan; the ~50-stop portfolio worst case is about 8 s, D36/D37). A tight timeout would
+        turn a slow-but-correct answer into a spurious failure, while the server's own bounded
+        per-plan lock is what keeps a slow request honest.
         """
         url = (base_url or self.base_url) + path
         data: bytes | None
@@ -178,7 +231,7 @@ class ApiServerTestCase(unittest.TestCase):
             url, data=data, method=method, headers=request_headers
         )
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
+            with urllib.request.urlopen(request, timeout=60) as response:
                 return Response(
                     status=response.status,
                     headers={k.lower(): v for k, v in response.headers.items()},
@@ -200,12 +253,21 @@ class ApiServerTestCase(unittest.TestCase):
     def put(self, path: str, **kwargs: Any) -> Response:
         return self.request("PUT", path, **kwargs)
 
+    def delete(self, path: str, **kwargs: Any) -> Response:
+        return self.request("DELETE", path, **kwargs)
+
     # -- convenience ----------------------------------------------------- #
     def create_demo_plan(self) -> dict[str, Any]:
         """``POST /api/plans`` and return the plan payload, asserting that it was created."""
         response = self.post("/api/plans", body={})
         self.assertEqual(response.status, 201, msg=response.text)
         return response.json()["data"]
+
+    def select_first_stop(self, plan_id: str, mode: str, stop_id: str) -> Response:
+        """``POST /api/plans/{id}/selection`` (the body shape of the documented endpoint)."""
+        return self.post(
+            f"/api/plans/{plan_id}/selection", body={"mode": mode, "stop_id": stop_id}
+        )
 
 
 class ServerBackedTestCase(ApiServerTestCase):

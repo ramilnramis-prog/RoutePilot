@@ -247,6 +247,23 @@ class ErrorDocumentTests(unittest.TestCase):
         for status in (400, 404, 405, 409, 422, 500, 501, 503):
             self.assertIn(status, statuses)
 
+    def test_the_engine_facing_codes_are_in_the_error_tables_not_only_docstrings(self) -> None:
+        """The U14 codes live where the error table lives: the documented codes and the mapping."""
+        from api.http_server import ERROR_STATUS_MAP
+        from api.services import NoFirstStopSelected, PlanBusy, UnknownRun
+
+        documented = {
+            "unknown_run": (404, UnknownRun),
+            "no_first_stop_selected": (409, NoFirstStopSelected),
+            "plan_busy": (409, PlanBusy),
+        }
+        for code, (status, exception) in documented.items():
+            with self.subTest(code=code):
+                self.assertIn(code, serialization.ERROR_CODES)
+                self.assertEqual(serialization.ERROR_CODES[code][0], status)
+                self.assertTrue(serialization.ERROR_CODES[code][1])
+                self.assertEqual(ERROR_STATUS_MAP[exception], (status, code))
+
 
 if __name__ == "__main__":
     unittest.main()

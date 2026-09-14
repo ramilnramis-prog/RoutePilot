@@ -9,7 +9,7 @@ and it holds **no business formula**: every number it returns is produced by
 Routing and behaviour
 =====================
 
-* ``GET /api/health`` - the honest capability/environment document (D12/D16/D19);
+* ``GET /api/health`` - the honest capability/environment document (D12/D16/D19/D39);
 * ``GET /api/plans`` - the stored plans;
 * ``GET /api/plans/{id}`` - one plan with its stops, first-stop state and provenance;
 * ``POST /api/plans`` - create (or return) the deterministic DEMO/SYNTHETIC demo plan;
@@ -17,8 +17,65 @@ Routing and behaviour
 * ``GET /api/settings/{key}`` / ``PUT /api/settings/{key}`` - the ``app_settings`` store,
   including the approved tile keys of D15;
 * everything else: a ``404`` JSON error; an API path that exists with another method: ``405``;
-* a declared-but-unimplemented API path (recommendation, selection, route, runs - U14): ``501``
-  with the capability explained, which is how this transport stays honest about missing features.
+* a declared-but-unimplemented API path (reoptimization after a served stop - a later stage):
+  ``501`` with the capability explained, which is how this transport stays honest about missing
+  features.
+
+Engine-facing endpoints (Stage 4 U14, D39; every one is synchronous and has no job/status sibling)
+================================================================================================
+
+===================================================================  ==================================================
+endpoint                                                             what it does
+===================================================================  ==================================================
+``GET /api/plans/{id}/recommendation``                                 **live recompute** of the exhaustive first-stop
+                                                                     recommendation. ADVISORY: the payload states that
+                                                                     it is a recommendation and NOT an applied decision
+                                                                     (``advisory``, ``applied_decision: false``,
+                                                                     ``as_plan_state: false``, ``note``). Nothing is
+                                                                     written: no plan change, no run row (owner
+                                                                     decision 5). A ``no_fully_feasible_route``
+                                                                     outcome is a valid ``200`` with its diagnostics
+                                                                     and no recommended stop (v2 section 14)
+``POST /api/plans/{id}/selection``                                     apply the driver's first stop. Body:
+                                                                     ``{"mode": "recommend"|"manual"|"accept",
+                                                                     "stop_id": "..."}``. Sets mode, provenance and
+                                                                     ``pinned`` through the domain and persists it
+                                                                     (D4-D11/D32); it does **not** recompute a route
+                                                                     and appends **no** run
+``DELETE /api/plans/{id}/selection``                                   cancel / unpin: back to
+                                                                     ``awaiting_first_stop_choice`` with a ``null``
+                                                                     selected stop and a ``null`` source (D8/D9)
+``GET /api/plans/{id}/route``                                          **live recompute** of the committed route for the
+                                                                     plan's current selection. Requires a selection:
+                                                                     ``409 no_first_stop_selected`` otherwise. Appends
+                                                                     no run
+``POST /api/plans/{id}/optimize``                                      recalculation that ALSO appends exactly **one**
+                                                                     immutable run row (``optimize`` the first time,
+                                                                     ``reoptimize`` afterwards). The only endpoint
+                                                                     that writes history
+``GET /api/plans/{id}/runs``                                           the immutable run history, oldest first, read-only
+``GET /api/runs/{run_id}``                                             one stored run by its own id, read-only
+===================================================================  ==================================================
+
+Latency contract and single-flight (owner decision 5, D39(e))
+=============================================================
+
+* **No GET writes anything.** ``recommendation``, ``route``, ``runs`` and ``runs/{id}`` append no
+  history and change no stored state; only ``POST /api/plans/{id}/optimize`` appends a run, and the
+  selection endpoints persist the decision that *is* the request (they do not recompute a route).
+* **Per-plan single-flight.** Recommendation, route and optimize computations are guarded by one
+  lock per plan id (``api.services.PLAN_LOCKS``), so two concurrent requests for the same plan cannot
+  run the exhaustive loop twice. The wait is **bounded**
+  (``api.services.PLAN_LOCK_TIMEOUT_SECONDS``, reported in ``GET /api/health``) and expiry answers
+  ``409 plan_busy`` with an honest message.
+* **Honest latency.** The exhaustive recommendation runs the real engine once per enabled stop and
+  has **no prefilter** (v2 section 20); at the ~50-enabled-stop portfolio scale the **accepted MVP
+  worst case is about 8 seconds** (D36/D37), and that figure is **reported, not hidden**. Every
+  computation response carries the measured ``computation_seconds``. There is **no background job
+  queue and no async job/status subsystem**: the request either answers synchronously or is refused.
+* **Never fabricated.** A timeout, a missing selection or an infeasible plan is answered with its
+  documented error or its documented diagnostics - never with a partial route, a placeholder winner
+  or a route the driver did not select.
 
 JSON responses carry ``application/json; charset=utf-8``. Static assets are served from ``web/``
 with ``text/html``/``text/css``/``application/javascript`` by extension and
@@ -36,22 +93,27 @@ Error mapping (the explicit table of this transport)
 ====================================================
 
 ==================================================================  ==========  ====================
-condition                                                           HTTP        documented code
+condition                                                            HTTP        documented code
 ==================================================================  ==========  ====================
 body is not valid JSON / not a JSON object / empty but required      400         ``invalid_body``
-unknown path                                                        404         ``unknown_path``
-unknown plan id                                                     404         ``unknown_plan``
-unknown stop id inside an existing plan                             404         ``unknown_stop``
-unknown settings key (nothing stored)                               404         ``unknown_setting``
-wrong method for a known path                                       405         ``method_not_allowed``
-illegal state transition / a change that carries no meaning         409         ``illegal_state``
-input validation and domain shape errors (``ValidationError``)      422         ``invalid_input``
+unknown path                                                         404         ``unknown_path``
+unknown plan id                                                      404         ``unknown_plan``
+unknown stop id inside an existing plan                              404         ``unknown_stop``
+unknown optimization-run id                                          404         ``unknown_run``
+unknown settings key (nothing stored)                                404         ``unknown_setting``
+wrong method for a known path                                        405         ``method_not_allowed``
+route asked for while no first stop is selected (D9/I4)              409         ``no_first_stop_selected``
+the plan's computation lock did not become free inside the
+documented bound (owner decision 5)                                  409         ``plan_busy``
+illegal state transition / a change that carries no meaning          409         ``illegal_state``
+input validation and domain shape errors (``ValidationError``),
+invalid mode/body, a disabled first stop, a mode/source mismatch     422         ``invalid_input``
 declared-but-unimplemented capability / any route mode but
-``SMART_ROUTE`` (``UnsupportedFeatureError``, D16/D19)              501         ``unsupported_capability``
+``SMART_ROUTE`` (``UnsupportedFeatureError``, D16/D19)               501         ``unsupported_capability``
 missing or unusable time zone data
-(``TimezoneDataMissingError``)                                      503         ``timezone_data_unavailable``
-corrupt stored state (any ``storage.StorageError``)                 500         ``storage_error``
-anything else                                                       500         ``internal_error``
+(``TimezoneDataMissingError``)                                       503         ``timezone_data_unavailable``
+corrupt stored state (any ``storage.StorageError``)                  500         ``storage_error``
+anything else                                                        500         ``internal_error``
 ==================================================================  ==========  ====================
 
 No domain error may ever become a silent ``2xx``: every handler either returns a payload produced
@@ -71,14 +133,20 @@ from urllib.parse import unquote, urlsplit
 
 from api import serialization
 from api.services import (
+    MAX_RANKED_RECOMMENDATION_CANDIDATES,
     MAX_REQUEST_BODY_BYTES,
     ApiServices,
     CapabilityNotImplemented,
     Conflict,
     InvalidInput,
+    NoFirstStopSelected,
     NotFound,
+    PlanBusy,
     ServiceError,
     TimezoneDataUnavailable,
+    UnknownPlan,
+    UnknownRun,
+    UnknownStop,
     health_payload,
 )
 from core.validation.errors import (
@@ -268,10 +336,17 @@ def _is_within(root: Path, candidate: Path) -> bool:
 # error mapping (the table of this transport)
 # --------------------------------------------------------------------------- #
 #: ``exception class -> (HTTP status, documented code)``. Looked up by walking the class's MRO, so
-#: a subclass of a mapped error inherits its mapping unless it is listed itself.
+#: a subclass of a mapped error inherits its mapping unless it is listed itself. The four
+#: ``NotFound`` subclasses are listed explicitly (U14): each one names *which* thing is missing, so
+#: the documented code never depends on the wording of a message.
 ERROR_STATUS_MAP: dict[type[BaseException], tuple[int, str]] = {
     InvalidInput: (422, "invalid_input"),
+    UnknownPlan: (404, "unknown_plan"),
+    UnknownStop: (404, "unknown_stop"),
+    UnknownRun: (404, "unknown_run"),
     NotFound: (404, "unknown_plan"),
+    NoFirstStopSelected: (409, "no_first_stop_selected"),
+    PlanBusy: (409, "plan_busy"),
     Conflict: (409, "illegal_state"),
     CapabilityNotImplemented: (501, "unsupported_capability"),
     TimezoneDataUnavailable: (503, "timezone_data_unavailable"),
@@ -284,11 +359,14 @@ ERROR_STATUS_MAP: dict[type[BaseException], tuple[int, str]] = {
     RoutePilotError: (500, "internal_error"),
 }
 
-#: Refinement used by the service layer: a plain :class:`NotFound` names *which* thing is missing
-#: through its message, and the transport picks the documented code from this table.
+#: Refinement used by the service layer for a **plain** :class:`NotFound` (the settings service): it
+#: names *which* thing is missing through its message, and the transport picks the documented code
+#: from this table. The plan/stop/run lookups of U14 raise their own subclasses above, so this
+#: message-based refinement is only the fallback for a not-found the service did not classify.
 _NOT_FOUND_CODES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bsettings key\b"), "unknown_setting"),
     (re.compile(r"\bstop\b"), "unknown_stop"),
+    (re.compile(r"\brun\b"), "unknown_run"),
     (re.compile(r"\bplan\b"), "unknown_plan"),
 )
 
@@ -329,13 +407,39 @@ class Route:
     handler: str
 
 
-#: The route table of this unit: the read/config surface plus the two approved write endpoints.
-#: ``{id}``/``{key}`` are single URL path segments (``[^/]+``), so a plan id or settings key can
-#: never span a path separator.
+#: The route table of this unit: the read/config surface, the engine-facing endpoints of U14 and the
+#: two approved write endpoints. ``{id}``/``{key}``/``{run_id}`` are single URL path segments
+#: (``[^/]+``), so a plan id, a settings key or a run id can never span a path separator.
 ROUTES: tuple[Route, ...] = (
     Route(re.compile(r"^/api/health$"), ("GET",), "health"),
     Route(re.compile(r"^/api/plans$"), ("GET", "POST"), "plans"),
     Route(re.compile(r"^/api/plans/(?P<plan_id>[^/]+)$"), ("GET", "PUT"), "plan_by_id"),
+    Route(
+        re.compile(r"^/api/plans/(?P<plan_id>[^/]+)/recommendation$"),
+        ("GET",),
+        "plan_recommendation",
+    ),
+    Route(
+        re.compile(r"^/api/plans/(?P<plan_id>[^/]+)/selection$"),
+        ("POST", "DELETE"),
+        "plan_selection",
+    ),
+    Route(
+        re.compile(r"^/api/plans/(?P<plan_id>[^/]+)/route$"),
+        ("GET",),
+        "plan_route",
+    ),
+    Route(
+        re.compile(r"^/api/plans/(?P<plan_id>[^/]+)/optimize$"),
+        ("POST",),
+        "plan_optimize",
+    ),
+    Route(
+        re.compile(r"^/api/plans/(?P<plan_id>[^/]+)/runs$"),
+        ("GET",),
+        "plan_runs",
+    ),
+    Route(re.compile(r"^/api/runs/(?P<run_id>[^/]+)$"), ("GET",), "run_by_id"),
     Route(
         re.compile(r"^/api/settings/(?P<key>[^/]+)$"),
         ("GET", "PUT"),
@@ -343,35 +447,20 @@ ROUTES: tuple[Route, ...] = (
     ),
 )
 
-#: API paths this unit deliberately does **not** implement (U14): the recommendation, the driver's
-#: selection, the computed route and the run history. They are declared here so the transport
-#: answers ``501`` with the capability explained instead of pretending the endpoint does not exist.
-#: ``(methods, path pattern, what arrives later)``.
+#: API paths this build deliberately does **not** implement: reoptimization after a served stop,
+#: which is a later stage (U16 and the stage after it), not U14. They are declared here so the
+#: transport answers ``501`` with the capability explained instead of pretending the endpoint does
+#: not exist. ``(methods, path pattern, what arrives later)``.
 KNOWN_NOT_IMPLEMENTED: tuple[tuple[tuple[str, ...], str, str], ...] = (
-    (
-        ("GET",),
-        r"^/api/plans/[^/]+/recommendation$",
-        "the first-stop recommendation (ranked complete routes; U14)",
-    ),
-    (
-        ("POST", "DELETE"),
-        r"^/api/plans/[^/]+/selection$",
-        "choosing, accepting or cancelling the driver's first stop (U14)",
-    ),
-    (
-        ("GET", "POST"),
-        r"^/api/plans/[^/]+/route$",
-        "the computed route with its timeline and metrics (U14)",
-    ),
-    (
-        ("GET",),
-        r"^/api/plans/[^/]+/runs$",
-        "the immutable optimization-run history (U14)",
-    ),
     (
         ("POST",),
         r"^/api/plans/[^/]+/reoptimize$",
         "reoptimization after a served stop (a later stage, not U14)",
+    ),
+    (
+        ("GET",),
+        r"^/api/plans/[^/]+/preview$",
+        "a cheap non-committing route preview (declared, not implemented in this build)",
     ),
 )
 
@@ -493,15 +582,20 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
 
         matched, allowed = self._match_api(method, path)
         if isinstance(matched, _NotImplemented):
+            self._drain_declared_body()
             self._write_error(
                 CapabilityNotImplemented(
-                    f"{method} {path} is declared but not implemented in this unit (U13 ships the "
-                    f"read/config surface only): it would provide {matched.description}"
+                    f"{method} {path} is declared but not implemented in this build: the read/config "
+                    "surface (health, plans, plan controls, settings) and the engine-facing surface "
+                    "(recommendation, the driver's selection, the committed route, the recalculation "
+                    "that appends one run row and the run history) are implemented; this endpoint is "
+                    f"a later stage, and it would provide {matched.description}"
                 )
             )
             return
         if matched is _MISS:
             if allowed:
+                self._drain_declared_body()
                 self._write_error(
                     _MethodNotAllowed(
                         f"{method} is not allowed on {path}; allowed method(s): "
@@ -509,6 +603,7 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
                     )
                 )
                 return
+            self._drain_declared_body()
             self._write_error(self._not_an_api_path(method, path))
             return
 
@@ -543,10 +638,48 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _not_an_api_path(method: str, path: str) -> ServiceError:
         return NotFound(
-            f"{method} {path} is not part of this API; U13 serves GET /api/health, "
-            "GET|POST /api/plans, GET|PUT /api/plans/{id}, GET|PUT /api/settings/{key} and the "
-            "static assets under web/"
+            f"{method} {path} is not part of this API; this surface serves GET /api/health, "
+            "GET|POST /api/plans, GET|PUT /api/plans/{id}, "
+            "GET /api/plans/{id}/recommendation, POST|DELETE /api/plans/{id}/selection, "
+            "GET /api/plans/{id}/route, POST /api/plans/{id}/optimize, GET /api/plans/{id}/runs, "
+            "GET /api/runs/{run_id}, GET|PUT /api/settings/{key} and the static assets under web/"
         )
+
+    def _drain_declared_body(self) -> None:
+        """Read and discard a declared request body before an early error response is written.
+
+        Every early refusal - the ``501`` of a declared-but-unimplemented path, the ``405`` of a
+        wrong method, the ``404`` of an unknown API path and the static-asset ``405`` - is answered
+        **before** the body would be read. This transport speaks ``HTTP/1.0`` and therefore closes
+        the connection after every response, and a socket closed while the peer's declared body is
+        still unread is *reset* (``WSAECONNABORTED`` / ``10053`` on Windows) instead of shut down
+        cleanly, so the client can lose a response the server already sent (``D26``: an error is
+        answered, never lost). Draining the declared bytes first leaves the socket quiet and the
+        close clean, so the refusal survives.
+
+        Exactly ``Content-Length`` bytes are read, bounded by :data:`MAX_REQUEST_BODY_BYTES`: a body
+        larger than the limit is never buffered (``_read_json_body`` refuses it on the paths that do
+        read one). A header that is missing, unparseable or non-positive declares no body, so
+        nothing is read. Nothing is parsed, validated or acted upon - this is transport
+        housekeeping, not a semantic change, and every status code, error code and message stays
+        exactly as it was.
+
+        The read does wait for bytes the client has declared, which is the point: a client that
+        sends its body only after seeing the response (and so would otherwise have that body reset
+        under its feet) is answered instead of aborted. ``Content-Length`` is the client's own
+        promise of how much it is about to send, and every ordinary client sends it with the
+        request rather than after the response.
+        """
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            return
+        try:
+            length = int(raw_length)
+        except ValueError:
+            return
+        if length <= 0:
+            return
+        self.rfile.read(min(length, MAX_REQUEST_BODY_BYTES))
 
     def _read_json_body(self, method: str) -> Any:
         """The parsed JSON body, or ``None`` when the request carries none.
@@ -624,6 +757,111 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
         record = self.server.services.plans.update_plan_controls(plan_id, body)
         self._write_json(200, serialization.plan_document(record.plan, record.data_provenance))
 
+    # -- U14: recommendation, selection, route and run history ----------- #
+    def _handle_plan_recommendation(self, match: re.Match[str], body: Any) -> None:
+        """``GET /api/plans/{id}/recommendation`` - live recompute, advisory, writes nothing."""
+        self._refuse_body("GET /api/plans/{id}/recommendation", body)
+        result = self.server.services.recommendations.recommend(match.group("plan_id"))
+        report = result.report
+        self._write_json(
+            200,
+            serialization.recommendation_document(
+                report,
+                computed_at=(
+                    None
+                    if report.resolved_at is None
+                    else serialization.instant_text(report.resolved_at)
+                ),
+                computation_seconds=result.computation_seconds,
+                ranked_limit=MAX_RANKED_RECOMMENDATION_CANDIDATES,
+            ),
+        )
+
+    def _handle_plan_selection(self, match: re.Match[str], body: Any) -> None:
+        """``POST``/``DELETE /api/plans/{id}/selection`` - the driver's decision (D4-D11/D32).
+
+        Applying a selection persists the driver's decision and **appends no run**: it does not
+        recompute a route, so there is nothing to record (owner decision 5). ``GET
+        /api/plans/{id}/route`` computes the route for whatever is selected.
+        """
+        plan_id = match.group("plan_id")
+        if self.command == "DELETE":
+            result = self.server.services.selections.clear_first_stop(plan_id)
+        else:
+            request = _require_object_body(body, "POST /api/plans/{id}/selection")
+            unknown = sorted(set(request) - self.server.services.selections.ACCEPTED_FIELDS)
+            if unknown:
+                raise InvalidInput(
+                    "POST /api/plans/{id}/selection accepts only 'mode' and 'stop_id'; unexpected "
+                    f"field(s): {', '.join(unknown)}"
+                )
+            result = self.server.services.selections.select_first_stop(
+                plan_id, request.get("mode"), request.get("stop_id")
+            )
+        self._write_json(200, serialization.selection_document(result.plan))
+
+    def _handle_plan_route(self, match: re.Match[str], body: Any) -> None:
+        """``GET /api/plans/{id}/route`` - live recompute of the committed route; writes nothing."""
+        self._refuse_body("GET /api/plans/{id}/route", body)
+        result = self.server.services.routes.committed_route(match.group("plan_id"))
+        self._write_json(
+            200,
+            serialization.route_document(
+                result.solution,
+                plan_id=result.plan.id,
+                route_fingerprint=result.route_fingerprint,
+                computation_seconds=result.computation_seconds,
+            ),
+        )
+
+    def _handle_plan_optimize(self, match: re.Match[str], body: Any) -> None:
+        """``POST /api/plans/{id}/optimize`` - recalculate AND append exactly one run row."""
+        self._refuse_body("POST /api/plans/{id}/optimize", body)
+        result = self.server.services.routes.optimize_and_record(match.group("plan_id"))
+        self._write_json(
+            201,
+            serialization.run_document(
+                result.run,
+                computation={
+                    "computation_seconds": result.computation_seconds,
+                    "recommendation_seconds": result.recommendation_seconds,
+                    "route_seconds": result.route_seconds,
+                    "note": (
+                        "measured latency of this recalculation: it recomputed the recommendation, "
+                        "computed the committed route and appended exactly one immutable run row. "
+                        "No metric was recomputed by the transport."
+                    ),
+                },
+            ),
+        )
+
+    def _handle_plan_runs(self, match: re.Match[str], body: Any) -> None:
+        """``GET /api/plans/{id}/runs`` - the immutable history, oldest first; writes nothing."""
+        self._refuse_body("GET /api/plans/{id}/runs", body)
+        plan_id = match.group("plan_id")
+        runs = self.server.services.routes.list_runs(plan_id)
+        self._write_json(200, serialization.run_list_document(plan_id, runs))
+
+    def _handle_run_by_id(self, match: re.Match[str], body: Any) -> None:
+        """``GET /api/runs/{run_id}`` - one stored run by its own id; writes nothing."""
+        self._refuse_body("GET /api/runs/{run_id}", body)
+        run = self.server.services.routes.get_run(match.group("run_id"))
+        self._write_json(200, serialization.run_document(run))
+
+    def _refuse_body(self, endpoint: str, body: Any) -> None:
+        """These endpoints take no body: a body would imply a parameter that is not implemented.
+
+        ``DELETE``/``GET`` never carry one through this transport, and ``POST
+        /api/plans/{id}/optimize`` accepts nothing; a body is refused rather than ignored, so a
+        client cannot believe it sent an option that had no effect (D16).
+        """
+        if body:
+            raise InvalidInput(
+                f"{endpoint} accepts no request body, got {sorted(body)}; every parameter of this "
+                "endpoint is in its URL and its documented behaviour, and an unimplemented option "
+                "is refused rather than silently ignored"
+            )
+
     def _handle_setting_by_key(self, match: re.Match[str], body: Any) -> None:
         key = match.group("key")
         if self.command == "GET":
@@ -646,6 +884,7 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
     # -- static assets --------------------------------------------------- #
     def _serve_static(self, method: str, url_path: str) -> None:
         if method != "GET":
+            self._drain_declared_body()
             self._write_error(
                 _MethodNotAllowed(
                     f"{method} is not allowed on a static asset; use GET (the UI is read-only in "
@@ -714,6 +953,22 @@ class _BadRequest(ServiceError):
     """The request body is not a JSON object (400 in the mapping)."""
 
     code = "invalid_body"
+
+
+def _require_object_body(body: Any, endpoint: str) -> dict[str, Any]:
+    """The request's body as a JSON object, or a ``422`` naming the endpoint that needs one.
+
+    ``_read_json_body`` already refused anything that is not a JSON *object* (``400``); this helper
+    covers the remaining case of a body that was never sent, which for an endpoint that documents a
+    body is a request error (``422``) rather than a silent default.
+    """
+    if body is None:
+        raise InvalidInput(f"{endpoint} needs a JSON object body")
+    if not isinstance(body, dict):  # pragma: no cover - the reader already guarantees the type
+        raise InvalidInput(
+            f"{endpoint} needs a JSON object body, got {type(body).__name__}"
+        )
+    return body
 
 
 class _MethodNotAllowed(ServiceError):

@@ -47,8 +47,8 @@ class ServiceTestCase(unittest.TestCase):
     """A clean file-backed database and a fresh :class:`ApiServices` per test.
 
     The database is a real file under the gitignored ``var/`` tree, created and removed per test:
-    see ``tests/api/support.py`` for why an in-process ``mode=memory`` URI is not usable here (the
-    storage connection helper does not enable SQLite's URI parsing).
+    see ``tests/api/support.py`` for why a per-test file is preferred to a process-wide
+    ``mode=memory`` URI even though the storage connection helper now opens such a URI correctly.
     """
 
     def setUp(self) -> None:

@@ -183,9 +183,19 @@ def connect(database: Path | str = ":memory:") -> sqlite3.Connection:
     ``database`` is ``":memory:"`` (the default) or an explicit file path; this module never
     invents a path. ``PRAGMA foreign_keys = ON`` is issued here, so every connection enforces the
     declared foreign keys, and the setting is verified rather than assumed.
+
+    **Identifier semantics (SQLite URIs).** An identifier that starts with ``file:`` is opened with
+    ``uri=True``, so the documented in-process form
+    ``file:name?mode=memory&cache=shared`` really is an in-memory SQLite URI: without URI semantics
+    ``sqlite3`` treats the whole string as a *filename* and silently creates a filesystem artifact
+    (on Windows, ``file:name?...`` is read as an NTFS alternate data stream, so the file that
+    appears is literally named ``file``). Every other identifier - ``":memory:"`` and an ordinary
+    path - is opened exactly as before, with ``uri=False``. The ``file:`` prefix is the only test:
+    ``uri=True`` must **not** be passed unconditionally, because an absolute Windows path such as
+    ``C:\\data\\routepilot.db`` contains a colon and SQLite would then parse ``C`` as a URI scheme.
     """
     identifier = str(database)
-    connection = sqlite3.connect(identifier)
+    connection = sqlite3.connect(identifier, uri=identifier.startswith("file:"))
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     enabled = connection.execute("PRAGMA foreign_keys").fetchone()[0]

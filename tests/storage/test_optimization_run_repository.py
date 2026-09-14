@@ -873,13 +873,38 @@ class AppendOnlyTests(RunRepositoryTestCase):
         self.assertIsNone(self.repository.latest("ghost"))
         self.assertEqual(self.sql("SELECT * FROM route_plans WHERE id = 'ghost'"), [])
 
+    def test_get_returns_one_run_by_its_own_id_or_none(self) -> None:
+        """The additive read lookup of Stage 4 U14 (``GET /api/runs/{id}``)."""
+        self.assertIsNone(self.repository.get("run-absent"))
+        self.repository.append(make_run("run-1", order=("b", "a")))
+        self.repository.append(make_run("run-2", order=("a", "b")))
+        loaded = self.repository.get("run-1")
+        self.assertEqual(loaded.id, "run-1")
+        self.assertEqual(list(loaded.order), [StopId("b"), StopId("a")])
+        self.assertEqual(self.repository.get("run-2"), self.repository.latest(self.plan_id))
+        # The lookup is a read: it appends nothing and rewrites nothing.
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM route_optimization_runs"), 2)
+        self.assertEqual(self.repository.list_for_plan(self.plan_id)[0], loaded)
+
+    def test_get_re_validates_a_hand_edited_row(self) -> None:
+        """A stored row is never trusted just because it was addressed by id (D38 item 5)."""
+        self.repository.append(make_run("run-1"))
+        self.mutate_run("run-1", order_json="not json at all")
+        with self.assertRaises(InvalidOptimizationRunError):
+            self.repository.get("run-1")
+        # The same row is refused by every other read path, so ``get`` is not a softer door.
+        with self.assertRaises(InvalidOptimizationRunError):
+            self.repository.list_for_plan(self.plan_id)
+
     def test_the_repository_has_no_update_and_no_delete_api(self) -> None:
         for forbidden in ("update", "delete", "remove", "save", "replace", "clear", "delete_run"):
             with self.subTest(method=forbidden):
                 self.assertFalse(hasattr(self.repository, forbidden))
+        # ``get`` is the additive read lookup of Stage 4 U14 (one row by its own primary key, for
+        # ``GET /api/runs/{id}``): it reads and never writes, so the append-only surface is intact.
         self.assertEqual(
             {name for name in dir(self.repository) if not name.startswith("_")},
-            {"append", "list_for_plan", "latest"},
+            {"append", "get", "list_for_plan", "latest"},
         )
 
     def test_a_second_append_of_the_same_run_id_is_refused_not_an_overwrite(self) -> None:

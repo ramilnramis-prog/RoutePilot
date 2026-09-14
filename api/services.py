@@ -1,4 +1,4 @@
-"""Framework-agnostic application layer for the RoutePilot API (Stage 4 U13).
+"""Framework-agnostic application layer for the RoutePilot API (Stage 4 U13/U14).
 
 This module holds the application logic that the HTTP transport calls. It is deliberately **not**
 an HTTP module:
@@ -7,11 +7,11 @@ an HTTP module:
   transport (today stdlib ``http.server``, later possibly FastAPI) owns all of that;
 * failures are raised as the framework-neutral :class:`ServiceError` hierarchy below, whose names
   describe the *application* outcome (``NotFound``, ``InvalidInput``, ``CapabilityNotImplemented``,
-  ...). ``api/http_server.py`` maps those names onto HTTP status codes in one documented table, so
-  replacing the transport never touches this file;
+  ``NoFirstStopSelected``, ``PlanBusy``, ...). ``api/http_server.py`` maps those names onto HTTP
+  status codes in one documented table, so replacing the transport never touches this file;
 * results are Python data and domain objects (:class:`PlanRecord`, :class:`AppSetting`,
-  ``dict``/``list`` of plain values). ``api/serialization.py`` turns domain objects into
-  JSON-ready payloads.
+  :class:`RecommendationResult`, :class:`RouteResult`, :class:`RunResult`, ...).
+  ``api/serialization.py`` turns domain objects into JSON-ready payloads.
 
 Two architectural rules from the architecture document are enforced by construction:
 
@@ -19,8 +19,59 @@ Two architectural rules from the architecture document are enforced by construct
   imports ``api/`` from the inside - ``core/`` stays pure (D1, ``tests/test_core_isolation.py``);
 * **no business formula lives in the transport or in this layer.** Every number the API reports is
   read from the domain objects, the storage repositories or ``core``'s own capability tables. A
-  service method may validate a request and apply the approved MVP controls (``enabled`` and
-  ``priority``) through the domain, and may not compute a metric of its own.
+  service method may validate a request and apply the approved MVP controls (``enabled``,
+  ``priority`` and the driver's first-stop decision) through the domain, and may not compute a
+  route metric of its own. The engine's own report, evaluation and metrics objects are carried
+  through unchanged, so HTTP can never show a figure the engine did not produce.
+
+Engine-facing surface (Stage 4 U14, D39)
+========================================
+:class:`RecommendationService`, :class:`SelectionService` and :class:`RouteService` add the
+engine-facing application logic; the HTTP endpoints are documented in ``api/http_server.py``.
+
+* **recommendation** - load the plan from SQLite and run the REAL engine
+  (:func:`core.engine.first_stop.evaluation.evaluate_first_stop_candidates`): exhaustive, one
+  candidate per enabled stop, no prefilter, no shortlist and no approximation (v2 section 20, D34).
+  The report is returned as plain Python data through the engine's own report object.
+  ``no_fully_feasible_route`` is a VALID answer with its diagnostics, never an error and never a
+  fabricated winner (v2 section 14);
+* **selection** - the driver's decision applied THROUGH THE DOMAIN and persisted via the plan
+  repository (D4-D11/D32). Accepting the recommendation is mode ``recommend`` with
+  ``selection_source = accepted_recommendation``; choosing another stop is mode ``manual`` with
+  ``selection_source = manual_choice``; either way the selection is pinned (D5). Clearing returns
+  the plan to ``awaiting_first_stop_choice`` with a null selected stop and a null source (D8/D9).
+  An unknown stop, a disabled stop, an illegal transition and a mode/source mismatch are refused
+  **loudly** - never repaired silently. A recommendation is never stored as the plan's selection;
+* **committed route** - for the **selected** first stop only, computed by the real optimizer through
+  the existing solve boundary (:func:`core.engine.optimizer.solve.solve_route`), returning the
+  order, the per-stop timeline rows, the metrics with both baselines and the explicit violations.
+  With nothing selected the service reports the documented :class:`NoFirstStopSelected` state
+  instead of inventing a route;
+* **run history** - one immutable row appended per recalculation, recording the fingerprints, the
+  tzdata version actually in use, the cost policy actually used, the order, the recommendation
+  payload that was shown (as history, never plan state), the top-K, the violations and the metrics
+  with both baselines. The recorded recommendation is the engine's **own** ranked list and the
+  top-K is its head, so a row can never claim a ``recommended_stop_id`` that is not ``top_k[0]``;
+  because the driver decides, the run's committed ``order`` may legitimately start at a different
+  stop than the one recorded as recommended, and both facts belong in the row (D32).
+  ``created_at_utc`` is **when the row was created**, read from this layer's injectable UTC clock
+  seam (never the plan's departure time, which is the plan's own fact). Run ids are API-assigned and
+  deterministic (see :func:`run_id_for`): the API contains no business formula, but it must name the
+  row it appends.
+
+GET endpoints never write anything (owner decision 5)
+-----------------------------------------------------
+Computing a recommendation or a route appends **no** history, and no read path changes the plan.
+Only ``optimize_and_record`` (``POST /api/plans/{id}/optimize``) appends a run; the selection change
+is persisted because it *is* the request, and it does not recompute or append. All three
+computations (recommendation, route, optimize) are guarded by a **per-plan single-flight lock**:
+two concurrent requests for the same plan cannot run the exhaustive loop twice. Acquisition uses a
+documented bounded wait (:data:`PLAN_LOCK_TIMEOUT_SECONDS`); when the bound expires the caller gets
+:class:`PlanBusy` (``409 plan_busy``) with an honest message rather than a partial or fabricated
+result. There is no background job queue and no async job/status subsystem (owner decision, D39(e)).
+Each response carries the measured ``computation_seconds`` of its engine work; the accepted MVP
+latency is stated honestly in ``api/http_server.py`` and in :func:`health_payload` (the ~50-stop
+portfolio worst case is about 8 seconds, D36/D37).
 
 Concurrency: a ``sqlite3`` connection is not safe to share between threads, so every request gets
 its **own** connection, opened from the configured database identifier through
@@ -33,44 +84,106 @@ database holds no keeper connection at all.
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
-from collections.abc import Iterator
+import threading
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from core.engine.providers import ProviderCapabilities
+from core.engine.first_stop.evaluation import (
+    FirstStopEvaluationReport,
+    evaluate_first_stop_candidates,
+)
+from core.engine.optimizer.route_fingerprint import route_fingerprint
+from core.engine.optimizer.solve import solve_route
+from core.engine.providers import ProviderCapabilities, TravelMatrix
 from core.model.cost_policy import CostComponent, default_component_declarations
-from core.model.first_stop import FirstStopMode, FirstStopState, SelectionSource
-from core.model.ids import PlanId
+from core.model.first_stop import (
+    FirstStopCandidate,
+    FirstStopIntent,
+    FirstStopMode,
+    FirstStopState,
+    SelectionSource,
+)
+from core.model.ids import PlanId, RunId
+from core.model.optimization_run import (
+    ALGORITHM_NAME,
+    ALGORITHM_VERSION,
+    OptimizationRun,
+    OptimizationRunMetrics,
+    OptimizationRunRecommendation,
+    RunKind,
+    RunStatus,
+)
 from core.model.route_mode import ROUTE_MODE_STATUS, RouteMode
+from core.model.route_plan import RoutePlan
 from core.model.route_stop import GeocodeStatus, RouteStop, ServiceStatus
 from core.model.service_window import WindowEndPolicy, WindowKind
+from core.model.solution import RouteSolution, SolutionStatus
 from core.model.value_objects import DataProvenance
-from core.repositories import AppSettingsRepository, RoutePlanRepository
+from core.repositories import (
+    AppSettingsRepository,
+    RouteOptimizationRunRepository,
+    RoutePlanRepository,
+)
 from core.time import tzdata
 from core.validation.errors import TZDATA_INSTALL_COMMAND, RoutePilotError
 from demo.dataset import DEMO_PLAN_ID, build_demo_plan, demo_warning_text
+from demo.synthetic_matrix import demo_matrix
 from storage import StorageError
 from storage.sqlite.app_settings_repository import SqliteAppSettingsRepository
-from storage.sqlite.database import SCHEMA_VERSION, connect, current_version, migrate
+from storage.sqlite.database import (
+    SCHEMA_VERSION,
+    connect,
+    current_version,
+    migrate,
+    utc_now_iso,
+)
+from storage.sqlite.optimization_run_repository import SqliteRouteOptimizationRunRepository
 from storage.sqlite.route_plan_repository import SqliteRoutePlanRepository
 
 __all__ = [
+    "FIRST_STOP_REQUEST_MODES",
+    "IMPLEMENTED_ROUTE_MODE",
+    "KNOWN_SETTING_KEYS",
+    "MAX_RANKED_RECOMMENDATION_CANDIDATES",
+    "MAX_REQUEST_BODY_BYTES",
+    "PLAN_LOCKS",
+    "PLAN_LOCK_TIMEOUT_SECONDS",
     "AppSetting",
     "ApiServices",
     "CapabilityNotImplemented",
     "Conflict",
     "DatabaseState",
     "InvalidInput",
+    "NoFirstStopSelected",
     "NotFound",
+    "PlanBusy",
+    "PlanLockRegistry",
     "PlanRecord",
     "PlanService",
+    "RecommendationResult",
+    "RecommendationService",
+    "RouteResult",
+    "RouteService",
+    "RunResult",
+    "SelectionResult",
+    "SelectionService",
     "ServiceError",
     "SettingsService",
+    "TimezoneDataUnavailable",
+    "UnknownPlan",
+    "UnknownRun",
+    "UnknownStop",
+    "build_run",
     "capability_report",
     "health_payload",
+    "run_id_for",
 ]
 
 #: The one route mode this build implements (D19: the MVP implements SMART_ROUTE only).
@@ -95,6 +208,22 @@ DEMO_PROVENANCE = DataProvenance.DEMO_SYNTHETIC
 
 #: Upper bound on a JSON request body the transport accepts, in bytes.
 MAX_REQUEST_BODY_BYTES = 1_048_576
+
+#: The documented bounded wait for the per-plan single-flight lock (owner decision 5, D39(e)).
+#: A request that cannot take the plan's lock within this many seconds is refused with
+#: ``409 plan_busy`` instead of queueing behind an exhaustive loop; there is no job queue (D39(e)).
+PLAN_LOCK_TIMEOUT_SECONDS = 30.0
+
+#: How many ranked candidates a recommendation response returns **as a top-K view** (v2 section 13).
+#: This truncates the reported list only: ``counts.ranked`` still states how many candidates were
+#: ranked, no candidate is dropped from the evaluation, and a ranked candidate that is not returned
+#: in the K list is exactly the documented "alternatives" boundary. Rejected candidates are always
+#: returned in full, because the diagnostics of v2 section 14 are the point of reporting them.
+MAX_RANKED_RECOMMENDATION_CANDIDATES = 10
+
+#: ``YYYY-MM-DDTHH:MM:SSZ`` - the storage UTC timestamp convention (schema section 1). A recorded
+#: run's ``created_at_utc`` is taken from the same whole-second convention the storage layer writes.
+_UTC_Z_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 # --------------------------------------------------------------------------- #
@@ -129,6 +258,47 @@ class CapabilityNotImplemented(ServiceError):
     """A declared-but-unimplemented capability was requested (501 in the HTTP mapping)."""
 
     code = "unsupported_capability"
+
+
+class UnknownPlan(NotFound):
+    """No stored plan has the addressed id (404 ``unknown_plan``)."""
+
+    code = "unknown_plan"
+
+
+class UnknownStop(NotFound):
+    """The addressed plan has no stop with that id (404 ``unknown_stop``)."""
+
+    code = "unknown_stop"
+
+
+class UnknownRun(NotFound):
+    """No stored optimization run has the addressed id (404 ``unknown_run``)."""
+
+    code = "unknown_run"
+
+
+class NoFirstStopSelected(Conflict):
+    """A committed route was asked for while no first stop is selected (409, D9/I4).
+
+    ``awaiting_first_stop_choice`` is a valid state, not a corruption: the engine recommends and the
+    driver decides, so there is simply no route to commit yet. Reporting it as its own documented
+    code keeps it distinguishable from an illegal transition, and the service never invents a route
+    (or a selection) to fill the gap.
+    """
+
+    code = "no_first_stop_selected"
+
+
+class PlanBusy(Conflict):
+    """Another request holds this plan's computation lock (409 ``plan_busy``, owner decision 5).
+
+    Raised when the documented bounded wait of :data:`PLAN_LOCK_TIMEOUT_SECONDS` expires. The honest
+    answer is to refuse: there is no background job queue and no async job/status subsystem, and a
+    partial or fabricated result must never be returned (D39(e)).
+    """
+
+    code = "plan_busy"
 
 
 class TimezoneDataUnavailable(ServiceError):
@@ -167,6 +337,177 @@ class AppSetting:
     key: str
     value: Any
     configured: bool
+
+
+@dataclass(frozen=True)
+class RecommendationResult:
+    """One live recommendation computation (U14): the engine's own report, unchanged.
+
+    ``report`` is the :class:`~core.engine.first_stop.evaluation.FirstStopEvaluationReport` the real
+    engine produced - not a copy, not a summary and not a re-derivation - so the transport cannot
+    report a candidate the engine did not evaluate. ``computation_seconds`` is the measured
+    wall-clock duration of the engine call itself, so a client can see the honest latency of the
+    exhaustive loop it just paid for.
+    """
+
+    plan: RoutePlan
+    report: FirstStopEvaluationReport
+    computation_seconds: int
+
+
+@dataclass(frozen=True)
+class SelectionResult:
+    """The driver's first-stop decision after a change (U14).
+
+    ``previous_state`` and ``previous_stop_id`` describe the decision **before** this request, so a
+    caller can see what changed without diffing two payloads. The plan is the persisted one that was
+    read back through the repository.
+    """
+
+    plan: RoutePlan
+    plan_id: str
+    previous_state: FirstStopState
+    previous_stop_id: str | None
+
+
+@dataclass(frozen=True)
+class RouteResult:
+    """One committed-route computation for the plan's current selection (U14).
+
+    ``solution`` is the engine's own :class:`~core.model.solution.RouteSolution` (order, timelines,
+    metrics with both baselines, violations) and ``route_fingerprint`` is the committed route's own
+    digest of that exact order (v2 section 7, D4). The API exposes **no matrix fingerprint**: ``core``
+    offers no identity helper for the configured travel matrix (``route_fingerprint`` and
+    ``RoutePlan.inputs_fingerprint`` *accept* a caller-supplied ``matrix_fingerprint`` but compute
+    none), so the payload carries the two fingerprints the engine actually produces and no field
+    that would be permanently ``null``.
+    """
+
+    plan: RoutePlan
+    solution: RouteSolution
+    route_fingerprint: str
+    computation_seconds: int
+    route_seconds: int
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """One appended run row plus the derivation that produced it (U14, U11/D38).
+
+    ``run`` is the immutable history row as it was appended and read back; the plan, solution and
+    recommendation are the engine objects the row was built from, so a caller can serialize the same
+    route without recomputing it. ``recommendation_seconds`` and ``route_seconds`` are the measured
+    durations of the two engine phases, and ``computation_seconds`` is their total - the honest
+    latency of the recalculation this request paid for. As in :class:`RouteResult`, no matrix
+    fingerprint is carried: the API does not expose one.
+    """
+
+    plan: RoutePlan
+    solution: RouteSolution
+    recommendation_report: FirstStopEvaluationReport
+    route_fingerprint: str
+    run: OptimizationRun
+    recommendation_seconds: int
+    route_seconds: int
+    computation_seconds: int
+
+
+# --------------------------------------------------------------------------- #
+# the per-plan single-flight lock (owner decision 5, D39(e))
+# --------------------------------------------------------------------------- #
+class _PlanLock:
+    """A non-reentrant lock with a *bounded* wait, so contention is an answer, not a queue.
+
+    The bound is part of the contract: a caller either gets the lock inside it or is told the plan is
+    busy. Nothing here waits indefinitely and nothing here runs work in the background.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def acquire(self, timeout_seconds: float) -> bool:
+        """Take the lock within ``timeout_seconds``; ``False`` means the bound expired."""
+        return self._lock.acquire(timeout=max(0.0, float(timeout_seconds)))
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+
+class PlanLockRegistry:
+    """One single-flight lock per plan id, shared by every service instance in the process.
+
+    The registry is **module-level** on purpose: the invariant it protects ("two concurrent requests
+    for the same plan cannot run the exhaustive loop twice") is a property of the plan in this
+    process, not of one service object. A per-``ApiServices`` registry would let two containers over
+    the same database run the loop twice for one plan, which is exactly the situation the owner's
+    per-plan single-flight requirement rules out. Locks are created on demand and never removed, so a
+    plan id can never be served by two different locks; the map is one small object per plan id the
+    process has served.
+    """
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._locks: dict[str, _PlanLock] = {}
+
+    def lock_for(self, plan_id: str) -> _PlanLock:
+        with self._guard:
+            lock = self._locks.get(plan_id)
+            if lock is None:
+                lock = _PlanLock()
+                self._locks[plan_id] = lock
+            return lock
+
+    @contextmanager
+    def held(self, plan_id: str, *, timeout_seconds: float) -> Iterator[None]:
+        """Hold the plan's lock for the block, or raise :class:`PlanBusy`.
+
+        A request that times out gets an honest refusal naming the bound it waited for - never a
+        partial result and never a second unsynchronised engine run.
+        """
+        lock = self.lock_for(plan_id)
+        if not lock.acquire(timeout_seconds):
+            raise PlanBusy(
+                f"plan {plan_id!r} is already computing another recommendation or route and did not "
+                f"become free within the documented bound of {timeout_seconds:g}s; this API answers "
+                "synchronously and has no background job queue, so the request is refused rather "
+                "than returning a partial or fabricated result (owner decision 5, D39(e)). Retry "
+                "shortly."
+            )
+        try:
+            yield
+        finally:
+            lock.release()
+
+
+#: The process-wide single-flight registry (see :class:`PlanLockRegistry`).
+PLAN_LOCKS = PlanLockRegistry()
+
+
+def run_id_for(
+    *, plan_id: str, run_kind: RunKind, route_fingerprint: str, sequence: int
+) -> str:
+    """The deterministic id of the run this recalculation appends.
+
+    Run ids are **API-assigned**, because the domain and the approved schema leave the id to the
+    caller and this layer is the caller. The id is a digest of the plan, the run kind, the route
+    fingerprint and the plan's run sequence, so the same recalculation of the same plan names the
+    same row reproducibly while two successive runs can never collide. It is an identifier, not a
+    measurement: no business figure is derived here.
+    """
+    material = f"{plan_id}|{run_kind.value}|{route_fingerprint}|{sequence}"
+    return f"run-{hashlib.sha256(material.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _measured_seconds(duration_seconds: float) -> int:
+    """A measured wall-clock duration in whole seconds (latency evidence, never a route metric).
+
+    Durations in this API are integer seconds; a sub-second computation is reported as ``0``, which
+    is the honest rounding of a measurement, not a claim that no work happened.
+    """
+    return max(0, int(round(duration_seconds)))
 
 
 # --------------------------------------------------------------------------- #
@@ -345,21 +686,28 @@ def _tzdata_payload() -> dict[str, Any]:
 
 
 def health_payload(state: DatabaseState) -> dict[str, Any]:
-    """The honest health/capability document (spec sections 23/31/33/36, D12/D16/D19).
+    """The honest health/capability document (spec sections 23/31/33/36, D12/D16/D19/D36/D39).
 
     It reports the IANA database source and version *or* the honest fallback state, states that
-    the only shipped data is the DEMO/SYNTHETIC fixture, and lists the implemented capabilities
-    next to the not-implemented ones (traffic, side-of-road, turn-by-turn, geocoding, real
-    routing, and every route mode except SMART_ROUTE) so a UI can be honest instead of optimistic.
+    the only shipped data is the DEMO/SYNTHETIC fixture, lists the implemented capabilities next to
+    the not-implemented ones (traffic, side-of-road, turn-by-turn, geocoding, real routing, and
+    every route mode except SMART_ROUTE) so a UI can be honest instead of optimistic, and states the
+    **accepted MVP latency honestly** (U14): the synchronous exhaustive recommendation has no
+    background job, a documented bounded per-plan single-flight wait - reported as the bound this
+    instance actually runs with - and a worst case of about 8 seconds at the ~50-enabled-stop
+    portfolio scale (D36/D37).
     """
     implemented, not_implemented = capability_report()
     report = tzdata.probe_tzdata()
+    bound = getattr(state, "plan_lock_timeout_seconds", PLAN_LOCK_TIMEOUT_SECONDS)
     return {
         "status": "ok",
         "api_version": "1",
-        "read_only_units": (
-            "U13 ships the read/config surface only: no recommendation, selection, route or run "
-            "endpoints yet (U14), and no web UI yet (U15)"
+        "implemented_units": (
+            "U13 ships the read/config surface (health, plans, plan controls, settings) and U14 "
+            "adds the engine-facing surface: the recommendation, the driver's selection, the "
+            "committed route, the recalculation that appends one run row, and the run history. The "
+            "web UI (U15) still does not exist."
         ),
         "timezone_data": _tzdata_payload(),
         "demo_data": {
@@ -374,6 +722,25 @@ def health_payload(state: DatabaseState) -> dict[str, Any]:
             "schema_version": state.schema_version,
             "schema_target_version": SCHEMA_VERSION,
             "implementation": state.plan_repository_name,
+        },
+        "computation": {
+            "synchronous": True,
+            "background_job_queue": False,
+            "per_plan_single_flight": True,
+            "plan_busy_status": 409,
+            "plan_busy_error_code": "plan_busy",
+            "lock_wait_bound_seconds": bound,
+            "computation_seconds_reported": True,
+            "accepted_mvp_latency": (
+                "about 8 seconds worst case for the exhaustive first-stop recommendation at the "
+                "~50-enabled-stop portfolio scale (D36/D37); this is an ACCEPTED MVP limitation, "
+                "reported as measured and never hidden"
+            ),
+            "notes": (
+                "every response carries the measured computation_seconds of its engine work, and a "
+                "request that cannot take the plan lock within the bound is refused with 409 "
+                "plan_busy instead of returning a partial or fabricated route (owner decision 5)"
+            ),
         },
         "implemented_capabilities": implemented,
         "not_implemented_capabilities": not_implemented,
@@ -421,6 +788,12 @@ class _SettingsRepositoryFactory(Protocol):
     def __call__(self, connection: sqlite3.Connection) -> AppSettingsRepository: ...
 
 
+class _RunRepositoryFactory(Protocol):
+    """Builds the immutable run-history repository over one connection for one request."""
+
+    def __call__(self, connection: sqlite3.Connection) -> RouteOptimizationRunRepository: ...
+
+
 def _is_in_memory(identifier: str) -> bool:
     return ":memory:" in identifier or "mode=memory" in identifier
 
@@ -453,9 +826,14 @@ class DatabaseState:
         *,
         plan_repository_factory: _PlanRepositoryFactory | None = None,
         settings_repository_factory: _SettingsRepositoryFactory | None = None,
+        run_repository_factory: _RunRepositoryFactory | None = None,
         plan_repository_name: str | None = None,
+        plan_lock_timeout_seconds: float = PLAN_LOCK_TIMEOUT_SECONDS,
     ) -> None:
         self.identifier = str(identifier)
+        #: The documented bounded wait of this instance's per-plan single-flight lock; the health
+        #: payload reports exactly this value, so the documented bound is never a second constant.
+        self.plan_lock_timeout_seconds = float(plan_lock_timeout_seconds)
         display = (
             self.identifier
             if _is_in_memory(self.identifier)
@@ -473,6 +851,11 @@ class DatabaseState:
             settings_repository_factory
             if settings_repository_factory is not None
             else SqliteAppSettingsRepository
+        )
+        self._run_factory: _RunRepositoryFactory = (
+            run_repository_factory
+            if run_repository_factory is not None
+            else SqliteRouteOptimizationRunRepository
         )
         self.plan_repository_name = plan_repository_name or _factory_name(self._plan_factory)
         #: Kept open only for an in-process SQLite database; ``None`` for a file-backed one.
@@ -550,6 +933,17 @@ class DatabaseState:
     def settings_repository(self, connection: sqlite3.Connection) -> AppSettingsRepository:
         return self._settings_factory(connection)
 
+    def run_repository(
+        self, connection: sqlite3.Connection
+    ) -> RouteOptimizationRunRepository:
+        """The immutable run-history repository for one request (U14).
+
+        The adapter is constructed without any provenance of its own: a run row carries the
+        provenance of the computation that produced it (the demo travel matrix reports
+        ``DEMO_SYNTHETIC``), and this API never invents it.
+        """
+        return self._run_factory(connection)
+
 
 # --------------------------------------------------------------------------- #
 # plans: the read/config surface of U13
@@ -575,14 +969,26 @@ _UNIMPLEMENTED_REQUEST_FIELDS: dict[str, tuple[str, str]] = {
     "turn_by_turn": ("demand_turn_by_turn", "turn-by-turn navigation"),
     "recommend": (
         "unsupported_capability",
-        "a first-stop recommendation (the recommendation endpoint arrives in U14)",
+        "a first-stop recommendation requested through the plan-creation body (the recommendation "
+        "has its own endpoint, GET /api/plans/{id}/recommendation, U14)",
     ),
-    "route": ("unsupported_capability", "a computed route (the route endpoint arrives in U14)"),
-    "runs": ("unsupported_capability", "optimization-run history (arrives in U14)"),
+    "route": (
+        "unsupported_capability",
+        "a computed route requested through the plan-creation body (the route has its own "
+        "endpoint, GET /api/plans/{id}/route, U14)",
+    ),
+    "runs": (
+        "unsupported_capability",
+        "optimization-run history requested through the plan-creation body (it has its own "
+        "endpoint, GET /api/plans/{id}/runs, U14)",
+    ),
 }
 
 #: Per-stop control fields ``PUT /api/plans/{id}`` accepts - exactly the two MVP controls the
-#: owner approved. Drag/reorder and the first-stop choice are deliberately absent (U14).
+#: owner approved. Drag/reorder and the first-stop choice are deliberately absent: the first stop has
+#: its own endpoint (``POST``/``DELETE /api/plans/{id}/selection``, U14) because it is a different
+#: kind of change (the driver's decision, not a stop attribute), and drag/reorder is out of scope
+#: for this stage (D39(d)).
 _UPDATE_STOP_FIELDS = frozenset({"stop_id", "enabled", "priority"})
 
 #: A plan id must remain one clean path segment, so it can never smuggle a slash or a control
@@ -697,8 +1103,10 @@ class PlanService:
         :func:`dataclasses.replace`, so the model's own validation runs, and the plan is written
         back through the repository (which re-validates on the next load).
 
-        Deliberately absent, because they belong to U14: drag/reorder, and any change to the
-        first-stop choice. Asking for either is refused rather than half-implemented.
+        Deliberately absent: drag/reorder (out of scope for this stage, D39(d)) and any change to the
+        first-stop choice - that is the driver's **decision**, and it goes through its own endpoint
+        (``POST``/``DELETE /api/plans/{id}/selection``, U14), so it is never smuggled into a stop
+        attribute. Asking for either here is refused rather than half-implemented.
 
         Raises:
             InvalidInput: the body is not an object, has no ``stops`` list, or a stop update is
@@ -712,8 +1120,9 @@ class PlanService:
         if unexpected:
             raise InvalidInput(
                 "PUT /api/plans/{id} accepts only the approved MVP controls in a 'stops' list; "
-                f"unexpected field(s): {', '.join(unexpected)}. Drag/reorder and the first-stop "
-                "choice arrive in U14."
+                f"unexpected field(s): {', '.join(unexpected)}. Drag/reorder is out of scope for "
+                "this stage, and the first-stop choice has its own endpoint: POST|DELETE "
+                "/api/plans/{id}/selection."
             )
         if "stops" not in request:
             raise InvalidInput(
@@ -830,7 +1239,8 @@ class PlanService:
         if unknown:
             raise InvalidInput(
                 f"stops[{index}] accepts only stop_id, enabled and priority; unexpected field(s): "
-                f"{', '.join(unknown)}. Drag/reorder and the first-stop choice arrive in U14."
+                f"{', '.join(unknown)}. Drag/reorder is out of scope for this stage, and the "
+                "first-stop choice has its own endpoint (POST|DELETE /api/plans/{id}/selection)."
             )
         stop_id = _require_str(entry.get("stop_id"), f"stops[{index}].stop_id")
         changes: dict[str, Any] = {}
@@ -844,6 +1254,223 @@ class PlanService:
                 "'priority'"
             )
         return stop_id, changes
+
+
+# --------------------------------------------------------------------------- #
+# U14 helpers: request vocabulary, the selection state machine and the run row
+# --------------------------------------------------------------------------- #
+#: The documented ``mode`` vocabulary of the selection endpoint. ``accept`` is a documented
+#: shorthand for "the driver pressed start-from-this-stop on the recommendation" and is exactly
+#: ``recommend`` semantics; it exists so a UI can express the action it performed.
+FIRST_STOP_REQUEST_MODES: tuple[str, ...] = (
+    FirstStopMode.RECOMMEND.value,
+    FirstStopMode.MANUAL.value,
+    "accept",
+)
+
+
+def _require_first_stop_mode(value: Any) -> str:
+    """The request's ``mode``, or :class:`InvalidInput` naming the accepted values (422)."""
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidInput(
+            f"mode must be a non-empty string, got {value!r}; expected one of "
+            f"{list(FIRST_STOP_REQUEST_MODES)}"
+        )
+    mode = value.strip()
+    if mode not in FIRST_STOP_REQUEST_MODES:
+        raise InvalidInput(
+            f"unknown first-stop mode {mode!r}; expected one of {list(FIRST_STOP_REQUEST_MODES)}. "
+            "A mode/source combination the domain does not accept is refused rather than repaired "
+            "(D6/D7)."
+        )
+    return mode
+
+
+def _find_stop(plan: RoutePlan, stop_id: str, *, plan_id: str) -> RouteStop:
+    """The addressed stop, or :class:`UnknownStop` (404) - never a silent skip."""
+    for stop in plan.stops:
+        if stop.id == stop_id:
+            return stop
+    raise UnknownStop(f"plan {plan_id!r} has no stop {stop_id!r}")
+
+
+def _require_committed_route_is_possible(plan: RoutePlan) -> None:
+    """A committed route requires the driver's explicit first stop (I4/D32, D9).
+
+    ``awaiting_first_stop_choice`` is a valid state, not an error: the honest answer is
+    :class:`NoFirstStopSelected` (409) and never a route the engine built by choosing a stop itself.
+    """
+    if plan.first_service_stop.selected_stop_id is None:
+        raise NoFirstStopSelected(
+            f"plan {plan.id!r} is awaiting_first_stop_choice: no first stop is selected, so there "
+            "is no committed route to return. The engine recommends, the driver decides (D4/D32, "
+            "I4) - accept the recommendation or choose a stop first."
+        )
+
+
+def _run_status_for(solution: RouteSolution) -> RunStatus:
+    """The stored run status, taken from the solution's own status - never a second judgement."""
+    if solution.status is SolutionStatus.OK:
+        return RunStatus.OK
+    if solution.status is SolutionStatus.HAS_INFEASIBLE_WINDOWS:
+        return RunStatus.HAS_INFEASIBLE_WINDOWS
+    return RunStatus.UNRESOLVED_FIRST_STOP
+
+
+def _measurement_for(solution: RouteSolution, *, run_id: str) -> OptimizationRunMetrics:
+    """The stored metrics of the recorded route, with both real baselines (D22/D38).
+
+    All three routes are the engine's **own** objects: the committed route and the two baselines the
+    :class:`~core.model.solution.RouteSolution` already distinguishes - the **user** baseline (the
+    driver's BEFORE order, labelled ``BaselineKind.USER_SUPPLIED``) and the **algorithm** baseline
+    (the labelled greedy seed).
+
+    Nothing is re-derived here, and in particular the user baseline is **not** re-evaluated. The
+    service may have been configured with a travel matrix that is not the demo fixture, so recomputing
+    the plan's BEFORE order against ``demo_matrix()`` would produce numbers the engine never produced:
+    the stored run would then disagree with the route payload of the same selection (and, for any
+    non-demo matrix, the recomputation would differ and fail the append outright). The engine's
+    baseline is the authoritative one.
+    """
+    if solution.algorithm_baseline is None:  # pragma: no cover - the solver always supplies it
+        raise StorageError(
+            f"run {run_id!r} cannot be recorded: the committed route carries no algorithm baseline, "
+            "and the approved schema stores both baselines with every run (D22/D38)"
+        )
+    if solution.user_baseline is None:  # pragma: no cover - the solver always supplies it
+        raise StorageError(
+            f"run {run_id!r} cannot be recorded: the committed route carries no user baseline, and "
+            "the approved schema stores both baselines with every run (D22/D38)"
+        )
+    return OptimizationRunMetrics.of(
+        user_baseline=solution.user_baseline,
+        algorithm_baseline=solution.algorithm_baseline,
+        after=solution.metrics,
+    )
+
+
+def _recorded_recommendation(
+    report: FirstStopEvaluationReport, *, ranked: tuple[FirstStopCandidate, ...]
+) -> OptimizationRunRecommendation:
+    """What the run recorded as the recommendation the engine showed (D32).
+
+    The row records **one** list - the engine's own ``ranked`` candidates, passed in here so the
+    recommendation and the run's ``top_k`` are provably built from the same list - for both facts it
+    stores: ``recommended_stop_id`` is the engine's recommendation (``ranked[0]``) and ``top_k`` is
+    that list's head. A row can therefore never claim a ``recommended_stop_id`` that is not
+    ``top_k[0]``.
+
+    The run's committed ``order`` may legitimately start at a **different** stop: the driver decides
+    (D6/D7/D32), and when they override the engine's ranking both facts belong in the row - what was
+    recommended, and what was committed. Recording the engine's own ranking is the honest history;
+    rewriting the ranking to match the driver's choice would claim the engine showed something it
+    did not. Nothing here selects, pins or applies anything: a recommendation stored in a run is
+    history, never plan state (D4/D11/D32).
+
+    The engine's own rules supply what the record needs: ``ranked`` is non-empty exactly when the
+    status is ``recommended`` (and then ``ranked[0]`` is the recommendation) and empty otherwise, so
+    no status is ever invented here; and every ranked candidate is an enabled stop, while the
+    committed route visits exactly the enabled stops, so every ranked id is also part of ``order``.
+    """
+    return OptimizationRunRecommendation(
+        status=report.status,
+        recommended_stop_id=report.recommended_stop_id,
+        ranked_stop_ids=tuple(candidate.stop_id for candidate in ranked),
+        resolved_at=report.resolved_at,
+        inputs_fingerprint=report.inputs_fingerprint,
+        diagnostics=report.diagnostics,
+    )
+
+
+def build_run(
+    *,
+    plan: RoutePlan,
+    solution: RouteSolution,
+    report: FirstStopEvaluationReport,
+    run_kind: RunKind,
+    run_id: str,
+    created_at_utc: datetime,
+) -> OptimizationRun:
+    """The immutable run row of one recalculation (U11/D38), built from the engine's own objects.
+
+    Every stored figure comes from the engine: the order, the violations, the metrics with both
+    baselines (via :func:`_measurement_for`), the recommendation payload the engine showed and its
+    top-K head, both taken from the engine's single ranked list (via
+    :func:`_recorded_recommendation`). ``created_at_utc`` is **when the row was created**, read from
+    the caller's clock seam (:meth:`RouteService._created_at_utc`) - never the plan's
+    ``departure_time``, which is the plan's own fact and means something different.
+    ``tzdata_version`` is the version actually reported by the environment's IANA database (``None``
+    when no database is reachable - never invented).
+    """
+    ranked = report.ranked
+    return OptimizationRun(
+        id=RunId(run_id),
+        plan_id=PlanId(plan.id),
+        run_kind=run_kind,
+        algorithm=ALGORITHM_NAME,
+        algorithm_version=ALGORITHM_VERSION,
+        inputs_fingerprint=solution.inputs_fingerprint,
+        route_fingerprint=route_fingerprint(plan, solution.order),
+        tzdata_version=tzdata.tzdata_version(),
+        cost_policy=plan.cost_policy,
+        data_provenance=solution.provenance,
+        status=_run_status_for(solution),
+        order=solution.order,
+        recommendation=_recorded_recommendation(report, ranked=ranked),
+        violations=solution.violations,
+        metrics=_measurement_for(solution, run_id=run_id),
+        created_at_utc=created_at_utc,
+        top_k=ranked[:MAX_RANKED_RECOMMENDATION_CANDIDATES] or None,
+    )
+
+
+def _find_run(
+    repository: RouteOptimizationRunRepository, *, plan_id: str, run_id: RunId
+) -> OptimizationRun:
+    """The run just appended, read back through the repository (history is the storage's answer).
+
+    The caller holds the plan's single-flight lock, so no other run of this plan can be appended
+    between the append and this read: ``latest`` is exactly the row that was just written, read back
+    through the storage adapter with every stored payload re-validated.
+    """
+    run = repository.latest(PlanId(plan_id))
+    if run is None or run.id != run_id:  # pragma: no cover - a vanished append is a storage fault
+        raise StorageError(
+            f"run {run_id!r} was appended for plan {plan_id!r} but could not be read back from the "
+            "run history"
+        )
+    return run
+
+
+def _find_run_by_id(state: DatabaseState, run_id: str) -> OptimizationRun:
+    """One run by its own id, read through the repositories (404 when no run has it).
+
+    The approved run port reads history **by plan** and the approved schema has no run-id lookup
+    outside the primary key, so this transport asks the store instead of issuing SQL of its own:
+    the SQLite adapter of this build offers ``RunRepository.get(run_id)``, and a repository that
+    does not is read through the plans it belongs to, which is the port's own vocabulary. A missing
+    run is :class:`UnknownRun` (404): absence is a normal answer for "the run with this id", not a
+    corruption (D26).
+    """
+    with state.connection() as connection:
+        run_repository = state.run_repository(connection)
+        loader = getattr(run_repository, "get", None)
+        if loader is not None:
+            run = loader(RunId(run_id))
+        else:
+            plan_repository = state.plan_repository(connection)
+            run = next(
+                (
+                    stored
+                    for plan in plan_repository.list()
+                    for stored in run_repository.list_for_plan(PlanId(plan.id))
+                    if stored.id == run_id
+                ),
+                None,
+            )
+    if run is None:
+        raise UnknownRun(f"no stored optimization run has id {run_id!r}")
+    return run
 
 
 # --------------------------------------------------------------------------- #
@@ -913,10 +1540,496 @@ class SettingsService:
 
 
 # --------------------------------------------------------------------------- #
+# the engine-facing surface: recommendation, selection, route, run history (U14)
+# --------------------------------------------------------------------------- #
+class _EngineService:
+    """Shared plumbing of the engine-facing services: plan access and the single-flight lock.
+
+    It owns no formula: it loads plans, takes the plan's lock and hands the domain objects to the
+    real engine. Every route mode guard is the domain's own (``RouteMode`` + ``ROUTE_MODE_STATUS``),
+    never a second registry maintained here.
+    """
+
+    def __init__(
+        self,
+        state: DatabaseState,
+        travel_matrix: TravelMatrix | Callable[[], TravelMatrix] | None = None,
+        *,
+        lock_timeout_seconds: float = PLAN_LOCK_TIMEOUT_SECONDS,
+    ) -> None:
+        self._state = state
+        self._matrix_source = demo_matrix if travel_matrix is None else travel_matrix
+        self._lock_timeout_seconds = float(lock_timeout_seconds)
+
+    # -- travel matrix --------------------------------------------------- #
+    def _matrix(self) -> TravelMatrix:
+        """The travel matrix this build uses: the deterministic DEMO/SYNTHETIC matrix.
+
+        One instance per computation, so every leg of a computation is priced by one provider; the
+        matrix is passed explicitly so a test can supply an equivalent provider without touching the
+        engine.
+        """
+        source = self._matrix_source
+        return source() if callable(source) else source
+
+    # -- locking --------------------------------------------------------- #
+    def plan_lock(self, plan_id: str):
+        """The process-wide single-flight lock of ``plan_id`` (used by the transport's tests too)."""
+        return PLAN_LOCKS.lock_for(plan_id)
+
+    @contextmanager
+    def _single_flight(self, plan_id: str) -> Iterator[None]:
+        with PLAN_LOCKS.held(plan_id, timeout_seconds=self._lock_timeout_seconds):
+            yield
+
+    # -- plans ----------------------------------------------------------- #
+    def _load(self, connection: sqlite3.Connection, plan_id: str) -> RoutePlan:
+        """The stored plan, or :class:`UnknownPlan` when no plan has that id (404)."""
+        identifier = _validate_plan_id(plan_id)
+        plan = self._state.plan_repository(connection).get(PlanId(identifier))
+        if plan is None:
+            raise UnknownPlan(f"no stored plan has id {identifier!r}")
+        return plan
+
+    @staticmethod
+    def _require_implemented_route_mode(plan: RoutePlan) -> None:
+        """The plan's route mode must be the one this build implements (501 otherwise, D19).
+
+        A plan this API can create is always ``SMART_ROUTE``; the guard exists so a stored row from
+        another build is refused loudly instead of being routed under an objective it never asked
+        for.
+        """
+        if plan.route_mode is not IMPLEMENTED_ROUTE_MODE:
+            raise CapabilityNotImplemented(
+                f"plan {plan.id!r} has route_mode {plan.route_mode.value!r}, which is declared in "
+                f"the domain but not implemented (status={ROUTE_MODE_STATUS[plan.route_mode]!r}); "
+                f"this build produces routes for {IMPLEMENTED_ROUTE_MODE.value} only and never "
+                "falls back to it silently (D19)"
+            )
+
+
+class RecommendationService(_EngineService):
+    """The exhaustive first-stop recommendation, as an advisory answer (U14; v2 sections 12-14)."""
+
+    def recommend(self, plan_id: str, *, matrix: TravelMatrix | None = None) -> RecommendationResult:
+        """Recompute the recommendation for ``plan_id`` and return the engine's own report.
+
+        The whole body runs under the plan's single-flight lock: the exhaustive loop runs once for
+        one plan at a time, and a caller that cannot take the lock inside the documented bound gets
+        :class:`PlanBusy` rather than a second concurrent exhaustive run. Nothing is written: the
+        plan, its first-stop state and the run history are all unchanged by this call (owner
+        decision 5), because a recommendation is derived and recomputable and is never plan state
+        (D4/D11/D32).
+
+        Raises:
+            UnknownPlan: no stored plan has that id (404).
+            CapabilityNotImplemented: the plan's route mode is not ``SMART_ROUTE`` (501, D19).
+            PlanBusy: the plan is already computing another recommendation or route (409).
+        """
+        with self._single_flight(plan_id):
+            with self._state.connection() as connection:
+                plan = self._load(connection, plan_id)
+                self._require_implemented_route_mode(plan)
+            legs = matrix if matrix is not None else self._matrix()
+            started = time.perf_counter()
+            report = evaluate_first_stop_candidates(plan=plan, travel_matrix=legs)
+            elapsed = time.perf_counter() - started
+        return RecommendationResult(
+            plan=plan, report=report, computation_seconds=_measured_seconds(elapsed)
+        )
+
+
+class SelectionService(_EngineService):
+    """The driver's first-stop decision, applied through the domain and persisted (U14; D4-D11/D32).
+
+    The state machine this service enforces, and nothing else:
+
+    ==============================  ==========  ==========================  ========  ===========================
+    request                         mode        selection_source            pinned    state
+    ==============================  ==========  ==========================  ========  ===========================
+    ``mode=recommend``, accepted    ``recommend``  ``accepted_recommendation``  ``True``   ``first_stop_selected``
+    ``mode=manual``                 ``manual``     ``manual_choice``            ``True``   ``first_stop_selected``
+    ``DELETE`` (cancel / unpin)     unchanged      ``None``                     ``False``  ``awaiting_first_stop_choice``
+    ==============================  ==========  ==========================  ========  ===========================
+
+    Refused loudly (never repaired silently): an unknown stop id, a disabled stop, an illegal
+    transition (accepting a recommendation that is not the engine's recommended stop, or accepting
+    when nothing is recommended), and a mode/source mismatch. A recommendation is never stored as
+    the plan's selection, and this service never writes a selection the driver did not make.
+    """
+
+    #: Fields ``POST /api/plans/{id}/selection`` accepts. A body carrying anything else is refused,
+    #: so an unimplemented request can never be silently ignored (D16).
+    ACCEPTED_FIELDS = frozenset({"mode", "stop_id"})
+
+    def __init__(
+        self,
+        state: DatabaseState,
+        travel_matrix: TravelMatrix | Callable[[], TravelMatrix] | None = None,
+        *,
+        lock_timeout_seconds: float = PLAN_LOCK_TIMEOUT_SECONDS,
+    ) -> None:
+        super().__init__(state, travel_matrix, lock_timeout_seconds=lock_timeout_seconds)
+        #: The last recommendation this service computed, for the accept verification only: the
+        #: engine is deterministic for one set of inputs, so re-verifying an unchanged board would
+        #: only repeat an exhaustive loop the same process just paid for. Keyed by the plan's own
+        #: ``inputs_fingerprint`` and holding exactly one entry, so a changed plan always
+        #: recomputes and the memo can never serve a stale answer.
+        self._last_report: tuple[str, FirstStopEvaluationReport] | None = None
+
+    def _verification_report(self, plan: RoutePlan) -> FirstStopEvaluationReport:
+        fingerprint = plan.inputs_fingerprint()
+        if self._last_report is not None and self._last_report[0] == fingerprint:
+            return self._last_report[1]
+        report = evaluate_first_stop_candidates(plan=plan, travel_matrix=self._matrix())
+        self._last_report = (fingerprint, report)
+        return report
+
+    def select_first_stop(
+        self, plan_id: str, mode: Any, stop_id: Any
+    ) -> SelectionResult:
+        """Apply the driver's choice ``(mode, stop_id)`` and persist it through the domain.
+
+        ``mode`` is the documented vocabulary of :class:`~core.model.first_stop.FirstStopMode`
+        (``recommend`` / ``manual`` / ``accept``); ``accept`` is the shorthand for "the driver
+        pressed start-from-this-stop on the recommendation" and is equivalent to
+        ``mode=recommend`` with the engine's current recommended stop.
+
+        Raises:
+            UnknownPlan: no stored plan has that id (404).
+            UnknownStop: the plan has no stop with that id (404).
+            InvalidInput: the mode is unknown, the stop is disabled, or the mode/source combination
+                is not one the domain accepts (422).
+            Conflict: the transition is illegal in the plan's current state - accepting something
+                that is not the current recommendation, or when nothing is recommended (409).
+            CapabilityNotImplemented: the plan's route mode is not ``SMART_ROUTE`` (501, D19).
+        """
+        requested = _require_first_stop_mode(mode)
+        identifier = _validate_plan_id(plan_id)
+        candidate_stop = _require_str(stop_id, "stop_id")
+        with self._single_flight(identifier):
+            with self._state.connection() as connection:
+                repository = self._state.plan_repository(connection)
+                plan = self._load(connection, identifier)
+                self._require_implemented_route_mode(plan)
+
+                previous = plan.first_service_stop
+                stop = _find_stop(plan, candidate_stop, plan_id=identifier)
+                if not stop.enabled:
+                    raise InvalidInput(
+                        f"stop {candidate_stop!r} is disabled, so it cannot be the first service "
+                        "stop: the driver's first stop must be a real, enabled stop (D20/D32). "
+                        "Restore the stop before choosing it."
+                    )
+                intent = self._intent_for(plan, requested, candidate_stop)
+                new_plan = replace(
+                    plan,
+                    first_service_stop=intent,
+                    order_overrides=plan.order_overrides,
+                )
+                repository.save(new_plan)
+                stored = repository.get(PlanId(identifier))
+                if stored is None:  # pragma: no cover - a save that vanished is a storage fault
+                    raise StorageError(
+                        f"plan {identifier!r} could not be read back after the selection was saved"
+                    )
+            return SelectionResult(
+                plan=stored,
+                plan_id=identifier,
+                previous_state=plan.first_stop_state,
+                previous_stop_id=previous.selected_stop_id,
+            )
+
+    def clear_first_stop(self, plan_id: str) -> SelectionResult:
+        """Cancel / unpin: back to ``awaiting_first_stop_choice`` with a null stop and source.
+
+        The plan keeps its mode (a driver who was in RECOMMEND mode stays in RECOMMEND mode) and
+        gets no substitute stop: the domain never chooses on the driver's behalf (D8/D9).
+
+        Raises:
+            UnknownPlan: no stored plan has that id (404).
+            Conflict: nothing was selected, so there is nothing to cancel (409).
+            CapabilityNotImplemented: the plan's route mode is not ``SMART_ROUTE`` (501, D19).
+        """
+        identifier = _validate_plan_id(plan_id)
+        with self._single_flight(identifier):
+            with self._state.connection() as connection:
+                repository = self._state.plan_repository(connection)
+                plan = self._load(connection, identifier)
+                self._require_implemented_route_mode(plan)
+                previous = plan.first_service_stop
+                if not previous.has_selection:
+                    raise Conflict(
+                        f"plan {identifier!r} is already awaiting_first_stop_choice: there is no "
+                        "selection to cancel, and this API does not treat a no-op as a change (D8)"
+                    )
+                new_plan = replace(
+                    plan,
+                    first_service_stop=previous.cleared(),
+                    order_overrides=plan.order_overrides,
+                )
+                repository.save(new_plan)
+                stored = repository.get(PlanId(identifier))
+                if stored is None:  # pragma: no cover - a save that vanished is a storage fault
+                    raise StorageError(
+                        f"plan {identifier!r} could not be read back after the selection was cleared"
+                    )
+            return SelectionResult(
+                plan=stored,
+                plan_id=identifier,
+                previous_state=plan.first_stop_state,
+                previous_stop_id=previous.selected_stop_id,
+            )
+
+    # -- the state machine ----------------------------------------------- #
+    def _intent_for(
+        self, plan: RoutePlan, requested: str, stop_id: str
+    ) -> FirstStopIntent:
+        """The domain intent this request describes, or a loud refusal.
+
+        The engine recommends; the driver decides (D4/D32). "Accept the recommendation" is only
+        legal for the stop the engine currently recommends: this service recomputes the
+        recommendation and, when it can be recomputed, requires the accepted stop to be the
+        recommended one (and not a rejected candidate, v2 section 14). Acceptance is deliberately a
+        **one-time** verification, not a later constraint: once the driver has chosen, a stop they
+        committed stays chosen (I3), and re-checking a stored decision against a fresh
+        recommendation is exactly the silent repair D5/D32 forbid.
+        """
+        if requested == "accept":
+            self._require_accepts_the_recommendation(plan, stop_id)
+            return FirstStopIntent.accepted_recommendation(stop_id)
+        if requested == FirstStopMode.RECOMMEND.value:
+            self._require_accepts_the_recommendation(plan, stop_id)
+            return FirstStopIntent(
+                FirstStopMode.RECOMMEND,
+                stop_id,
+                SelectionSource.ACCEPTED_RECOMMENDATION,
+                True,
+            )
+        # ``manual``: the driver chose a stop themselves. A manual choice is always
+        # ``manual_choice``, exactly as D6/D7 require, and FirstStopIntent rejects any other
+        # combination rather than normalising it.
+        return FirstStopIntent.manual_choice(stop_id, mode=FirstStopMode.MANUAL)
+
+    def _require_accepts_the_recommendation(self, plan: RoutePlan, stop_id: str) -> None:
+        """The stop must be the engine's current recommendation (D32, v2 section 14).
+
+        The check runs the real engine once, inside the caller's single-flight lock, and refuses
+        when nothing is recommended or when the named stop is not the recommended one - including
+        the case where the stop was evaluated and **rejected** as infeasible, which is never
+        presented as an accepted recommendation (v2 section 14).
+        """
+        report = self._verification_report(plan)
+        recommended = report.recommended_stop_id
+        if recommended is None:
+            raise Conflict(
+                f"plan {plan.id!r} has no recommendation to accept: the engine's outcome is "
+                f"{report.status.value!r}, so there is no fully feasible first stop to accept. "
+                "Choose a stop manually instead (v2 section 14, D9)."
+            )
+        if recommended != stop_id:
+            rejected = stop_id in {candidate.stop_id for candidate in report.rejected}
+            detail = (
+                "it was evaluated and REJECTED because its complete route misses a hard window, so "
+                "it is never presented as an accepted recommendation (v2 section 14)"
+                if rejected
+                else "it is not the stop the engine recommends"
+            )
+            raise Conflict(
+                f"stop {stop_id!r} cannot be accepted as the recommendation: the engine recommends "
+                f"{recommended!r} and {detail}. Send mode='manual' to choose another first stop, "
+                "or accept the recommended one (D32)."
+            )
+
+
+class RouteService(_EngineService):
+    """The committed route and the immutable run history (U14; v2 sections 12/15, D22, D38)."""
+
+    def __init__(
+        self,
+        state: DatabaseState,
+        travel_matrix: TravelMatrix | Callable[[], TravelMatrix] | None = None,
+        *,
+        lock_timeout_seconds: float = PLAN_LOCK_TIMEOUT_SECONDS,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        super().__init__(state, travel_matrix, lock_timeout_seconds=lock_timeout_seconds)
+        #: The clock a recorded run's ``created_at_utc`` comes from. It mirrors the injectable seam
+        #: of ``storage.sqlite.route_plan_repository``: production reads the real UTC wall clock and
+        #: a test pins the instant, so "when was this row created" is both honest and testable.
+        self._clock = clock if clock is not None else (lambda: datetime.now(timezone.utc))
+
+    def _created_at_utc(self) -> datetime:
+        """The UTC instant this run row is created, in the storage timestamp convention.
+
+        ``created_at_utc`` means **when the row was created** - the plan's ``departure_time`` is a
+        different fact and stays where it belongs. The instant is written through
+        :func:`storage.sqlite.database.utc_now_iso`, the same whole-second UTC helper the plan
+        repository stamps its own rows with, and is parsed back from that text so the value held here
+        is exactly the whole-second instant that will be stored (the run repository refuses a
+        sub-second ``created_at_utc`` rather than truncating it silently).
+        """
+        moment = self._clock()
+        if not isinstance(moment, datetime) or moment.tzinfo is None:
+            raise StorageError(
+                "the run clock must return a timezone-aware datetime (storage stores UTC only), "
+                f"got {moment!r}"
+            )
+        return datetime.strptime(utc_now_iso(moment), _UTC_Z_FORMAT).replace(tzinfo=timezone.utc)
+
+    def committed_route(
+        self, plan_id: str, *, matrix: TravelMatrix | None = None
+    ) -> RouteResult:
+        """Compute the committed complete route for the plan's **current** selection.
+
+        The route is produced by the real optimizer through the existing solve boundary
+        (:func:`core.engine.optimizer.solve.solve_route`): the same pipeline that priced the
+        candidate the driver accepted (I6). Nothing is written: a route request never appends a run
+        row (owner decision 5) and never changes the plan.
+
+        Raises:
+            UnknownPlan: no stored plan has that id (404).
+            NoFirstStopSelected: the plan is still ``awaiting_first_stop_choice`` (409, I4/D9) - the
+                honest answer instead of an invented route.
+            CapabilityNotImplemented: the plan's route mode is not ``SMART_ROUTE`` (501, D19).
+            PlanBusy: the plan is already computing (409).
+        """
+        with self._single_flight(plan_id):
+            with self._state.connection() as connection:
+                plan = self._load(connection, plan_id)
+                self._require_implemented_route_mode(plan)
+            return self._compute_route(plan, matrix=matrix)
+
+    def optimize_and_record(self, plan_id: str) -> RunResult:
+        """Recalculate the committed route AND append exactly one immutable run row.
+
+        This is the only endpoint that writes history (owner decision 5, D39(e)). The run kind is
+        ``optimize`` for the plan's **first** recorded run and ``reoptimize`` for every later
+        recalculation of the same plan - the documented rule: the first row records the initial
+        optimization, and every subsequent recalculation is a reoptimization of the same plan. The
+        kind is read from the stored history inside the same lock, so two concurrent requests cannot
+        both claim to be the first run.
+
+        The row records the engine's own objects: both fingerprints, the tzdata version actually in
+        use, the cost policy actually used, the order, the recommendation payload that was shown
+        (**history**, never plan state), the top-K candidates, the explicit violations and the
+        metrics with both baselines (U11/D38). Nothing here recomputes a metric.
+
+        Raises:
+            UnknownPlan: no stored plan has that id (404).
+            NoFirstStopSelected: the plan is still ``awaiting_first_stop_choice`` (409, I4/D9).
+            CapabilityNotImplemented: the plan's route mode is not ``SMART_ROUTE`` (501, D19).
+            PlanBusy: the plan is already computing (409).
+        """
+        with self._single_flight(plan_id):
+            legs = self._matrix()
+            with self._state.connection() as connection:
+                repository = self._state.plan_repository(connection)
+                run_repository = self._state.run_repository(connection)
+                plan = self._load(connection, plan_id)
+                self._require_implemented_route_mode(plan)
+                _require_committed_route_is_possible(plan)
+
+                recommendation_started = time.perf_counter()
+                report = evaluate_first_stop_candidates(plan=plan, travel_matrix=legs)
+                recommendation_seconds = (
+                    time.perf_counter() - recommendation_started
+                )
+
+                route_started = time.perf_counter()
+                result = self._compute_route(plan, matrix=legs, measured=False)
+                route_seconds = time.perf_counter() - route_started
+
+                existing = run_repository.list_for_plan(PlanId(plan.id))
+                sequence = len(existing)
+                run_kind = RunKind.OPTIMIZE if sequence == 0 else RunKind.REOPTIMIZE
+                run = build_run(
+                    plan=plan,
+                    solution=result.solution,
+                    report=report,
+                    run_kind=run_kind,
+                    run_id=run_id_for(
+                        plan_id=plan.id,
+                        run_kind=run_kind,
+                        route_fingerprint=result.route_fingerprint,
+                        sequence=sequence,
+                    ),
+                    created_at_utc=self._created_at_utc(),
+                )
+                run_repository.append(run)
+                stored = _find_run(
+                    run_repository, plan_id=plan.id, run_id=run.id
+                )
+            return RunResult(
+                plan=plan,
+                solution=result.solution,
+                recommendation_report=report,
+                route_fingerprint=result.route_fingerprint,
+                run=stored,
+                recommendation_seconds=_measured_seconds(recommendation_seconds),
+                route_seconds=_measured_seconds(route_seconds),
+                computation_seconds=_measured_seconds(
+                    recommendation_seconds + route_seconds
+                ),
+            )
+
+    def list_runs(self, plan_id: str) -> tuple[OptimizationRun, ...]:
+        """Every stored run of ``plan_id``, oldest first - read-only, no lock, no write.
+
+        Reading history never needs the computation lock (it runs no engine work) and never appends
+        anything: the repository's documented order is the answer.
+        """
+        identifier = _validate_plan_id(plan_id)
+        with self._state.connection() as connection:
+            run_repository = self._state.run_repository(connection)
+            plan = self._state.plan_repository(connection).get(PlanId(identifier))
+            if plan is None:
+                raise UnknownPlan(f"no stored plan has id {identifier!r}")
+            return tuple(run_repository.list_for_plan(PlanId(identifier)))
+
+    def get_run(self, run_id: str) -> OptimizationRun:
+        """One stored run by its own id (404 when no run has it) - read-only, no lock, no write."""
+        identifier = _require_str(run_id, "run id")
+        return _find_run_by_id(self._state, identifier)
+
+    # -- the one route computation both endpoints share ------------------- #
+    def _compute_route(
+        self, plan: RoutePlan, *, matrix: TravelMatrix | None = None, measured: bool = True
+    ) -> RouteResult:
+        """Run the real optimizer for ``plan``'s selection and fingerprint the committed route.
+
+        The caller holds the plan's single-flight lock. The engine's ``RouteSolution`` is returned
+        unchanged; ``computation_seconds`` is the measured duration of the engine work only (a
+        caller inside :meth:`optimize_and_record` measures its own phases instead). No matrix
+        fingerprint is carried: ``core`` computes none for the configured travel matrix, and this
+        layer invents no metric (see :class:`RouteResult`).
+        """
+        _require_committed_route_is_possible(plan)
+        legs = matrix if matrix is not None else self._matrix()
+        started = time.perf_counter()
+        solution = solve_route(plan=plan, travel_matrix=legs)
+        elapsed = time.perf_counter() - started
+        fingerprint = route_fingerprint(plan, solution.order)
+        return RouteResult(
+            plan=plan,
+            solution=solution,
+            route_fingerprint=fingerprint,
+            computation_seconds=_measured_seconds(elapsed) if measured else 0,
+            route_seconds=_measured_seconds(elapsed),
+        )
+
+
+# --------------------------------------------------------------------------- #
 # the container the transport talks to
 # --------------------------------------------------------------------------- #
 class ApiServices:
-    """Everything a transport needs: the database state and the two service objects."""
+    """Everything a transport needs: the database state and the service objects.
+
+    ``travel_matrix`` and ``clock`` are the two configuration seams of this container: the matrix is
+    the provider every engine call is priced with (the DEMO/SYNTHETIC fixture unless one is
+    injected), and the clock is what a recorded run's ``created_at_utc`` is read from. Both default
+    to production behaviour and mirror the injection seams of the storage repositories.
+    """
 
     def __init__(
         self,
@@ -924,14 +2037,33 @@ class ApiServices:
         *,
         plan_repository_factory: _PlanRepositoryFactory | None = None,
         settings_repository_factory: _SettingsRepositoryFactory | None = None,
+        run_repository_factory: _RunRepositoryFactory | None = None,
+        travel_matrix: TravelMatrix | Callable[[], TravelMatrix] | None = None,
+        plan_lock_timeout_seconds: float = PLAN_LOCK_TIMEOUT_SECONDS,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.state = DatabaseState(
             identifier,
             plan_repository_factory=plan_repository_factory,
             settings_repository_factory=settings_repository_factory,
+            run_repository_factory=run_repository_factory,
+            plan_lock_timeout_seconds=plan_lock_timeout_seconds,
         )
+        self.plan_lock_timeout_seconds = float(plan_lock_timeout_seconds)
         self.plans = PlanService(self.state)
         self.settings = SettingsService(self.state)
+        self.recommendations = RecommendationService(
+            self.state, travel_matrix, lock_timeout_seconds=self.plan_lock_timeout_seconds
+        )
+        self.selections = SelectionService(
+            self.state, travel_matrix, lock_timeout_seconds=self.plan_lock_timeout_seconds
+        )
+        self.routes = RouteService(
+            self.state,
+            travel_matrix,
+            lock_timeout_seconds=self.plan_lock_timeout_seconds,
+            clock=clock,
+        )
 
     def close(self) -> None:
         self.state.close()

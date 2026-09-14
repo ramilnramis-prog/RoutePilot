@@ -11,6 +11,7 @@ the suite cannot create a scratch directory or a database file in the repository
 from __future__ import annotations
 
 import re
+import shutil
 import sqlite3
 import subprocess
 import unittest
@@ -656,6 +657,80 @@ class MigrationScriptAtomicityTests(unittest.TestCase):
             ).fetchone()
             is not None
         )
+
+
+class SqliteIdentifierTests(unittest.TestCase):
+    """A documented in-memory identifier must never become a filesystem artifact (U14 fix).
+
+    ``file:name?mode=memory&cache=shared`` is SQLite's in-process URI form, and it is only in-memory
+    when the connection is opened with URI semantics. Without them ``sqlite3`` treats the whole
+    string as a *filename* - on Windows ``file:name?...`` is read as an NTFS alternate data stream,
+    so the artifact that appeared was literally named ``file``.
+    """
+
+    #: A shared-cache in-memory database name. It is deliberately fixed: the database exists only
+    #: while a connection to it is open, so two connections of this one test share it and nothing
+    #: leaks into another test (or another module) once both are closed.
+    MEMORY_URI = "file:routepilot-memory-identifier-tests?mode=memory&cache=shared"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.artifacts_before = cls._working_directory_entries()
+
+    @staticmethod
+    def _working_directory_entries() -> set[str]:
+        """Every entry of the process working directory and the repository root (names only)."""
+        entries = {path.name for path in Path.cwd().iterdir()}
+        entries |= {path.name for path in REPO_ROOT.iterdir()}
+        return entries
+
+    def test_a_memory_uri_identifier_creates_no_file_at_all(self) -> None:
+        first = connect(self.MEMORY_URI)
+        second = connect(self.MEMORY_URI)
+        try:
+            migrate(first)
+            first.execute(
+                "INSERT INTO app_settings (key, value_json, updated_at_utc) "
+                "VALUES ('probe', '1', '2026-09-11T00:00:00Z')"
+            )
+            first.commit()
+            # The second connection sees the same in-process database: it really is one database.
+            self.assertIsNotNone(
+                second.execute(
+                    "SELECT value_json FROM app_settings WHERE key = 'probe'"
+                ).fetchone()
+            )
+        finally:
+            first.close()
+            second.close()
+        self.assertFalse((Path.cwd() / "file").exists(), msg="a file named 'file' was created")
+        self.assertFalse((REPO_ROOT / "file").exists(), msg="a file named 'file' was created")
+        created = sorted(self._working_directory_entries() - self.artifacts_before)
+        self.assertEqual(created, [], msg=f"the identifier created filesystem entries: {created}")
+
+    def test_an_ordinary_file_identifier_still_uses_a_real_file(self) -> None:
+        """Only a ``file:`` identifier gets URI semantics; a path is still opened as a path."""
+        scratch = REPO_ROOT / "var" / "storage-identifier-tests"
+        scratch.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        target = scratch / "routepilot.db"
+        connection = connect(str(target))
+        try:
+            migrate(connection)
+            self.assertEqual(current_version(connection), SCHEMA_VERSION)
+        finally:
+            connection.close()
+        self.assertTrue(target.is_file(), msg="the file-backed identifier wrote no database file")
+
+    def test_a_windows_style_path_is_not_parsed_as_a_uri_scheme(self) -> None:
+        """``C:\\...`` contains a colon, so ``uri=True`` must not be passed unconditionally.
+
+        The identifier is only classified by its ``file:`` prefix. A drive-letter path is therefore
+        handed to SQLite as a plain path - here an *unopenable* one, which fails as a path error
+        instead of being silently reinterpreted as the URI scheme ``c``.
+        """
+        with self.assertRaises(sqlite3.OperationalError):
+            connect("C:\\routepilot-does-not-exist\\nested\\routepilot.db")
 
 
 class RepositoryCleanlinessTests(unittest.TestCase):
