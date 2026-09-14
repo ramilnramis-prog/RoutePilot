@@ -10,6 +10,8 @@
 *.sqlite3
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 var/
 
 # ---- logs / caches / temporary artifacts -------------------------------
