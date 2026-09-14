@@ -1,0 +1,332 @@
+/*
+  RoutePilot demo workspace - styles (Stage 4 U15).
+
+  Plain CSS, no framework, no preprocessor, no build step. Served as-is by the stdlib transport
+  (api/http_server.py) from web/styles.css.
+
+  The visual job of this file is to make the workspace demo-clear and to keep the honesty surfaces
+  impossible to miss: the DEMO/SYNTHETIC banner, the advisory banner, the latency/loading state, the
+  map notice and the "what this build does NOT do" list are all styled to be read, not to be
+  decorative. Nothing here carries data or meaning that JavaScript does not supply.
+*/
+
+:root {
+  --ink: #16202b;
+  --ink-soft: #4a5a6a;
+  --line: #d3dae3;
+  --surface: #ffffff;
+  --surface-alt: #f4f7fa;
+  --page: #eef2f6;
+  --accent: #14507d;
+  --accent-soft: #e3edf6;
+  --warn-bg: #fdf3e3;
+  --warn-line: #e0a854;
+  --warn-ink: #7a4c05;
+  --alert-bg: #fdecea;
+  --alert-line: #d9534f;
+  --alert-ink: #8b2420;
+  --ok-bg: #e8f5ec;
+  --ok-line: #4b9e68;
+  --ok-ink: #23603a;
+  --synthetic: #6b4bb5;
+  --radius: 10px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 16px/1.5 "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+}
+
+code {
+  font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.9em;
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 0.25em;
+}
+
+h1 { font-size: 1.4rem; margin: 0 0 0.35rem; }
+h2 { font-size: 1.05rem; margin: 0 0 0.6rem; color: var(--accent); }
+h3 {
+  font-size: 0.86rem;
+  margin: 0.9rem 0 0.35rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+
+.tagline { font-weight: 400; color: var(--ink-soft); font-size: 1rem; }
+
+/* ---------------------------------------------------------------- topbar */
+.topbar {
+  padding: 1rem 1.25rem 1.15rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.banner {
+  margin: 0.45rem 0 0;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--line);
+  border-left-width: 5px;
+  border-radius: var(--radius);
+  background: var(--surface-alt);
+  font-size: 0.92rem;
+}
+
+.banner-demo {
+  background: var(--warn-bg);
+  border-color: var(--warn-line);
+  border-left-color: var(--warn-line);
+  color: var(--warn-ink);
+}
+
+.banner-advisory {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  border-left-color: var(--accent);
+  color: var(--ink);
+}
+
+.banner-latency {
+  color: var(--ink-soft);
+}
+
+.banner-computing {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  border-left-color: var(--accent);
+  font-weight: 600;
+}
+
+.banner-error {
+  background: var(--alert-bg);
+  border-color: var(--alert-line);
+  border-left-color: var(--alert-line);
+  color: var(--alert-ink);
+  font-weight: 600;
+}
+
+.banner-ok {
+  background: var(--ok-bg);
+  border-color: var(--ok-line);
+  border-left-color: var(--ok-line);
+  color: var(--ok-ink);
+}
+
+/* ------------------------------------------------------------- workspace */
+.workspace {
+  padding: 1rem 1.25rem 2rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(360px, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (max-width: 1000px) {
+  .split { grid-template-columns: 1fr; }
+}
+
+.side { display: grid; gap: 1rem; }
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.9rem 1rem 1.1rem;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0.35rem 0;
+}
+
+label { font-size: 0.9rem; color: var(--ink-soft); }
+
+select, button {
+  font: inherit;
+  font-size: 0.92rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+select { min-width: 14rem; }
+
+button {
+  cursor: pointer;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+button:hover { background: #103f63; }
+button:disabled { opacity: 0.55; cursor: progress; }
+
+.hint, .legend, .notice {
+  font-size: 0.86rem;
+  color: var(--ink-soft);
+  margin: 0.4rem 0;
+}
+
+.legend { border-top: 1px dashed var(--line); padding-top: 0.5rem; }
+
+.notice {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-left-width: 5px;
+  border-radius: var(--radius);
+  color: var(--warn-ink);
+  padding: 0.55rem 0.75rem;
+}
+
+/* ------------------------------------------------------------------- map */
+.map {
+  height: 420px;
+  min-height: 260px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background:
+    repeating-linear-gradient(45deg, #e7edf3 0 12px, #eef2f6 12px 24px);
+}
+
+/* ------------------------------------------------------------------ data */
+.plan-summary, .panel-body {
+  font-size: 0.9rem;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: minmax(9rem, max-content) 1fr;
+  gap: 0.15rem 0.75rem;
+  margin: 0.4rem 0;
+}
+
+.kv dt { color: var(--ink-soft); }
+.kv dd { margin: 0; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  margin: 0.35rem 0 0.6rem;
+}
+
+caption {
+  text-align: left;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+  padding-bottom: 0.25rem;
+}
+
+th, td {
+  border: 1px solid var(--line);
+  padding: 0.25rem 0.4rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+th { background: var(--surface-alt); font-weight: 600; }
+
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+tbody tr:nth-child(even) td { background: #fbfcfd; }
+
+tr.recommended-row td { background: var(--ok-bg); font-weight: 600; }
+tr.rejected-row td { background: var(--alert-bg); }
+
+.recommended {
+  font-size: 1rem;
+  font-weight: 700;
+  margin: 0.6rem 0 0.2rem;
+  padding: 0.5rem 0.65rem;
+  border-left: 5px solid var(--ok-line);
+  background: var(--ok-bg);
+  border-radius: var(--radius);
+}
+
+.badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  margin-right: 0.3rem;
+}
+
+.badge-true { color: var(--ok-ink); background: var(--ok-bg); }
+.badge-false { color: var(--alert-ink); background: var(--alert-bg); }
+.badge-synthetic {
+  color: var(--synthetic);
+  background: #f1ecfb;
+  border-color: var(--synthetic);
+}
+.badge-mode { color: var(--accent); background: var(--accent-soft); }
+
+.muted { color: var(--ink-soft); }
+.mono { font-family: Consolas, "SFMono-Regular", Menlo, monospace; font-size: 0.78rem; }
+.error-text { color: var(--alert-ink); white-space: pre-wrap; }
+
+.capabilities {
+  list-style: none;
+  margin: 0.3rem 0;
+  padding: 0;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.capabilities li {
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--alert-line);
+  border-radius: var(--radius);
+  background: var(--surface-alt);
+  padding: 0.4rem 0.6rem;
+  font-size: 0.86rem;
+}
+
+.capability-name { font-weight: 700; }
+.capability-status {
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--alert-ink);
+  margin-left: 0.35rem;
+}
+
+.footer {
+  padding: 0.75rem 1.25rem 1.5rem;
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+}
+
+/* --------------------------------------------------- synthetic geometry */
+/*
+  The straight-line geometry the map draws is synthetic and is labelled as such in two places: the
+  legend under the map and the marker/polyline labels inside web/map.js. The dashed stroke below is
+  the visual half of that label.
+*/
+.map-legend-synthetic {
+  font-size: 0.78rem;
+  color: var(--synthetic);
+  font-weight: 600;
+}

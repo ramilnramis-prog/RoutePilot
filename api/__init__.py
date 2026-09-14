@@ -2,7 +2,7 @@
 
 Layering (``docs/ARCHITECTURE.md`` section 1, extended for Stage 4):
 
-    web/      HTML/CSS/JS + map (later, U15)        -- never imported by core
+    web/      HTML/CSS/JS + map (U15)                -- never imported by core
     api/      transport + application layer          -- depends on core, storage and demo
     demo/     deterministic demo dataset             -- depends on core
     storage/  SQLite repositories behind core Protocols
@@ -29,11 +29,13 @@ What lives here
     the CLI (``python -m api.serve``), default host ``127.0.0.1`` and default database
     ``var/routepilot.db`` (a gitignored directory).
 
-Scope of this unit (U13): the **read/config surface only** - health, plans list/get/create, the
-approved ``enabled``/``priority`` stop controls and the settings store. The recommendation, the
-driver's selection, the computed route and the run history are declared but **not implemented**
-(they are U14) and answer ``501`` with the capability named, never a fabricated result. There is
-no web UI yet (U15), and there is no background job queue by owner decision.
+Scope: U13 shipped the **read/config surface** (health, plans list/get/create, the approved
+``enabled``/``priority`` stop controls and the settings store), U14 added the engine-facing surface
+(the recommendation, the driver's selection, the committed route, the recalculation that appends one
+run row and the run history), and U15 added the static **web workspace** in ``web/`` that renders
+them (``web/index.html``, ``web/styles.css``, ``web/app.js``, ``web/map.js``: vanilla HTML/CSS/JS
+with no framework, no bundler and no build step). There is no background job queue by owner
+decision.
 
 Every number the API reports comes from ``core``/``storage``; no business formula is implemented
 in this package. All shipped data is DEMO/SYNTHETIC and is labelled as such (D15/D16/D23).

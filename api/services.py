@@ -125,6 +125,12 @@ from core.model.route_plan import RoutePlan
 from core.model.route_stop import GeocodeStatus, RouteStop, ServiceStatus
 from core.model.service_window import WindowEndPolicy, WindowKind
 from core.model.solution import RouteSolution, SolutionStatus
+from api.map_configuration import (
+    MAP_SETTING_KEYS,
+    MapConfiguration,
+    configured_map_configuration,
+    map_configuration_payload,
+)
 from core.model.value_objects import DataProvenance
 from core.repositories import (
     AppSettingsRepository,
@@ -190,13 +196,13 @@ __all__ = [
 IMPLEMENTED_ROUTE_MODE = RouteMode.SMART_ROUTE
 
 #: Settings keys this API understands. The store itself owns no key semantics (D38 / schema
-#: section 6), so this list documents the keys the demo surface uses - including the approved map
-#: tile keys of D15 - and does not restrict what may be stored.
-KNOWN_SETTING_KEYS: tuple[str, ...] = (
-    "tile_url",
-    "tile_attribution",
-    "tile_max_zoom",
-)
+#: section 6), so this list documents the keys the demo surface uses - the approved map tile keys of
+#: D15 (``tile_url``, ``tile_attribution``, ``tile_max_zoom``) plus the two map-library asset keys
+#: this unit added so the Leaflet location is configuration rather than a URL frozen into
+#: ``web/`` (``map_library_url``, ``map_library_css_url``) - and does not restrict what may be
+#: stored. The list is taken from :data:`api.map_configuration.MAP_SETTING_KEYS` so the documented
+#: keys, their defaults and the payload the UI reads cannot drift apart.
+KNOWN_SETTING_KEYS: tuple[str, ...] = MAP_SETTING_KEYS
 
 #: Default database identifier used by ``python -m api.serve``. ``var/`` is gitignored, so no
 #: database artifact can be committed (`.gitignore` section "local databases").
@@ -685,17 +691,25 @@ def _tzdata_payload() -> dict[str, Any]:
     return payload
 
 
-def health_payload(state: DatabaseState) -> dict[str, Any]:
+def health_payload(
+    state: DatabaseState, *, map_configuration: MapConfiguration | None = None
+) -> dict[str, Any]:
     """The honest health/capability document (spec sections 23/31/33/36, D12/D16/D19/D36/D39).
 
     It reports the IANA database source and version *or* the honest fallback state, states that
     the only shipped data is the DEMO/SYNTHETIC fixture, lists the implemented capabilities next to
     the not-implemented ones (traffic, side-of-road, turn-by-turn, geocoding, real routing, and
-    every route mode except SMART_ROUTE) so a UI can be honest instead of optimistic, and states the
-    **accepted MVP latency honestly** (U14): the synchronous exhaustive recommendation has no
+    every route mode except SMART_ROUTE) so a UI can be honest instead of optimistic, reports the
+    **map configuration in force** (U15: the approved tile keys of D15 plus the map-library URLs,
+    each with whether it was configured or defaulted - see :mod:`api.map_configuration`), and states
+    the **accepted MVP latency honestly** (U14): the synchronous exhaustive recommendation has no
     background job, a documented bounded per-plan single-flight wait - reported as the bound this
     instance actually runs with - and a worst case of about 8 seconds at the ~50-enabled-stop
     portfolio scale (D36/D37).
+
+    ``map_configuration`` is passed in by the caller that can read ``app_settings``
+    (``SettingsService.map_configuration``); when it is omitted the documented defaults are reported
+    with ``source="default"``, so this function stays pure enough for a caller with no database.
     """
     implemented, not_implemented = capability_report()
     report = tzdata.probe_tzdata()
@@ -704,10 +718,12 @@ def health_payload(state: DatabaseState) -> dict[str, Any]:
         "status": "ok",
         "api_version": "1",
         "implemented_units": (
-            "U13 ships the read/config surface (health, plans, plan controls, settings) and U14 "
-            "adds the engine-facing surface: the recommendation, the driver's selection, the "
-            "committed route, the recalculation that appends one run row, and the run history. The "
-            "web UI (U15) still does not exist."
+            "U13 ships the read/config surface (health, plans, plan controls, settings), U14 adds "
+            "the engine-facing surface (the recommendation, the driver's selection, the committed "
+            "route, the recalculation that appends one run row and the run history), and U15 ships "
+            "the static web workspace in web/ that renders them (map, route/timeline panel and "
+            "summary). U16 (the interactive override controls and the run-history view) and U17 "
+            "(end-to-end demo and Stage 4 documentation) are still pending."
         ),
         "timezone_data": _tzdata_payload(),
         "demo_data": {
@@ -717,6 +733,7 @@ def health_payload(state: DatabaseState) -> dict[str, Any]:
             "labelled": ["DEMO", "SYNTHETIC"],
         },
         "data_provenance": DataProvenance.DEMO_SYNTHETIC.value,
+        "map": map_configuration_payload(map_configuration),
         "database": {
             "identifier": state.display_identifier,
             "schema_version": state.schema_version,
@@ -1537,6 +1554,29 @@ class SettingsService:
         with self._state.connection() as connection:
             self._state.settings_repository(connection).set(identifier, value)
         return AppSetting(key=identifier, value=value, configured=True)
+
+    def effective_value(self, key: str) -> Any:
+        """The stored value of ``key``, or ``None`` when nothing is stored for it (U15).
+
+        This is the read-only seam the map configuration is assembled through
+        (:func:`api.map_configuration.configured_map_configuration`): unlike
+        :meth:`get_setting` it does **not** raise for an unset key, because "no value is stored"
+        is a legitimate answer there - the map configuration resolves it to the documented default
+        and reports that the key was defaulted rather than configured. It invents nothing itself:
+        an unset key answers ``None``, and a stored JSON ``null`` is indistinguishable from an
+        unset key exactly as the store's own contract documents.
+        """
+        identifier = _validate_setting_key(key)
+        with self._state.connection() as connection:
+            return self._state.settings_repository(connection).get(identifier)
+
+    def map_configuration(self) -> MapConfiguration:
+        """The map configuration in force, read from ``app_settings`` with documented defaults.
+
+        Configuration isolation (D15/D39(c)) reaches the browser through this read: the UI asks the
+        API for the tile URL, attribution, max zoom and map-library URL and hardcodes none of them.
+        """
+        return configured_map_configuration(self.effective_value)
 
 
 # --------------------------------------------------------------------------- #

@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RoutePilot demo workspace (DEMO / SYNTHETIC)</title>
+<!--
+  RoutePilot demo workspace - Stage 4 U15 (spec sections 26, 31, 34; decisions D15/D16/D19/D32/D39).
+
+  Vanilla HTML + CSS + JavaScript. No framework, no bundler, no build step, no npm and no vendored
+  map asset: this file is served as-is by the stdlib server in api/http_server.py, together with
+  web/styles.css, web/app.js and web/map.js.
+
+  Two rules this page exists to keep:
+
+  1. NOTHING here is computed. Every number, order, metric, feasibility result, violation and
+     fingerprint is rendered from an API payload unchanged (D39(f)). The page may format a duration
+     for reading and may display an instant in the plan's own time zone; it never adds, averages,
+     ranks, re-orders, re-scores or derives anything.
+  2. A recommendation is NOT a decision. The engine recommends and the driver decides (D4/D32); the
+     advisory banner, the selection panel and the recommendation panel state that plainly, and the
+     recommendation controls that actually apply a decision are U16 - this unit reads and renders.
+
+  The DEMO/SYNTHETIC banner is deliberately static markup: it must be on screen even when no script
+  has run yet, so the synthetic nature of the data is never a consequence of JavaScript succeeding.
+-->
+<link rel="stylesheet" href="/styles.css">
+<!-- The Leaflet library URL is NOT written here: it comes from the API (map_library_url, read from
+     app_settings with a documented default; see api/map_configuration.py). web/map.js injects it. -->
+</head>
+<body>
+<header class="topbar">
+  <h1>RoutePilot <span class="tagline">demo workspace</span></h1>
+  <p class="banner banner-demo" id="demo-banner">
+    <strong>DEMO / SYNTHETIC DATA</strong> - not real addresses, not real opening hours,
+    not real routing, no traffic.
+  </p>
+  <div class="banner banner-status" id="status-banner" role="status" aria-live="polite">
+    Loading the workspace and the API capability report&hellip;
+  </div>
+  <div class="banner banner-latency" id="latency-notice">
+    Latency: the exhaustive first-stop recommendation is computed synchronously and has no
+    background job queue. The accepted MVP worst case at the ~50-enabled-stop portfolio scale is
+    about 8 seconds; every computation reports its measured <code>computation_seconds</code>.
+  </div>
+  <div class="banner banner-computing" id="loading" hidden aria-live="polite">
+    Computing&hellip; the API is recomputing this request synchronously. This can take several
+    seconds at the ~50-stop scale.
+  </div>
+</header>
+
+<main class="workspace">
+  <section class="panel panel-plans" aria-labelledby="plans-heading">
+    <h2 id="plans-heading">Plan</h2>
+    <div class="row">
+      <label for="plan-select">Open plan</label>
+      <select id="plan-select" aria-label="Open a stored plan"></select>
+      <button type="button" id="create-demo-plan">Create / open the DEMO plan</button>
+    </div>
+    <p class="hint">
+      Opening a plan reads it through <code>GET /api/plans/{id}</code>. &ldquo;Create / open the
+      DEMO plan&rdquo; calls <code>POST /api/plans</code>, which returns the same deterministic
+      fixture every time instead of duplicating it.
+    </p>
+    <div id="plan-summary" class="plan-summary"></div>
+  </section>
+
+  <div class="split">
+    <section class="panel panel-map" aria-labelledby="map-heading">
+      <h2 id="map-heading">Map (Leaflet + OSM-compatible tiles)</h2>
+      <div id="map" class="map" role="img"
+           aria-label="Map of the departure, finish and service stops"></div>
+      <p class="notice" id="map-notice" hidden></p>
+      <p class="legend">
+        The line drawn between the stops is <strong>synthetic straight-line geometry</strong>: it is
+        the route order the engine returned, joined by straight segments. It is not road routing and
+        carries no road distance, no turn instructions and no traffic.
+      </p>
+    </section>
+
+    <div class="side">
+      <section class="panel panel-recommendation" aria-labelledby="recommendation-heading">
+        <h2 id="recommendation-heading">First-stop recommendation (advisory)</h2>
+        <p class="banner banner-advisory" id="advisory-banner">
+          A recommendation is <strong>advisory and NOT an applied decision</strong>. It is recomputed
+          live for this request, it is not plan state, and it does not change the plan: the driver
+          decides whether to accept it or choose another stop (D4/D11/D32).
+        </p>
+        <div class="row">
+          <button type="button" id="request-recommendation">Compute the recommendation</button>
+        </div>
+        <div id="recommendation-panel" class="panel-body"></div>
+        <p class="recommended" id="recommended-stop"></p>
+        <h3 id="alternatives-heading">Alternatives (ranked, complete-route metrics)</h3>
+        <div id="alternatives" class="tbody"></div>
+        <h3 id="rejected-heading">Rejected candidates (with their violating stops)</h3>
+        <div id="rejected-candidates" class="tbody"></div>
+        <div id="selection-panel" class="panel-body"></div>
+        <div id="first-stop-state" class="panel-body"></div>
+      </section>
+
+      <section class="panel panel-route" aria-labelledby="route-heading">
+        <h2 id="route-heading">Committed route (order, ETA, waiting, service, windows, lateness)</h2>
+        <div class="row">
+          <button type="button" id="request-route">Compute the committed route</button>
+        </div>
+        <div id="route-panel" class="panel-body"></div>
+        <div id="timeline" class="tbody"></div>
+      </section>
+
+      <section class="panel panel-summary" aria-labelledby="summary-heading">
+        <h2 id="summary-heading">Summary (BEFORE vs AFTER)</h2>
+        <div id="summary-panel" class="panel-body"></div>
+        <div id="before-after" class="tbody"></div>
+      </section>
+
+      <section class="panel panel-history" aria-labelledby="history-heading">
+        <h2 id="history-heading">Run history (read-only)</h2>
+        <p class="hint">
+          Immutable history, oldest first, from <code>GET /api/plans/{id}/runs</code>. This panel is
+          a placeholder: the full run-history view and the interactive override controls (accept,
+          choose another stop, cancel, disable, restore, priority, recalculate) are U16. Nothing on
+          this page writes history - only <code>POST /api/plans/{id}/optimize</code> appends a run.
+        </p>
+        <div id="history-panel" class="panel-body"></div>
+      </section>
+    </div>
+  </div>
+
+  <section class="panel panel-capabilities" aria-labelledby="capabilities-heading">
+    <h2 id="capabilities-heading">What this build does NOT do</h2>
+    <p class="hint">
+      Read from the API's own capability report (<code>GET /api/health</code>,
+      <code>not_implemented_capabilities</code>, <code>route_modes</code> and
+      <code>timezone_data</code>) - not from a list written in this page. An unimplemented capability
+      is never presented as working (D16).
+    </p>
+    <div id="capabilities-panel" class="tbody"></div>
+  </section>
+</main>
+
+<footer class="footer">
+  <p>
+    RoutePilot recommends, the driver decides. Synthetic demo data is never presented as real
+    routing, traffic or opening hours (spec sections 33/34; D15/D16/D23/D32).
+  </p>
+</footer>
+
+<script src="/map.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

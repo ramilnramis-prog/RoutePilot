@@ -82,12 +82,23 @@ with ``text/html``/``text/css``/``application/javascript`` by extension and
 ``Cache-Control: no-store``. ``GET`` is used for read endpoints and ``PUT``/``POST`` only where a
 body is expected; a request body that is not a JSON object is a ``400``.
 
+The static surface (U15) is the **web workspace** in ``web/``: ``index.html``, ``styles.css``,
+``app.js`` and ``map.js``, served as-is - vanilla HTML/CSS/JS with no framework, no bundler, no npm
+and no build step, and no vendored map asset (the Leaflet library URL comes from configuration over
+the API, D15/D39(b)/(c)). The transport does nothing but serve those bytes: it renders nothing,
+computes nothing and hardcodes no tile URL.
+
 Static path resolution is a **pure function** (:func:`resolve_static_path`): URL path in, candidate
 file under the static root out, with directory traversal (``..``, encoded variants, backslashes)
 and absolute paths refused before anything touches the filesystem - so it is unit-testable without
-a single file on disk. When ``web/`` does not exist yet (the real UI arrives in U15) a static
-request returns a clear ``404`` JSON error rather than crashing; serving the real ``web/`` needs no
-code change once it exists.
+a single file on disk. When ``web/`` is absent (or a named asset is missing) a static request
+returns a clear ``404`` JSON error rather than crashing.
+
+The one static convention this transport adds (U15) is the workspace entry point: ``GET /`` is
+served as ``/index.html`` (:func:`_static_asset_path` maps a path that is only slashes to the entry
+document and passes every other path through unchanged), so the documented URL of the demo
+workspace is simply the server root. A missing ``index.html`` is still the ordinary
+``404 unknown_path`` JSON error, never a fabricated page.
 
 Error mapping (the explicit table of this transport)
 ====================================================
@@ -180,10 +191,11 @@ __all__ = [
 
 API_JSON_CONTENT_TYPE = "application/json; charset=utf-8"
 
-#: The repository directory. ``web/`` (the U15 UI) and the default static root both live here.
+#: The repository directory. ``web/`` (the U15 workspace) and the default static root live here.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-#: The directory static assets are served from. It does not exist yet; see the module docstring.
+#: The directory static assets are served from: the U15 workspace (``index.html``, ``styles.css``,
+#: ``app.js``, ``map.js``). ``GET /`` is served from it as ``index.html``; see the module docstring.
 STATIC_ROOT = REPO_ROOT / "web"
 
 #: Extensions this transport will serve, with their content type. A file whose extension is not
@@ -300,7 +312,8 @@ def resolve_static_path(url_path: str, static_root: Path | str = STATIC_ROOT) ->
     if not segments:
         raise StaticPathError(
             f"static URL path {url_path!r} names a directory, not a file; this transport serves "
-            "explicit asset paths only (the demo UI arrives in U15)"
+            "explicit asset paths only (the workspace entry point is served as /index.html by the "
+            "transport; see _static_asset_path)"
         )
     candidate = root / relative
     suffix = candidate.suffix.lower()
@@ -308,7 +321,7 @@ def resolve_static_path(url_path: str, static_root: Path | str = STATIC_ROOT) ->
     if content_type is None:
         raise StaticPathError(
             f"static asset {decoded!r} has extension {suffix or '(none)'!r}, which this transport "
-            f"does not serve; allowed: {', '.join(STATIC_EXTENSIONS)} (the demo UI arrives in U15)"
+            f"does not serve; allowed: {', '.join(STATIC_EXTENSIONS)}"
         )
 
     if not _is_within(root, candidate):
@@ -330,6 +343,26 @@ def _is_within(root: Path, candidate: Path) -> bool:
     if len(candidate_parts) < len(root_parts):
         return False
     return candidate_parts[: len(root_parts)] == root_parts
+
+
+def _static_asset_path(url_path: str) -> str:
+    """The asset path a static request names (U15): the workspace root is the entry document.
+
+    ``GET /`` (and ``GET /?query``, whose query the resolver already ignores) means "the workspace",
+    so it is served as ``/index.html`` - the documented entry point of the U15 UI. This mapping is
+    deliberately made here, in the transport, rather than inside :func:`resolve_static_path`: that
+    function stays the pure "URL path -> candidate file" rule whose docstring says a request naming
+    a directory is refused, and the ``/`` -> ``index.html`` convention is an HTTP-serving decision.
+    Any other path is passed through unchanged, so the refusal rules (traversal, absolute paths,
+    extension allow-list) are untouched by this one substitution.
+    """
+    split = urlsplit(url_path)
+    # A path that is only slashes (``/``, ``///``) names the root; anything else is left alone. An
+    # encoded slash (``%2f``) is NOT decoded here: the resolver owns decoding, and ``/%2f`` must
+    # stay the refusal it is today rather than become a second spelling of the root.
+    if split.path.strip("/") == "":
+        return "/index.html" + (f"?{split.query}" if split.query else "")
+    return url_path
 
 
 # --------------------------------------------------------------------------- #
@@ -722,7 +755,16 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
 
     # -- handlers -------------------------------------------------------- #
     def _handle_health(self, match: re.Match[str], body: Any) -> None:
-        self._write_json(200, health_payload(self.server.services.state))
+        self._write_json(
+            200,
+            health_payload(
+                self.server.services.state,
+                # The map configuration in force is read from ``app_settings`` here (U15): the tile
+                # provider and the map-library URL reach the browser through the API, never through
+                # a URL written into ``web/`` (D15/D39(c)).
+                map_configuration=self.server.services.settings.map_configuration(),
+            ),
+        )
 
     def _handle_plans(self, match: re.Match[str], body: Any) -> None:
         method = self.command
@@ -893,7 +935,7 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            request = resolve_static_path(url_path, self.server.static_root)
+            request = resolve_static_path(_static_asset_path(url_path), self.server.static_root)
         except StaticPathError as error:
             self._write_error(
                 NotFound(
@@ -908,8 +950,8 @@ class RouteRequestHandler(BaseHTTPRequestHandler):
             self._write_error(
                 NotFound(
                     f"static asset {request.relative_path!r} is not available under "
-                    f"{self.server.static_root}: {error.strerror or error} (the demo UI arrives in "
-                    "U15, so web/ may legitimately not exist yet)"
+                    f"{self.server.static_root}: {error.strerror or error} (the U15 web workspace "
+                    "lives in web/; a server started with another --static-root may not have it)"
                 ),
                 code="unknown_path",
             )

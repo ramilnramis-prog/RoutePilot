@@ -62,8 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(STATIC_ROOT),
         metavar="DIR",
         help=(
-            "directory static assets are served from (default: %(default)s). It may not exist "
-            "yet: the UI arrives in U15, and serving it needs no code change."
+            "directory static assets are served from (default: %(default)s). The workspace that "
+            "lives there is opened at the server root: GET / serves index.html."
         ),
     )
     parser.add_argument(

@@ -580,7 +580,10 @@ class StaticAssetTests(ServerBackedTestCase):
                 self.assertEqual(response.status, 404)
                 self.assertEqual(response.content_type, API_JSON_CONTENT_TYPE)
                 self.assertEqual(response.json()["error"]["code"], "unknown_path")
-                self.assertIn("U15", response.json()["error"]["message"])
+                # The message names the static root the server was started with, so a missing
+                # workspace is diagnosable instead of just "not found" (U13 behaviour; the U15
+                # workspace now lives in web/ and is found when the default root is used).
+                self.assertIn("not available under", response.json()["error"]["message"])
     def test_a_traversal_attempt_is_refused_with_a_json_404(self) -> None:
         for path in (
             "/../secret.html",
