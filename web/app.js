@@ -1,6 +1,6 @@
 /*
-  RoutePilot demo workspace - application script (Stage 4 U16; spec sections 26, 31, 34; D15/D16/
-  D19/D21/D32/D39).
+  RoutePilot workspace - application script (spec sections 26, 31, 33, 34; D15/D16/D19/D21/D32/D36/
+  D39).
 
   THE ONE RULE THIS FILE EXISTS TO KEEP
   =====================================
@@ -12,53 +12,33 @@
   gave them. It must never add, subtract, average, total, rank, re-order, re-score, infer feasibility
   or hash anything, and it must never invent a route, a candidate order, a saving or a fingerprint.
 
-  WHAT THIS UNIT ADDS (U16)
+  PRESENTATION (this unit)
   ========================
 
-  The approved MVP override controls, each wired to the EXISTING endpoint with the documented method
-  and body, and each refreshing the affected panels FROM THE SERVER afterwards (D39(d)):
+  The page is a dashboard, not a debug console, and this file is where the presented structure lives:
 
-  | control                        | endpoint (method, body)                                  |
-  |--------------------------------|---------------------------------------------------------|
-  | `#get-recommendation`          | `GET /api/plans/{id}/recommendation`                     |
-  | `#accept-recommendation`       | `POST /api/plans/{id}/selection` `{mode:"recommend",     |
-  |                                | stop_id:<the recommended stop>}`                          |
-  | `#manual-stop-select` +        | `POST /api/plans/{id}/selection` `{mode:"manual",        |
-  | `#choose-first-stop`           | stop_id:<the chosen enabled stop>}`                       |
-  | `#cancel-selection`            | `DELETE /api/plans/{id}/selection` (no body)             |
-  | per-stop `disable`/`restore`   | `PUT /api/plans/{id}` `{stops:[{stop_id, enabled}]}`     |
-  | per-stop priority control      | `PUT /api/plans/{id}` `{stops:[{stop_id, priority}]}`    |
-  | `#recalculate`                 | `POST /api/plans/{id}/optimize` (no body)                |
-  | run-history row `#run-detail`  | `GET /api/runs/{run_id}` (read-only)                     |
-
-  Endpoint -> method -> body live in the single `ENDPOINTS` table below, so a control cannot drift
-  from its documented contract.
-
-  STATE HONESTY (D32/D39(f))
-  ==========================
-
-  * A recommendation is **never** applied by this page. The accept control only ever sends the stop
-    the API's own recommendation payload named, and the API refuses the request unless that stop
-    really is the current recommendation; this page never picks a stop on the engine's behalf.
-  * After every action the displayed first-stop state, mode, provenance (`accepted_recommendation`
-    vs `manual_choice`), pinned flag, route, run history and recommendation come from the **server
-    response** of that action - never from an optimistic client-side edit.
-  * The run history is READ-ONLY. The page offers no control that edits, reorders or deletes a run,
-    and it never presents a run's recorded recommendation as the plan's current decision: a stored
-    recommendation is labelled as the audit of what that run showed.
-  * API error envelopes are surfaced verbatim in `#error-banner`. The page adds a short, clearly
-    marked guidance line for the documented refusals (for example the `409 plan_busy` retry
-    guidance) but never replaces the API's own code, type or message with a guess.
-  * A request that can take seconds (the recommendation and the recalculation) shows the `#loading`
-    computing state and reports the measured `computation_seconds` afterwards.
+  * the optimization card shows the recommended first stop, the estimated route figures (the
+    committed route's own metrics, or the recommended candidate's complete-route metrics when no
+    route is committed yet) and the Save figures the API reports, then one primary call to action;
+  * the KPI strip renders BEFORE / AFTER / SAVED from the API metrics - no figure is computed here;
+  * the route card renders a compact preview of the timeline with a "Show all N stops" toggle. The
+    rows live in the DOM in full and CSS hides the overflow, so nothing is dropped;
+  * the lower concern-per-card sections (timeline note, run history, override controls, technical
+    details) are collapsed `<details>` disclosures, and the technical prose (endpoints, decision ids,
+    engine internals, why a read is read-only) lives inside the collapsed technical section;
+  * an API failure is surfaced as a product-shaped headline plus a collapsed "Technical details"
+    disclosure that still carries the API's own code, type, HTTP status and message verbatim.
 
   WHAT THIS FILE DELIBERATELY DOES NOT DO
   =======================================
 
-  No drag/reorder control (out of scope, D21/D39(d)), no active-leg behaviour (D24), no route-mode
-  control of any kind (`SMART_ROUTE` is the only implemented mode and the plan's own `route_mode` is
-  displayed from the payload, D19), and no way to make the engine apply a recommendation itself
-  (D4/D32).
+  Endpoint -> method -> body live in the single `ENDPOINTS` table below, so a control cannot drift
+  from its documented contract. The override controls are unchanged: a recommendation is never
+  applied by this page (the accept control only ever sends the stop the API's own recommendation
+  payload named), every action re-reads the affected panels FROM THE SERVER (D39(d)), the run history
+  is READ-ONLY, and there is no drag/reorder control (D21), no active-leg behaviour (D24) and no
+  route-mode control of any kind (SMART_ROUTE is the only implemented mode; the plan's own
+  `route_mode` is displayed from the payload, D19).
 */
 
 (function () {
@@ -156,6 +136,13 @@
     recommend: "recommend",
     manual: "manual"
   };
+
+  //: How many timeline/stop rows the compact preview shows before the reader opens it. Purely
+  //: presentational: the DOM always carries every row and CSS does the hiding.
+  var PREVIEW_ROWS = 10;
+
+  //: The neutral placeholder for a figure a payload does not report. It is never a computed value.
+  var NOT_REPORTED = "-";
 
   var state = {
     health: null,
@@ -300,11 +287,113 @@
     return container;
   }
 
+  // ------------------------------------------------- presentation helpers --
+  /**
+   * A compact figure pair from two payload values: `10h 49m` and `93.3 km`. Each value is the
+   * payload's own number formatted for reading; a value the payload does not carry renders the
+   * neutral placeholder rather than a figure derived here.
+   */
+  function figurePair(durationSeconds, distanceMetres) {
+    var wrapper = el("span", "figure-values");
+    wrapper.appendChild(el("span", "figure-duration", duration(durationSeconds)));
+    wrapper.appendChild(el("span", "figure-separator", "\u00b7"));
+    wrapper.appendChild(el("span", "figure-distance", distance(distanceMetres)));
+    return wrapper;
+  }
+
+  /** One KPI card: a small label over the figure(s) the API reported for it. */
+  function kpiCard(label, valueNodes, tone) {
+    var card = el("div", "kpi" + (tone ? " kpi-" + tone : ""));
+    card.appendChild(el("span", "kpi-label", label));
+    var body = el("span", "kpi-values");
+    (valueNodes || []).forEach(function (node) { body.appendChild(node); });
+    card.appendChild(body);
+    return card;
+  }
+
+  /** The BEFORE / AFTER / SAVED strip: one card per figure pair, all values from the payload. */
+  function kpiRow(label, durationSeconds, distanceMetres, feasible) {
+    var values = [
+      el("span", "kpi-duration", duration(durationSeconds)),
+      el("span", "kpi-distance", distance(distanceMetres))
+    ];
+    if (feasible !== undefined && feasible !== null) {
+      values.push(badgeFor(feasible));
+    }
+    return kpiCard(label, values);
+  }
+
+  /**
+   * Toggle one preview container open and closed, updating the control's own label. The open state
+   * is one attribute on the container (`data-preview="open"`), which CSS uses to reveal the rows the
+   * compact preview hides - the rows themselves are always in the DOM.
+   */
+  function togglePreview(containerId, buttonId) {
+    var container = byId(containerId);
+    var button = byId(buttonId);
+    if (!container || !button) {
+      return;
+    }
+    var open = container.getAttribute("data-preview") === "open";
+    container.setAttribute("data-preview", open ? "closed" : "open");
+    button.textContent = open ? previewLabel(container) : "Show fewer";
+    button.setAttribute("aria-expanded", open ? "false" : "true");
+  }
+
+  /** The control label for a collapsed preview: "Show all N stops", with the payload's own count. */
+  function previewLabel(container) {
+    var rows = totalPreviewRows(container);
+    var noun = container && container.className.indexOf("stop-list") >= 0 ? "stops" : "timeline rows";
+    return "Show all " + rows + " " + noun;
+  }
+
+  /**
+   * How many rows a preview container really holds. The rows are counted in the rendered DOM (the
+   * tables and the stop rows built by the renderers), never derived from a business figure.
+   */
+  function totalPreviewRows(container) {
+    if (!container) {
+      return 0;
+    }
+    var tables = container.getElementsByTagName("table");
+    var count = 0;
+    var index = 0;
+    while (index < tables.length) {
+      var body = tables[index].getElementsByTagName("tbody")[0];
+      count = count + (body ? body.children.length : 0);
+      index = index + 1;
+    }
+    count = count + container.getElementsByClassName("stop-row").length;
+    return count;
+  }
+
+  /**
+   * Wire a preview container to its toggle: the control appears only when there is something to
+   * reveal, and the rows themselves always stay in the DOM (CSS hides the overflow).
+   */
+  function showPreviewControl(containerId, buttonId) {
+    var container = byId(containerId);
+    var button = byId(buttonId);
+    if (!container || !button) {
+      return;
+    }
+    container.setAttribute("data-preview", "closed");
+    var total = totalPreviewRows(container);
+    if (total <= PREVIEW_ROWS) {
+      button.hidden = true;
+      button.textContent = "";
+      return;
+    }
+    button.hidden = false;
+    button.textContent = previewLabel(container);
+    button.setAttribute("aria-expanded", "false");
+  }
+
   // ---------------------------------------------------------- formatting --
   /** A seconds count as readable text. FORMATTING ONLY: the number itself is the payload's. */
   function duration(seconds) {
     if (seconds === null || seconds === undefined) {
-      return "-";
+      return NOT_REPORTED;
     }
     var value = Number(seconds);
     if (!isFinite(value)) {
@@ -326,7 +415,7 @@
   /** A metre count as readable text. FORMATTING ONLY. */
   function distance(metres) {
     if (metres === null || metres === undefined) {
-      return "-";
+      return NOT_REPORTED;
     }
     var value = Number(metres);
     if (!isFinite(value)) {
@@ -344,7 +433,7 @@
    */
   function instant(isoText, timezoneName) {
     if (!isoText) {
-      return "-";
+      return NOT_REPORTED;
     }
     var when = new Date(isoText);
     if (isNaN(when.getTime())) {
@@ -505,9 +594,9 @@
   }
 
   /**
-   * Surface an API error envelope honestly in `#error-banner`, with the optional context sentence
-   * describing the action that failed. Nothing is swallowed, retried silently or replaced with a
-   * client-side guess: the API's own code, type and message are printed verbatim.
+   * Surface an API failure as a product-shaped message: a concise headline for the reader plus a
+   * collapsed "Technical details" disclosure that still carries the API's own code, type, HTTP
+   * status and message verbatim. Nothing is swallowed, retried silently or replaced with a guess.
    */
   function showError(error, context) {
     var banner = byId("error-banner");
@@ -515,17 +604,27 @@
     var code = error && error.code ? String(error.code) : "unknown";
     var type = error && error.type ? String(error.type) : "unknown";
     var status = error && error.status ? String(error.status) : "no HTTP status";
-    var children = [
-      el("strong", null, "API error" + (context ? " - " + context : "") + ": "),
-      document.createTextNode(
-        "code " + code + ", type " + type + ", HTTP " + status + ". The API said: " + message
-      )
-    ];
+    var headline = error && error.status === 409 && code === "no_first_stop_selected"
+      ? "No committed route to show yet"
+      : "Unable to load route data" + (context ? " (" + context + ")" : "");
+    var details = el("details", "disclosure disclosure-error");
+    details.appendChild(el("summary", null, "Technical details"));
+    var body = el("div", "error-body");
+    body.appendChild(paragraph(null, "The API said: " + message));
+    body.appendChild(definitionList([
+      ["Code", code],
+      ["Type", type],
+      ["HTTP status", status]
+    ]));
     if (error && error.guidance) {
-      children.push(el("p", "hint", "This page's own note (not the API's message): " +
+      body.appendChild(paragraph("hint", "This page's own note (not the API's message): " +
         error.guidance));
     }
-    replace(banner, children);
+    details.appendChild(body);
+    replace(banner, [
+      el("strong", null, headline),
+      details
+    ]);
     banner.hidden = false;
   }
 
@@ -597,18 +696,36 @@
   }
 
   // ------------------------------------------------------------- honesty --
+  /**
+   * The compact status line and the technical provenance block.
+   *
+   * The status line stays short (it is a status, not a paragraph); the API's own prose - the data
+   * provenance warning, the timezone source and the accepted latency wording - is printed in full in
+   * the collapsed technical section and the latency notice, so nothing is hidden by the shortening.
+   */
   function renderHealth(health) {
     var data = health || {};
     var demo = data.demo_data || {};
     var computation = data.computation || {};
+    var timezoneData = data.timezone_data || {};
 
     setStatus(
-      "Workspace ready. Data provenance: " + text(data.data_provenance) +
-        " \u2014 " + text(demo.warning) +
-        ". Time zone data: " + text((data.timezone_data || {}).source) +
-        " (IANA " + text((data.timezone_data || {}).iana_version || "unknown") + ").",
+      "Workspace ready \u2014 " + text(data.data_provenance || "DEMO/SYNTHETIC") +
+        " data; time zone data: " + text(timezoneData.source || "unknown") + ".",
       "ok"
     );
+
+    // The API's own provenance warning, printed verbatim into #provenance-note (the container in the
+    // collapsed technical section) rather than restated by the page.
+    var provenance = byId("provenance-note");
+    if (provenance) {
+      replace(provenance, [
+        paragraph(null, text(demo.warning) + "."),
+        paragraph("hint", "Time zone data: " + text(timezoneData.source) +
+          " (IANA " + text(timezoneData.iana_version || "unknown") + "). " +
+          text(timezoneData.install_command || ""))
+      ]);
+    }
 
     // The latency notice states the accepted MVP worst case that the API itself reports.
     var latency = byId("latency-notice");
@@ -617,7 +734,7 @@
       document.createTextNode(
         text(computation.accepted_mvp_latency) +
           " Every computation response carries its measured computation_seconds, which is shown " +
-          "below after each request. Synchronous: " + text(computation.synchronous) +
+          "after each request. Synchronous: " + text(computation.synchronous) +
           "; background job queue: " + text(computation.background_job_queue) +
           "; per-plan single-flight lock wait bound: " +
           text(computation.lock_wait_bound_seconds) + " s."
@@ -767,8 +884,8 @@
    * Redraw the map from the payloads currently in hand (never from a client-side computation).
    *
    * A selection change may change what is drawn (the route order is a payload value), but the
-   * drawing itself is unchanged from U15: the synthetic straight-line label and the tile /
-   * degradation behaviour are exactly as they were.
+   * drawing itself is unchanged: the synthetic straight-line label and the tile / degradation
+   * behaviour are exactly as they were.
    */
   function drawMap() {
     if (!state.plan) {
@@ -872,12 +989,15 @@
     });
   }
 
+  /**
+   * The plan's own state, rendered into the collapsed technical section. The first-stop state and
+   * its provenance are the DRIVER's decision, never the engine's recommendation.
+   */
   function renderPlan(plan, document_) {
     var firstStop = plan.first_stop || {};
     var counts = plan.counts || {};
     var summary = byId("plan-summary");
     replace(summary, [
-      el("h3", null, "Plan summary"),
       definitionList([
         ["Plan id", plan.id],
         ["DEMO/SYNTHETIC provenance", badge(text(plan.data_provenance), "synthetic")],
@@ -901,7 +1021,6 @@
           text(document_.api_version) : null]
       ]),
       el("h3", null, "First-stop state and its provenance (the driver's decision, from the API)"),
-      // The plan's own first-stop state: the DRIVER's decision, never the engine's recommendation.
       firstStopBlock(firstStop)
     ]);
     renderStopList(plan);
@@ -953,16 +1072,16 @@
     if (!container.firstChild) {
       container.appendChild(paragraph("muted", "This plan holds no stop."));
     }
+    showPreviewControl("stop-list", "stop-list-toggle");
   }
 
   function stopRow(stop) {
     var row = el("div", "stop-row" + (stop.enabled ? "" : " stop-row-disabled"));
     var head = el("div", "stop-row-head");
     head.appendChild(el("span", "stop-row-id", text(stop.id)));
-    head.appendChild(el("span", null, stopLabel(stop)));
+    head.appendChild(el("span", "stop-row-label", stopLabel(stop)));
     head.appendChild(badgeFor(stop.enabled));
     head.appendChild(el("span", null, "priority " + text(stop.priority)));
-    head.appendChild(el("span", "muted", "input position " + text(stop.input_position)));
     row.appendChild(head);
 
     var controls = el("div", "stop-row-controls");
@@ -997,8 +1116,6 @@
       updateStop(stop.id, { priority: Number(input.value) });
     });
     controls.appendChild(apply);
-
-    controls.appendChild(el("span", "muted", "no reorder control: drag/reorder is out of scope"));
     row.appendChild(controls);
     return row;
   }
@@ -1013,6 +1130,7 @@
   function renderRecommendationUnavailable(message) {
     replace(byId("recommendation-panel"), [paragraph("muted", message)]);
     byId("recommended-stop").textContent = "";
+    resetFigures();
     replace(byId("alternatives"), [
       paragraph("muted", "The ranked alternatives appear here with their complete-route metrics.")
     ]);
@@ -1022,6 +1140,61 @@
     renderSelectionPanel(null);
     renderFirstStopState();
     updateAcceptControl();
+  }
+
+  /**
+   * The "Estimated route" / "Save" figure pairs of the optimization card.
+   *
+   * FIGURES COME FROM THE API ONLY. When a committed route exists, the pair is that route's own
+   * `metrics.after` duration and distance and the saving is `saved_duration_sec` /
+   * `saved_distance_m` as recorded. When no route is committed yet, the pair is the recommended
+   * candidate's own complete-route metrics from the recommendation payload. A value a payload does
+   * not carry renders the neutral placeholder - never a number derived here.
+   */
+  function renderFigures() {
+    var after = routeAfterMetrics() ||
+      ((recommendedCandidate() || {}).complete_route || null);
+    var metrics = (state.route && state.route.metrics) || {};
+    var savedMetrics = state.route ? metrics : {};
+    setFigurePair("estimated-route-figures", after ? after.duration_sec : null,
+      after ? after.distance_m : null);
+    setFigurePair("saved-figures", savedMetrics.saved_duration_sec, savedMetrics.saved_distance_m);
+  }
+
+  function setFigurePair(id, durationSeconds, distanceMetres) {
+    var container = byId(id);
+    if (!container) {
+      return;
+    }
+    replace(container, [figurePair(durationSeconds, distanceMetres)]);
+  }
+
+  function resetFigures() {
+    setFigurePair("estimated-route-figures", null, null);
+    setFigurePair("saved-figures", null, null);
+  }
+
+  /** The committed route's own after-route metrics, or null when no route payload is in hand. */
+  function routeAfterMetrics() {
+    var metrics = (state.route && state.route.metrics) || null;
+    return metrics ? (metrics.after || null) : null;
+  }
+
+  /** The candidate the API's own recommendation payload named as the recommendation, or null. */
+  function recommendedCandidate() {
+    var data = (state.recommendation && state.recommendation.data) || null;
+    if (!data || !data.recommended_stop_id) {
+      return null;
+    }
+    var ranked = data.ranked || [];
+    var index = 0;
+    while (index < ranked.length) {
+      if (ranked[index].stop_id === data.recommended_stop_id) {
+        return ranked[index];
+      }
+      index = index + 1;
+    }
+    return null;
   }
 
   /**
@@ -1063,17 +1236,52 @@
         ["Pinned", text(selection.pinned)]
       ]));
     }
-    children.push(paragraph("hint", "The controls above change this state through the documented " +
+    children.push(paragraph("hint", "The controls change this state through the documented " +
       "endpoints and then re-read the plan from the server. A recommendation is never applied by " +
       "this page, and a stored run's recommendation is history, not this state."));
     replace(byId("selection-panel"), children);
   }
 
+  /**
+   * The first-stop decision state, with the distinction this product exists to keep unmistakable:
+   * a stop the engine recommended (`Recommended by RoutePilot`) is never the same thing as a stop
+   * the driver selected (`Selected by driver`), even when it is the same stop id.
+   */
   function renderFirstStopState() {
-    replace(byId("first-stop-state"), [
-      el("h3", null, "First-stop state (from the server)"),
-      firstStopBlock((state.plan && state.plan.first_stop) || {})
-    ]);
+    var firstStop = (state.plan && state.plan.first_stop) || {};
+    var selected = firstStop.selected_stop_id || null;
+    var provenance = text(firstStop.selection_source || "none");
+    var children = [
+      el("h3", null, "First-stop decision state (from the server)"),
+      definitionList([
+        ["Decision", selected
+          ? badge("Selected by driver", "true")
+          : badge("Awaiting the driver's choice", "mode")],
+        ["Selected by driver", selected
+          ? text(selected) + " (pinned " + text(firstStop.pinned) + ", source " + provenance + ")"
+          : "none yet"],
+        ["Recommended by RoutePilot", recommendedStopLabel()],
+        ["Mode", text(firstStop.mode)],
+        ["State", badge(text(firstStop.state), "mode")],
+        ["Meaning", text(firstStop.description)]
+      ]),
+      paragraph("hint", selected
+        ? "The stop above is the driver's own decision (provenance " + provenance + "). It became " +
+          "plan state only because the driver selected it: RoutePilot's recommendation on its own " +
+          "is advice and is never applied."
+        : "No stop is selected yet. RoutePilot's recommendation is advice; the plan stays " +
+          "awaiting_first_stop_choice until the driver decides, and no stop is substituted.")
+    ];
+    replace(byId("first-stop-state"), children);
+  }
+
+  /** The recommendation's own stop id, labelled as advice rather than as plan state. */
+  function recommendedStopLabel() {
+    var data = (state.recommendation && state.recommendation.data) || null;
+    if (!data || !data.recommended_stop_id) {
+      return "none read yet (advisory only)";
+    }
+    return text(data.recommended_stop_id) + " (advisory only, not applied)";
   }
 
   function firstStopSentence() {
@@ -1209,8 +1417,8 @@
     replace(byId("alternatives"), [
       paragraph("hint", "Top-K view: " + text(counts.ranked_returned) + " of " +
         text(counts.ranked) + " ranked candidates, in the engine's own rank order. Every metric " +
-        "below is the complete route the engine evaluated. Choose one with the manual picker above " +
-        "to make it the driver's own choice."),
+        "below is the complete route the engine evaluated. Choose one with the manual picker to " +
+        "make it the driver's own choice."),
       alternatives.length
         ? table("Ranked alternatives (complete-route metrics, as returned)",
             candidateColumns(timezoneName), candidateRows(alternatives))
@@ -1244,37 +1452,41 @@
 
     renderSelectionPanel(null);
     renderFirstStopState();
+    renderFigures();
     updateAcceptControl();
   }
 
   // --------------------------------------------------------------- route --
   function renderRouteEmpty() {
     replace(byId("route-panel"), [
-      paragraph("muted", "No committed route read yet. After a selection, \u201cShow the committed " +
-        "route\u201d (or \u201cRecalculate\u201d) computes the route for the plan's current selection " +
-        "and writes nothing.")
+      paragraph("muted", "No committed route yet. After a first stop is selected, \u201cShow the " +
+        "committed route\u201d (or \u201cRecalculate\u201d) reads the route for the plan's current " +
+        "selection and writes nothing."),
+      paragraph("hint", "There is no committed route to show: the plan is still awaiting the " +
+        "driver's first-stop choice, and no route is invented in the meantime.")
     ]);
     replace(byId("timeline"), [
       paragraph("muted", "The route order and per-stop timeline appear here.")
     ]);
+    showPreviewControl("timeline", "timeline-toggle");
+    renderFigures();
   }
 
   /** The honest no-route state: the documented 409 refusal instead of an invented route (D9/I4). */
   function renderRouteRefused(error) {
     replace(byId("route-panel"), [
-      paragraph("error-text", "The API refused the route with " + text(error.code) + ": " +
-        text(error.message)),
+      paragraph("error-text", "No committed route: the API refused the route with " +
+        text(error.code) + ": " + text(error.message)),
       paragraph("hint", "That refusal is the honest answer while the plan is " +
         "awaiting_first_stop_choice: there is no committed route to show, and no route is " +
-        "invented. Choose a first stop with the controls above and try again.")
+        "invented. Choose a first stop with the controls and try again.")
     ]);
     replace(byId("timeline"), [
       paragraph("muted", "No timeline is shown, because there is no committed route.")
     ]);
-    replace(byId("summary-panel"), [
-      paragraph("muted", "No BEFORE vs AFTER is shown, because there is no committed route.")
-    ]);
-    replace(byId("before-after"), []);
+    showPreviewControl("timeline", "timeline-toggle");
+    renderSummaryEmpty();
+    renderFigures();
     drawMap();
   }
 
@@ -1308,17 +1520,19 @@
     var after = metrics.after || {};
     var selection = data.selection || {};
     var violations = data.violations || [];
+    var order = data.order || [];
 
     replace(byId("route-panel"), [
       definitionList([
         ["Route status", badge(text(data.status), data.status === "ok" ? "true" : "false")],
-        ["Live recompute", text(document_.live_recompute)],
-        ["Measured computation_seconds", text(data.computation_seconds)],
-        ["Order (as returned)", (data.order || []).join(" \u2192 ") || "empty"],
+        ["Stops served", text(order.length)],
         ["Committed for the driver's selection", "mode " + text(selection.mode) + ", stop " +
           text(selection.selected_stop_id || "none") + ", source " +
           text(selection.selection_source || "none") + ", pinned " + text(selection.pinned)],
         ["Feasible (complete route, FINISH leg included)", badgeFor(after.feasible)],
+        ["Order (as returned)", order.join(" \u2192 ") || "empty"],
+        ["Live recompute", text(document_.live_recompute)],
+        ["Measured computation_seconds", text(data.computation_seconds)],
         ["Provenance", text(data.provenance)],
         ["tzdata version", text(data.tzdata_version)],
         ["Inputs fingerprint (from the API)", fingerprint((data.fingerprints || {}).inputs_fingerprint)],
@@ -1381,53 +1595,53 @@
       paragraph("legend map-legend-synthetic", "The map draws this exact order as synthetic " +
         "straight-line geometry - not road routing.")
     ]);
+    showPreviewControl("timeline", "timeline-toggle");
 
     renderSummary(data);
+    renderFigures();
     drawMap();
   }
 
   // ------------------------------------------------------------- summary --
   function renderSummaryEmpty() {
     replace(byId("summary-panel"), [
-      paragraph("muted", "Compute or read the committed route to see BEFORE vs AFTER. No saving, " +
-        "distance or duration is computed on this page: every figure is the API's.")
+      paragraph("muted", "No committed route to compare yet. The BEFORE, AFTER and SAVED figures " +
+        "appear here as soon as the API reports a committed route. Nothing on this page computes a " +
+        "saving, a distance or a duration: every figure is the API's own.")
     ]);
     replace(byId("before-after"), []);
   }
 
+  /**
+   * The KPI strip of D39(f): BEFORE, AFTER and SAVED, one card each, every value the API's own.
+   *
+   * BEFORE is `metrics.user_baseline` (the driver's own input order) when the API reports it, AFTER
+   * is the committed `metrics.after` route, and SAVED is the recorded `saved_duration_sec` /
+   * `saved_distance_m`. The internal algorithm baseline is deliberately not a KPI: it is an internal
+   * reference and never the driver's BEFORE (it stays in the run history).
+   */
   function renderSummary(data) {
     var metrics = data.metrics || {};
     var after = metrics.after || {};
     var before = metrics.user_baseline || null;
-    var algorithm = metrics.algorithm_baseline || null;
 
     replace(byId("summary-panel"), [
-      definitionList([
-        ["AFTER: complete route duration", duration(after.duration_sec)],
-        ["AFTER: travel / waiting / service", duration(after.travel_sec) + " / " +
-          duration(after.waiting_sec) + " / " + duration(after.service_sec)],
-        ["AFTER: distance", distance(after.distance_m)],
-        ["AFTER: FINISH arrival", instant(after.finish_arrival,
-          state.plan ? state.plan.timezone : null)],
-        ["AFTER: feasible", badgeFor(after.feasible)],
-        ["BEFORE (the driver's own input order)", before
-          ? duration(before.duration_sec) + ", " + distance(before.distance_m) +
-            ", feasible " + text(before.feasible) +
-            " (" + text(before.baseline_kind) + ")"
-          : "not reported by the API for this route"],
-        ["Saved duration (reported by the API)", metrics.saved_duration_sec === null ||
-          metrics.saved_duration_sec === undefined ? "not reported" :
-          duration(metrics.saved_duration_sec)],
-        ["Saved distance (reported by the API)", metrics.saved_distance_m === null ||
-          metrics.saved_distance_m === undefined ? "not reported" :
-          distance(metrics.saved_distance_m)],
-        ["Algorithm baseline (internal, never the driver's BEFORE)", algorithm
-          ? duration(algorithm.duration_sec) + ", " + distance(algorithm.distance_m) +
-            " (" + text(algorithm.baseline_kind) + ")"
-          : "not reported"],
-        ["Violations", text((data.violations || []).length) + " reported"]
-      ])
+      paragraph("hint", "Every figure below is the API's own metric for this committed route" +
+        (before ? "; BEFORE is the driver's own input order (" + text(before.baseline_kind) + ")."
+          : "."))
     ]);
+
+    var cards = [];
+    if (before) {
+      cards.push(kpiRow("BEFORE", before.duration_sec, before.distance_m, before.feasible));
+    } else {
+      cards.push(kpiRow("BEFORE", null, null, null));
+    }
+    cards.push(kpiRow("AFTER", after.duration_sec, after.distance_m, after.feasible));
+    cards.push(kpiCard("SAVED", [
+      el("span", "kpi-duration", duration(metrics.saved_duration_sec)),
+      el("span", "kpi-distance", distance(metrics.saved_distance_m))
+    ], "saved"));
 
     var timezoneName = state.plan ? state.plan.timezone : null;
     var rows = [];
@@ -1447,15 +1661,6 @@
       feasible: after.feasible,
       finish_arrival: after.finish_arrival
     });
-    if (algorithm) {
-      rows.push({
-        label: "Algorithm baseline (internal reference, not BEFORE)",
-        duration_sec: algorithm.duration_sec,
-        distance_m: algorithm.distance_m,
-        feasible: algorithm.feasible,
-        finish_arrival: algorithm.finish_arrival
-      });
-    }
     rows.push({
       __className: "recommended-row",
       label: "Saved (as reported by the API)",
@@ -1465,21 +1670,11 @@
       finish_arrival: null
     });
 
-    replace(byId("before-after"), [
-      table("BEFORE vs AFTER (every figure is the API's own metric)",
-        [
-          ["Route", "label"],
-          ["Duration", "duration_sec", { render: duration, numeric: true }],
-          ["Distance", "distance_m", { render: distance, numeric: true }],
-          ["Feasible", "feasible", { render: function (value) {
-            return value === null || value === undefined ? "" : badgeFor(value);
-          } }],
-          ["FINISH arrival", "finish_arrival", { render: function (value) {
-            return value ? instant(value, timezoneName) : "";
-          } }]
-        ],
-        rows)
-    ]);
+    cards.push(el("p", "hint kpi-note", "FINISH arrival (AFTER): " +
+      instant(after.finish_arrival, timezoneName) + " \u00b7 violations reported: " +
+      text((data.violations || []).length) + "."));
+
+    replace(byId("before-after"), cards);
   }
 
   // ------------------------------------------------------------- history --
@@ -1488,7 +1683,9 @@
    *
    * READ-ONLY. The only control on a row reads one stored run back through `GET /api/runs/{id}`;
    * nothing here offers to edit, reorder or delete a run, and no run's recorded recommendation is
-   * ever presented as the plan's current first-stop decision.
+   * ever presented as the plan's current first-stop decision. The list is a readable history row per
+   * run (id, kind, status, when and the before/after/saved figures); the detailed payload fields live
+   * inside the run detail below.
    */
   function loadRuns() {
     if (!state.planId) {
@@ -1504,13 +1701,10 @@
   function renderRunHistory(document_) {
     var runs = document_.data || [];
     var children = [
-      definitionList([
-        ["Runs stored for this plan", text(document_.count)],
-        ["Read-only history", text(document_.read_only)],
-        ["Note (from the API)", text(document_.note)],
-        ["Stored as the plan's current decision", "never: a run records what that execution showed, " +
-          "and the plan's first-stop state above is the only place the driver's decision lives"]
-      ])
+      paragraph("hint", text(document_.count) + " run(s) stored for this plan \u00b7 read-only " +
+        "history reported as " + text(document_.read_only) + " by the API. " + text(document_.note) +
+        " A run's recorded recommendation is the audit of what that run showed, not the plan's " +
+        "current decision.")
     ];
     if (!runs.length) {
       children.push(paragraph("muted", "No run has been recorded for this plan yet. Only " +
@@ -1519,23 +1713,18 @@
     } else {
       children.push(table("Stored runs, oldest first (read-only; every column is a payload value)",
         [
-          ["Run id", "id"],
+          ["Run", "id"],
           ["Kind", "run_kind"],
           ["Status", "status"],
-          ["Created at (UTC)", "created_at"],
-          ["Algorithm", "algorithm"],
-          ["Algorithm version", "algorithm_version"],
-          ["tzdata version", "tzdata_version"],
-          ["Policy (reported by the API)", "policy"],
-          ["Inputs fingerprint", "inputs_fingerprint"],
+          ["When (as stored)", "created_at"],
+          ["BEFORE", "before_summary"],
+          ["AFTER", "after_summary", { numeric: true }],
+          ["Saved", "saved_summary", { numeric: true }],
           ["Route fingerprint", "route_fingerprint"],
-          ["Order (as recorded)", "order"],
-          ["Committed route recorded", "has_committed_route", { render: function (value) {
+          ["Committed route", "has_committed_route", { render: function (value) {
             return badgeFor(value);
           } }],
-          ["Recorded recommended stop (history, not the plan's decision)", "recommended_stop_id"],
-          ["Stored top-K candidates", "top_k_count"],
-          ["Show one run (read-only)", "detail", { render: function (value, row) {
+          ["Detail", "detail", { render: function (value, row) {
             var button = el("button", "run-row-button", "Show run detail (read-only)");
             button.type = "button";
             button.addEventListener("click", function () {
@@ -1545,29 +1734,29 @@
           } }]
         ],
         runs.map(function (run) {
-          var recommendation = run.recommendation || {};
+          var metrics = run.metrics || {};
           var fingerprints = run.fingerprints || {};
+          var after = metrics.after || {};
+          var before = metrics.user_baseline || null;
           return {
             id: run.id,
             run_kind: run.run_kind,
             status: run.status,
             created_at: run.created_at,
-            algorithm: run.algorithm,
-            algorithm_version: run.algorithm_version,
-            tzdata_version: run.tzdata_version,
-            policy: text((run.cost_policy || {}).name) +
-              ((run.cost_policy || {}).provisional ? " (provisional)" : ""),
-            inputs_fingerprint: fingerprints.inputs_fingerprint,
+            before_summary: before
+              ? duration(before.duration_sec) + ", " + distance(before.distance_m)
+              : "not reported by that run",
+            after_summary: duration(after.duration_sec) + ", " + distance(after.distance_m),
+            saved_summary: duration(metrics.saved_duration_sec) + ", " +
+              distance(metrics.saved_distance_m),
             route_fingerprint: fingerprints.route_fingerprint,
-            order: (run.order || []).join(" \u2192 "),
             has_committed_route: run.has_committed_route,
-            recommended_stop_id: recommendation.recommended_stop_id ||
-              "none recorded by that run",
-            top_k_count: run.top_k === null || run.top_k === undefined
-              ? "none stored" : text((run.top_k || []).length),
             detail: run.id
           };
         })));
+      children.push(paragraph("hint", "Open a run for its full audit: algorithm and version, " +
+        "tzdata version, cost policy, both fingerprints, the recorded order, the stored top-K " +
+        "candidates and the recommendation that execution produced - all as stored."));
     }
     replace(byId("run-history"), children);
   }
@@ -1912,7 +2101,7 @@
             "Recalculated " + state.planId + " in " + text(computation.computation_seconds) +
               " s (measured computation_seconds) and appended run " + text(run.id) + " (" +
               text(run.run_kind) + ", " + text(run.status) + "). The route, the selection state and " +
-              "the run history above were re-read from the server.",
+              "the run history were re-read from the server.",
             "ok"
           );
         });
@@ -2008,6 +2197,12 @@
     bind("cancel-selection", cancelSelection);
     bind("recalculate", recalculate);
     bind("request-route", requestRoute);
+    bind("timeline-toggle", function () {
+      togglePreview("timeline", "timeline-toggle");
+    });
+    bind("stop-list-toggle", function () {
+      togglePreview("stop-list", "stop-list-toggle");
+    });
     var planSelect = byId("plan-select");
     if (planSelect) {
       planSelect.addEventListener("change", changePlan);

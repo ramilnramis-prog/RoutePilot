@@ -381,6 +381,9 @@ class Element extends Node {
     return child;
   }
   get firstChild() { return this.childNodes.length ? this.childNodes[0] : null; }
+  get children() {
+    return this.childNodes.filter(function (child) { return child.nodeType === 1; });
+  }
   get textContent() {
     return this.childNodes.map(function (child) { return child.textContent; }).join("");
   }
@@ -394,6 +397,36 @@ class Element extends Node {
   getAttribute(name) {
     return Object.prototype.hasOwnProperty.call(this.attributes, String(name))
       ? this.attributes[String(name)] : null;
+  }
+  /**
+   * The two read-only traversal helpers the served script uses to count the rows a compact preview
+   * holds. They walk the same `childNodes` the real DOM walks and change nothing.
+   */
+  getElementsByTagName(tagName) {
+    var wanted = String(tagName).toLowerCase();
+    var found = [];
+    var visit = function (node) {
+      (node.childNodes || []).forEach(function (child) {
+        if (child.nodeType !== 1) { return; }
+        if (wanted === "*" || child.tagName === wanted) { found.push(child); }
+        visit(child);
+      });
+    };
+    visit(this);
+    return found;
+  }
+  getElementsByClassName(className) {
+    var wanted = String(className);
+    var found = [];
+    var visit = function (node) {
+      (node.childNodes || []).forEach(function (child) {
+        if (child.nodeType !== 1) { return; }
+        if (String(child.className || "").split(/\s+/).indexOf(wanted) >= 0) { found.push(child); }
+        visit(child);
+      });
+    };
+    visit(this);
+    return found;
   }
   addEventListener(type, handler) {
     if (!this.listeners[type]) { this.listeners[type] = []; }
@@ -497,7 +530,8 @@ function fetchStub(url, options) {
 var OBSERVED = [
   "status-banner", "error-banner", "loading", "plan-summary", "recommendation-panel",
   "recommended-stop", "alternatives", "rejected-candidates", "selection-panel",
-  "first-stop-state", "route-panel", "timeline", "summary-panel", "run-history", "run-detail"
+  "first-stop-state", "route-panel", "timeline", "summary-panel", "run-history", "run-detail",
+  "provenance-note"
 ];
 
 function optionsOf(id) {
@@ -1087,6 +1121,24 @@ class ServedScriptInStrictDomTests(unittest.TestCase):
         self.assertIn("ok", element_text(accepted, "route-panel"))
         self.assertEqual(element_text(accepted, "error-banner"), "")
         self.assertTrue(accepted["hidden"]["error-banner"])
+
+    def test_the_api_provenance_warning_reaches_the_rendered_page(self) -> None:
+        """The polish fix cycle's defect: ``#provenance-note`` must exist and carry the API's text.
+
+        Before the fix the served markup had no such element, so ``renderHealth``'s write was a
+        silent no-op and the API's demo-provenance warning never reached the page. The recorded
+        ``GET /api/health`` response is the only source of that text, so finding it in the rendered
+        container proves the payload - not the page's own prose - is what the reader sees.
+        """
+        report = self.run_scenario(self.world, "recommendation")
+        boot = observation(report, "boot")
+        health = self.world["documents"]["health"]
+        warning = health["demo_data"]["warning"]
+        self.assertTrue(warning, "the recorded health payload must carry the API's demo warning")
+        rendered = element_text(boot, "provenance-note")
+        self.assertIn(warning, rendered)
+        self.assertIn("Time zone data", rendered)
+        self.assertIn(health["timezone_data"]["source"], rendered)
 
     def test_the_stub_itself_refuses_a_bare_string(self) -> None:
         """A sanity check on the stub: its ``appendChild`` is as strict as a browser's.
