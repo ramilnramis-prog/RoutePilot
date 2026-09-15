@@ -60,6 +60,13 @@ from tests.api.support import (
     new_database_file,
     new_scratch_directory,
 )
+from tests.web.test_web_workspace import (
+    DEFAULT_STATE_SCOPE,
+    STYLES_CSS,
+    primary_emphasis_rules,
+    read_asset,
+    scoped_to_the_default_state,
+)
 
 #: Remove the scratch tree once this module has run, so the suite leaves no artifact behind.
 tearDownModule = cleanup_scratch_root
@@ -399,6 +406,51 @@ class Element extends Node {
       ? this.attributes[String(name)] : null;
   }
   /**
+   * The two presentation-state helpers the served script uses to drive the decision card's button
+   * emphasis: a compiled single-class or descendant selector, the way a browser matches it, and
+   * `classList` kept in step with `className` (so a class read after `toggle` is the class on the
+   * element). Both are read/write presentation state only - they carry no payload value.
+   */
+  closest(selector) {
+    var wanted = String(selector);
+    var classes = wanted.split(".").slice(1).filter(function (name) { return name !== ""; });
+    var tags = wanted.split(".")[0].split(/\s+/).filter(function (name) { return name !== ""; });
+    var node = this;
+    while (node && node.nodeType === 1) {
+      var names = String(node.className || "").split(/\s+/).filter(Boolean);
+      var matchesClass = classes.every(function (name) { return names.indexOf(name) >= 0; });
+      var matchesTag = tags.length === 0 || tags.indexOf(node.tagName) >= 0;
+      if (matchesClass && matchesTag) { return node; }
+      node = node.parentNode;
+    }
+    return null;
+  }
+  get classList() {
+    var element = this;
+    return {
+      contains: function (name) {
+        return String(element.className || "").split(/\s+/).indexOf(String(name)) >= 0;
+      },
+      add: function (name) {
+        if (!this.contains(name)) {
+          element.className = (String(element.className || "") + " " + String(name)).trim();
+        }
+      },
+      remove: function (name) {
+        var wanted = String(name);
+        element.className = String(element.className || "").split(/\s+/)
+          .filter(function (each) { return each !== "" && each !== wanted; }).join(" ");
+      },
+      toggle: function (name, force) {
+        var wanted = String(name);
+        var has = this.contains(wanted);
+        var on = force === undefined ? !has : !!force;
+        if (on) { this.add(wanted); } else { this.remove(wanted); }
+        return on;
+      }
+    };
+  }
+  /**
    * The two read-only traversal helpers the served script uses to count the rows a compact preview
    * holds. They walk the same `childNodes` the real DOM walks and change nothing.
    */
@@ -452,6 +504,10 @@ while ((tagMatch = tagPattern.exec(markup)) !== null) {
   var element = /select$/.test(elementId) ? new Element("select") : new Element("div");
   element.id = elementId;
   element.hidden = /(^|\s)hidden(\s|=|$)/.test(attributes);
+  // The element's own classes are part of the document too: the decision card's `class` attribute
+  // is what its state class is added to and removed from.
+  var classMatch = /(^|\s)class="([^"]*)"/.exec(attributes);
+  if (classMatch) { element.className = classMatch[2]; }
   elements[elementId] = element;
 }
 
@@ -550,6 +606,13 @@ function observe(name) {
   });
   observation.manualOptions = optionsOf("manual-stop-select");
   observation.planOptions = optionsOf("plan-select");
+  // The decision card's PRESENTATION state: the class the page toggles to say which control is the
+  // next action. Presentation only - it is not a payload value and not a control's disabled state.
+  var card = elements["decision-card"];
+  observation.decisionCardClasses = card ? String(card.className || "").split(/\s+/).filter(Boolean)
+    : null;
+  observation.acceptDisabled = elements["accept-recommendation"]
+    ? !!elements["accept-recommendation"].disabled : null;
   return observation;
 }
 
@@ -858,6 +921,23 @@ def element_text(entry: dict, element_id: str) -> str:
     return entry["elements"].get(element_id) or ""
 
 
+def unscoped_get_recommendation_emphasis(styles: str) -> list[str]:
+    """Every ``web/styles.css`` selector that gives ``#get-recommendation`` the brand-filled primary
+    treatment without the default-state (:not(.has-recommendation)) scope.
+
+    The parsing and the scope check are owned by ``tests/web/test_web_workspace.py``, which also
+    guards them: the emphasis is attributed to the rule's rightmost compound selector, so an
+    unscoped ``.card-decision #get-recommendation`` rule is reported even when a correctly scoped
+    rule also exists - that unscoped rule is the one that would outrank ``.btn-secondary`` once the
+    card carries ``has-recommendation``.
+    """
+    return [
+        selector
+        for selector in primary_emphasis_rules(styles, "get-recommendation")
+        if not scoped_to_the_default_state(selector)
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # The guards
 # --------------------------------------------------------------------------- #
@@ -1091,8 +1171,16 @@ class ServedScriptInStrictDomTests(unittest.TestCase):
         self.assertIn("awaiting_first_stop_choice", element_text(cancel, "first-stop-state"))
         self.assertNotIn("first_stop_selected", element_text(cancel, "first-stop-state"))
         self.assertIn("awaiting_first_stop_choice", element_text(cancel, "selection-panel"))
-        # The cancel also returns the honest refusal for the route, not an invented one.
-        self.assertIn("no committed route", element_text(cancel, "route-panel"))
+        # The cancel also returns the honest no-route state, not an invented route. This scenario
+        # holds the API's 409 refusal, so the panel must name exactly that no-committed-route
+        # refusal - not merely "some" no-route wording. The terse empty-state copy the panel shows
+        # before any route has been requested at all is pinned separately, in
+        # tests/web/test_web_workspace.py::DefaultStateCopyTests.
+        route_panel_text = element_text(cancel, "route-panel")
+        self.assertIn(
+            "No committed route:", route_panel_text,
+            f"the route panel must show the API's no-committed-route refusal: {route_panel_text!r}",
+        )
         # The only error is the API's own documented refusal for an unselected route.
         self.assertIn("no_first_stop_selected", element_text(cancel, "error-banner"))
         self.assertNotIn("TypeError", element_text(cancel, "error-banner"))
@@ -1121,6 +1209,26 @@ class ServedScriptInStrictDomTests(unittest.TestCase):
         self.assertIn("ok", element_text(accepted, "route-panel"))
         self.assertEqual(element_text(accepted, "error-banner"), "")
         self.assertTrue(accepted["hidden"]["error-banner"])
+
+    def test_the_decision_card_switches_its_presentation_state_with_the_recommendation(self) -> None:
+        """The button hierarchy is driven by the card's state class, and by nothing else.
+
+        Executed, because the class is applied at runtime: in the default state (before any
+        recommendation is read) `#decision-card` carries no state class, so `Get recommendation` is
+        the emphasized next action; once a current recommendation is on screen the card carries
+        `has-recommendation`, so the accept control is primary. The class is presentation state: the
+        accept control's own disabled flag is still the script's, not the class's.
+        """
+        report = self.run_scenario(self.world, "recommendation")
+        boot = observation(report, "boot")
+        after = observation(report, "after-recommendation")
+
+        self.assertIn("card-decision", boot["decisionCardClasses"])
+        self.assertNotIn("has-recommendation", boot["decisionCardClasses"])
+        self.assertIs(boot["acceptDisabled"], True)
+
+        self.assertIn("has-recommendation", after["decisionCardClasses"])
+        self.assertIs(after["acceptDisabled"], False)
 
     def test_the_api_provenance_warning_reaches_the_rendered_page(self) -> None:
         """The polish fix cycle's defect: ``#provenance-note`` must exist and carry the API's text.
@@ -1153,3 +1261,30 @@ class ServedScriptInStrictDomTests(unittest.TestCase):
             "the DOM stub accepted a bare string in appendChild, so the executed-DOM guard would "
             "not have caught the defect it exists for",
         )
+
+
+class DecisionCardEmphasisScopeTests(unittest.TestCase):
+    """The rendered state is ``has-recommendation``; the stylesheet must agree about it.
+
+    ``ServedScriptInStrictDomTests`` proves the executed page removes that class in the default state
+    and applies it once a current recommendation is on screen. This guard is the other half of the
+    same contract: every brand-filled ``#get-recommendation`` rule in ``web/styles.css`` is scoped to
+    the default state, so in the ``has-recommendation`` state the control falls back to its normal
+    secondary appearance and ``#accept-recommendation`` is the card's single primary action. The
+    parsing lives in ``tests/web/test_web_workspace.py``; this module only checks the delivered CSS
+    against the state class the page really drives.
+    """
+
+    def test_no_unscoped_get_recommendation_emphasis_rule_is_delivered(self) -> None:
+        offenders = unscoped_get_recommendation_emphasis(read_asset(STYLES_CSS))
+        self.assertEqual(
+            offenders,
+            [],
+            "web/styles.css fills #get-recommendation with the brand colour without the "
+            f"{DEFAULT_STATE_SCOPE} scope, so the has-recommendation state would render two primary "
+            f"buttons in one card: {offenders}",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -82,29 +82,22 @@
            aria-label="Map of the departure, finish and service stops, with the route order shown as numbers on the stop markers"></div>
       <p class="notice" id="map-notice" hidden></p>
       <p class="legend">
-        <strong>Real road routing is not implemented: no line is drawn between the stops. Only the
-        stop locations, their route order and the recommended or driver-selected first stop are
-        shown.</strong> The number badge on a stop marker is its 1-based position in the order the
-        API returned; with no committed route yet, the plan's enabled stops are drawn unnumbered.
-        The recommended first stop
-        (<span class="marker-legend marker-legend-recommended">advisory only, never applied by
-        itself</span>) is styled differently from the stop the driver selects
-        (<span class="marker-legend marker-legend-selected">the driver's own decision</span>); when
-        they are the same stop, that stop is the driver having accepted the recommendation, never a
-        recommendation that applied itself.
+        Demo map: stop locations and route order only. Real road routing is not implemented.
+        <span class="marker-legend marker-legend-recommended">advisory recommendation</span>
+        <span class="marker-legend marker-legend-selected">the driver's own decision</span>
       </p>
     </section>
 
-    <section class="card card-decision" aria-labelledby="decision-heading">
+    <section class="card card-decision" id="decision-card" aria-labelledby="decision-heading">
       <div class="card-head">
         <h2 id="decision-heading">Optimization</h2>
         <span class="card-kicker">Advisory</span>
       </div>
 
       <p class="banner banner-advisory" id="advisory-banner">
-        A recommendation is <strong>advisory and NOT an applied decision</strong>: RoutePilot
-        recommends, the driver decides. Nothing is applied until the driver presses a button, and the
-        plan is unchanged until then (D4/D11/D32).
+        <strong>RoutePilot recommends. You decide.</strong> Recommendations are never applied
+        automatically: the recommendation is advisory, the driver decides, and it is never an applied
+        decision (<span class="honesty-literal">NOT an applied decision</span>).
       </p>
 
       <h3>Recommended first stop</h3>
@@ -315,6 +308,19 @@
         <code>awaiting_first_stop_choice</code> and <code>first_stop_selected</code>; a selection is
         pinned once made, and cancelling clears it. A stored run records the recommendation that
         execution produced: that is an audit of history, never the plan's current decision.
+      </p>
+
+      <h3>What the map legend and the advisory banner leave out</h3>
+      <p class="hint">
+        The number badge on a stop marker is the stop's 1-based position in the order the API
+        returned. With no committed route yet there is no order to number, so the plan's enabled
+        stops are drawn unnumbered - the map shows where the payload's enabled stops are, never a
+        route. When the recommended first stop and the driver's own selection are the same stop, that
+        stop is the driver having accepted the recommendation: it is never a recommendation that
+        applied itself. The short advisory banner in the Optimization card carries the same rule in
+        full here: a recommendation is <strong>advisory and NOT an applied decision</strong>;
+        RoutePilot recommends and the driver decides, and nothing is applied automatically - the plan
+        is unchanged until the driver presses a button (D4/D11/D32).
       </p>
 
       <h3>What this build does NOT do</h3>

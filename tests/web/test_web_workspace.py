@@ -432,6 +432,107 @@ def flatten_javascript_strings(script: str) -> str:
     return " ".join(script.split())
 
 
+#: A CSS rule as ``selector { declarations }``. The stylesheet is hand-written with one rule per
+#: block, so this is all the structure these source-level guards need: comments are removed first,
+#: which is also what keeps a comment that *mentions* a selector from being read as one.
+CSS_RULE = re.compile(r"(?P<selector>[^{}]+)\{(?P<body>[^{}]*)\}")
+
+#: A declaration that fills the control with the brand colour - the stylesheet's own primary-button
+#: fill. ``--brand`` is the resting fill and ``--brand-strong`` the hover fill (``.btn-primary``, its
+#: hover rule and both decision-card emphasis rules use exactly these two tokens); the secondary
+#: treatment uses ``--surface`` and the route-accent tokens, so it can never match this pattern.
+BRAND_FILLED_BACKGROUND = re.compile(
+    r"(?:^|;)\s*background(?:-color)?\s*:\s*[^;{}]*\bvar\(\s*--brand(?:-strong)?\s*\)",
+    re.IGNORECASE,
+)
+
+#: The default-state scope the decision card's emphasis rules must carry, as the exact selector text
+#: the stylesheet writes (the unit's contract: while no recommendation is on screen
+#: ``#get-recommendation`` is the primary action; once the card holds ``has-recommendation`` the
+#: accept control is the single primary action of that card).
+DEFAULT_STATE_SCOPE = ":not(.has-recommendation)"
+
+#: The stylesheet with its ``/* ... */`` comments blanked. One character becomes one space, so every
+#: index - and therefore any line number a guard reports - still points at the delivered byte.
+CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def strip_css_comments(styles: str) -> str:
+    """``styles`` with CSS comments blanked, character positions preserved."""
+    return CSS_COMMENT.sub(lambda match: re.sub(r"[^\n]", " ", match.group(0)), styles)
+
+
+def css_rules(styles: str) -> list[tuple[str, str]]:
+    """Every ``(selector, declaration body)`` rule of a stylesheet, comments removed."""
+    return [
+        (match.group("selector").strip(), match.group("body"))
+        for match in CSS_RULE.finditer(strip_css_comments(styles))
+    ]
+
+
+def css_selector_rightmost(selector: str) -> str:
+    """The ``selector``'s rightmost compound selector - the subject the rule actually styles.
+
+    The decision-card rules are descendant selectors (``.card-decision … #get-recommendation``), so
+    the emphasis has to be attributed to the element the rule names last, not to the whole string.
+    """
+    return re.split(r"[>+~]|\s+", selector.strip())[-1]
+
+
+def primary_emphasis_rules(styles: str, element_id: str) -> list[str]:
+    """Every selector that gives ``#element_id`` the brand-filled primary button treatment."""
+    subject = re.compile(r"#" + re.escape(element_id) + r"(?![\w-])")
+    return [
+        selector
+        for selector, body in css_rules(styles)
+        if subject.search(css_selector_rightmost(selector))
+        and BRAND_FILLED_BACKGROUND.search(body)
+    ]
+
+
+def without_default_state_scope(styles: str) -> str:
+    """The same stylesheet with ``:not(.has-recommendation)`` removed from every rule.
+
+    This is how the guard's *own* ability to fail is proved without editing a delivered byte: the
+    fixture is the shipped stylesheet minus the scope, which is exactly the unscoped re-introduction
+    the guard exists to catch.
+    """
+    return styles.replace(DEFAULT_STATE_SCOPE, "")
+
+
+def scoped_to_the_default_state(selector: str, element_id: str = "get-recommendation") -> bool:
+    """Does this rule apply to ``#element_id`` only while the card is in its default state?
+
+    The scope has to sit on the compound selector that names the control (``… #id:not(.has-…)``,
+    optionally with one interactive pseudo-class such as ``:hover``) or on that compound's ancestor
+    in a descendant selector (``.card-decision:not(.has-recommendation) #id``). Both are how a
+    browser reads "this control, while the card carries no current recommendation".
+
+    A plain ``str.endswith`` would be wrong here: the control's own id is the *first* token of the
+    compound, so an unscoped ``.card-decision #get-recommendation`` trivially "ends with" any scope
+    string that contains that id. This is a shape check on the selector text only; the guard makes no
+    claim about CSS specificity arithmetic beyond the one the unit names - that a rule on this
+    element which is not restricted to the default state is the defect.
+    """
+    parts = [part for part in re.split(r"\s+", selector.strip()) if part]
+    if not parts:
+        return False
+    subject = parts[-1]
+    for suffix in (":hover", ":focus-visible", ":focus", ":active"):
+        if subject.endswith(suffix):
+            subject = subject[: -len(suffix)]
+            break
+    target = re.compile(r"#" + re.escape(element_id) + r"(?![\w-])")
+    if target.search(subject) is None:
+        return False
+    if DEFAULT_STATE_SCOPE in subject:
+        # The scope is on the control itself: `…#get-recommendation:not(.has-recommendation)`.
+        return True
+    # Otherwise the scope has to be on an ancestor compound of this descendant selector, which is
+    # what makes the rule apply to the control only while the card carries no recommendation.
+    return any(DEFAULT_STATE_SCOPE in part for part in parts[:-1])
+
+
 def element_markup(element_id: str, path: Path = INDEX_HTML) -> str:
     """The markup of one element, matched to its own closing tag.
 
@@ -1845,6 +1946,165 @@ class MapPresentationTests(unittest.TestCase):
         # The collapsed technical details carry the same honest disclosure.
         details = html.split("Demo limitations / technical details", 1)[1]
         self.assertIn(NO_ROUTE_GEOMETRY_DISCLOSURE, " ".join(details.split()))
+
+
+class DecisionCardEmphasisTests(unittest.TestCase):
+    """The decision card's ONE primary call to action, guarded at the byte level.
+
+    ``#get-recommendation`` is the next action only while the card is in its **default** state (no
+    current recommendation on screen). Its primary/brand emphasis is therefore scoped to
+    ``.card-decision:not(.has-recommendation)``: once ``has-recommendation`` is present the accept
+    control is the card's single primary action, exactly as the stylesheet's own rule states.
+
+    The defect this guards against is a specificity accident, not a visual opinion: an unscoped
+    ``.card-decision #get-recommendation`` rule outranks ``.btn-secondary``, so it kept the control
+    brand-filled in the state where the accept control is meant to be the only primary button. A
+    catch-all "is the scope present somewhere" check would not be enough, because an unscoped rule
+    added anywhere in the file would still win; the guard below therefore attributes every
+    brand-filled rule in the stylesheet to the element it styles and demands the scope on each one.
+    """
+
+    def test_every_get_recommendation_emphasis_rule_is_scoped_to_the_default_state(self) -> None:
+        styles = read_asset(STYLES_CSS)
+        emphasis = primary_emphasis_rules(styles, "get-recommendation")
+        self.assertTrue(
+            emphasis,
+            "web/styles.css no longer gives #get-recommendation a brand-filled emphasis rule: the "
+            "default state loses its primary action, so this guard would pass without examining "
+            "anything - update it rather than leaving it vacuous",
+        )
+        offenders = [selector for selector in emphasis if not scoped_to_the_default_state(selector)]
+        self.assertEqual(
+            offenders,
+            [],
+            "these web/styles.css rules fill #get-recommendation with the brand colour but are not "
+            f"scoped to {DEFAULT_STATE_SCOPE}, so the control keeps its primary look once a "
+            f"recommendation is on screen and the card shows two primary buttons: {offenders}",
+        )
+
+    def test_the_emphasis_guard_reads_the_scope_and_not_a_coincidence(self) -> None:
+        """The pass above must come from the scope, not from matching the control's own name.
+
+        Each selector shape is checked directly, so the guard cannot be satisfied by a scope string
+        that merely *contains* the id it is looking for, and the two re-introduction shapes are the
+        ones the same check reports as offenders. Nothing here reads a file.
+        """
+        for selector in (
+            ".card-decision:not(.has-recommendation) #get-recommendation",
+            ".card-decision:not(.has-recommendation) #get-recommendation:hover",
+            "#get-recommendation:not(.has-recommendation)",
+        ):
+            with self.subTest(scoped=selector):
+                self.assertTrue(scoped_to_the_default_state(selector))
+        for selector in (
+            ".card-decision #get-recommendation",
+            ".card-decision #get-recommendation:hover",
+            ".card-decision.has-recommendation #get-recommendation",
+            "#get-recommendation",
+            "#accept-recommendation",
+        ):
+            with self.subTest(unscoped=selector):
+                self.assertFalse(scoped_to_the_default_state(selector))
+
+    def test_the_emphasis_guard_reports_an_unscoped_reintroduction(self) -> None:
+        """The guard can fail: the scope is stripped *in memory* and the same check reports it.
+
+        The shipped file is never modified - the fixture is its own bytes with
+        ``:not(.has-recommendation)`` removed, which is the regression. The shipped stylesheet still
+        reports no offender afterwards, so the pass is not an artifact of an empty rule list.
+        """
+        styles = read_asset(STYLES_CSS)
+        broken = without_default_state_scope(styles)
+        self.assertNotEqual(broken, styles, f"web/styles.css declares no {DEFAULT_STATE_SCOPE}")
+        offenders = [
+            selector
+            for selector in primary_emphasis_rules(broken, "get-recommendation")
+            if not scoped_to_the_default_state(selector)
+        ]
+        unscoped_selectors = [selector.strip() for selector in offenders]
+        self.assertTrue(
+            unscoped_selectors,
+            "the guard did not report the #get-recommendation emphasis rules after the default-state "
+            "scope was removed, so it cannot fail on the defect it exists for",
+        )
+        self.assertIn(".card-decision #get-recommendation", unscoped_selectors)
+        self.assertEqual(
+            [selector for selector in primary_emphasis_rules(styles, "get-recommendation")
+             if not scoped_to_the_default_state(selector)],
+            [],
+            "the shipped stylesheet must still pass the same check",
+        )
+
+    def test_the_executed_dom_module_uses_this_exact_scan(self) -> None:
+        """The other web module's CSS check must be this scan, not a copy that can drift.
+
+        ``tests/web/test_web_executed_dom.py`` checks the same delivered stylesheet against the state
+        class the executed page applies, and imports the parser from here. If either module grew its
+        own duplicate scan, one could be fixed while the other silently kept the old semantics - the
+        assertion is on the function object, which is what makes the sharing real.
+        """
+        from tests.web import test_web_executed_dom
+
+        self.assertIs(test_web_executed_dom.primary_emphasis_rules, primary_emphasis_rules)
+        self.assertIs(test_web_executed_dom.scoped_to_the_default_state, scoped_to_the_default_state)
+        self.assertIs(test_web_executed_dom.STYLES_CSS, STYLES_CSS)
+
+
+class DefaultStateCopyTests(unittest.TestCase):
+    """The pre-action state says what the product does, in as few words as possible.
+
+    The default-state micro-polish shortened four visible strings (the advisory message, the map
+    legend, the KPI empty state and the route empty state) and moved the longer explanations into the
+    collapsed technical-details section. These guards pin the concise copy AND that the de-emphasised
+    honesty content still exists on the page, so a later edit cannot quietly drop either half - and
+    they pin the empty-state copy exactly, which the executed-DOM harness deliberately does not do
+    (that scenario holds the API's 409 refusal, not the empty state).
+    """
+
+    def test_the_advisory_message_is_concise_and_still_states_the_rule(self) -> None:
+        banner = read_asset(INDEX_HTML).split('id="advisory-banner"', 1)[1].split("</p>", 1)[0]
+        # The markup wraps the sentence across lines, so compare against collapsed whitespace.
+        flat = " ".join(banner.split())
+        self.assertIn("RoutePilot recommends. You decide.", flat)
+        self.assertIn("Recommendations are never applied automatically", flat)
+        # The literal the honesty table pins must survive inside this very element.
+        self.assertIn("NOT an applied decision", flat)
+
+    def test_the_map_legend_is_one_sentence_and_the_full_disclosure_moved_to_details(self) -> None:
+        html = read_asset(INDEX_HTML)
+        legend = html.split('<p class="legend">', 1)[1].split("</p>", 1)[0]
+        self.assertIn(
+            "Demo map: stop locations and route order only. Real road routing is not implemented.",
+            legend,
+        )
+        # The long explanation is no longer visible next to the map...
+        self.assertNotIn("Real road routing is not implemented: no line is drawn", legend)
+        # ...but it is still on the page, in the collapsed technical/details section, together with
+        # the exact disclosure the honesty table pins verbatim.
+        self.assertIn(NO_ROUTE_GEOMETRY_HEADLINE, html)
+        self.assertIn("not road routing", html)
+
+    def test_the_empty_states_carry_the_terse_copy(self) -> None:
+        script = read_asset(APP_JS)
+        summary = function_body(script, "renderSummaryEmpty")
+        self.assertIn("Run optimization to see BEFORE / AFTER / SAVED.", summary)
+        route = function_body(script, "renderRouteEmpty")
+        self.assertIn("No route calculated yet.", route)
+        # The empty states must not carry the old long prose any more.
+        self.assertNotIn("Nothing on this page computes a saving", summary)
+        self.assertNotIn("no route is invented in the meantime", route)
+
+    def test_the_empty_state_copy_is_a_static_literal(self) -> None:
+        """Presentation only: the new copy is a plain string, not assembled from computed values.
+
+        (This deliberately does not assert the absence of formatting helpers such as ``toFixed`` -
+        those are pre-existing display helpers for payload distances and fingerprints, which the
+        no-business-formula test already governs. What matters here is that the new copy itself is a
+        literal, so nothing can make it depend on a calculated figure.)
+        """
+        script = read_asset(APP_JS)
+        self.assertIn('paragraph("muted", "Run optimization to see BEFORE / AFTER / SAVED.")', script)
+        self.assertIn('paragraph("muted", "No route calculated yet.")', script)
 
 
 if __name__ == "__main__":

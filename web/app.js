@@ -1141,6 +1141,7 @@
     replace(byId("recommendation-panel"), [paragraph("muted", message)]);
     byId("recommended-stop").textContent = "";
     resetFigures();
+    setDecisionCardState(false);
     replace(byId("alternatives"), [
       paragraph("muted", "The ranked alternatives appear here with their complete-route metrics.")
     ]);
@@ -1214,6 +1215,9 @@
    */
   function markRecommendationStale(reason) {
     state.recommendationIsStale = true;
+    // A stale recommendation can no longer be accepted, so the card drops back to the default
+    // emphasis (Get recommendation primary) whether or not a payload is still on screen.
+    setDecisionCardState(false);
     if (!state.recommendation) {
       return;
     }
@@ -1299,6 +1303,21 @@
     return text(firstStop.state) + " (mode " + text(firstStop.mode) + ", selected " +
       text(firstStop.selected_stop_id || "none") + ", source " +
       text(firstStop.selection_source || "none") + ", pinned " + text(firstStop.pinned) + ")";
+  }
+
+  /**
+   * The decision card's PRESENTATION state, driven by whether a recommendation is in hand and still
+   * current. It is a state class only: it changes which button carries the primary emphasis (before
+   * a recommendation, "Get recommendation" is the next action and the disabled accept control does
+   * not compete with it; afterwards the accept control is primary), and it changes no action
+   * semantics, no wiring and no disabled logic.
+   */
+  function setDecisionCardState(hasRecommendation) {
+    var card = byId("decision-card");
+    if (!card) {
+      return;
+    }
+    card.classList.toggle("has-recommendation", !!hasRecommendation);
   }
 
   /** The accept control is only enabled when the API's own recommendation names a stop. */
@@ -1463,17 +1482,14 @@
     renderSelectionPanel(null);
     renderFirstStopState();
     renderFigures();
+    setDecisionCardState(!!data.recommended_stop_id && !state.recommendationIsStale);
     updateAcceptControl();
   }
 
   // --------------------------------------------------------------- route --
   function renderRouteEmpty() {
     replace(byId("route-panel"), [
-      paragraph("muted", "No committed route yet. After a first stop is selected, \u201cShow the " +
-        "committed route\u201d (or \u201cRecalculate\u201d) reads the route for the plan's current " +
-        "selection and writes nothing."),
-      paragraph("hint", "There is no committed route to show: the plan is still awaiting the " +
-        "driver's first-stop choice, and no route is invented in the meantime.")
+      paragraph("muted", "No route calculated yet.")
     ]);
     replace(byId("timeline"), [
       paragraph("muted", "The route order and per-stop timeline appear here.")
@@ -1615,9 +1631,7 @@
   // ------------------------------------------------------------- summary --
   function renderSummaryEmpty() {
     replace(byId("summary-panel"), [
-      paragraph("muted", "No committed route to compare yet. The BEFORE, AFTER and SAVED figures " +
-        "appear here as soon as the API reports a committed route. Nothing on this page computes a " +
-        "saving, a distance or a duration: every figure is the API's own.")
+      paragraph("muted", "Run optimization to see BEFORE / AFTER / SAVED.")
     ]);
     replace(byId("before-after"), []);
   }

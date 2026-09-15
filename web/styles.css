@@ -633,6 +633,74 @@ input:focus-visible {
 }
 .btn-quiet:hover { color: var(--brand); background: transparent; }
 
+/* ------------------------------------------------- CTA hierarchy (D32) */
+/*
+  Which control is the NEXT ACTION is presentation state, not a semantic change: nothing here
+  changes what a button sends, when it is enabled, or what the API does.
+
+  Before a recommendation has been read, the only action that can move the workflow forward is
+  `#get-recommendation`, so the decision card's default state gives it the primary emphasis and the
+  accept control - disabled until a recommendation is in hand - stays visually subordinate.
+  Once a current recommendation is on screen the card carries `has-recommendation`, the existing
+  hierarchy applies and `#accept-recommendation` is primary again.
+*/
+.card-decision:not(.has-recommendation) #get-recommendation {
+  background: var(--brand);
+  border-color: var(--brand-strong);
+  color: var(--white);
+}
+.card-decision:not(.has-recommendation) #get-recommendation:hover {
+  background: var(--brand-strong);
+  border-color: var(--brand-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+/* The accept control is not the next action yet: it stays a quiet secondary shape even when the
+   disabled style is not applied (while a computation is in flight). */
+.card-decision:not(.has-recommendation) #accept-recommendation {
+  background: var(--surface);
+  border-color: var(--border-soft);
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  font-weight: 600;
+  padding: 0.44rem 0.75rem;
+  box-shadow: none;
+}
+/* A disabled button must not read as the primary action: the white "disabled" fill of the generic
+   hover rule never applies to the accept control while it is disabled and no recommendation is in
+   hand. Only presentation is pinned here - `updateAcceptControl` still owns `disabled`. */
+.card-decision:not(.has-recommendation) #accept-recommendation:disabled,
+.card-decision:not(.has-recommendation) #accept-recommendation:disabled:hover {
+  background: var(--surface);
+  border-color: var(--border-soft);
+  color: var(--text-muted);
+}
+
+/* A current recommendation is on screen: accepting it is the next action, so the existing primary
+   treatment returns. */
+.card-decision.has-recommendation #accept-recommendation {
+  background: var(--brand);
+  border-color: var(--brand-strong);
+  color: var(--white);
+  font-size: 0.95rem;
+  padding: 0.62rem 1.05rem;
+  box-shadow: var(--shadow-sm);
+}
+.card-decision.has-recommendation #accept-recommendation:hover {
+  background: var(--brand-strong);
+  border-color: var(--brand-strong);
+  box-shadow: var(--shadow);
+}
+
+/* The advisory banner's honesty literal, kept as a compact, visually muted aside: the rule is on
+   screen, but it does not read as a wall of text. */
+.honesty-literal {
+  font-size: 0.74rem;
+  letter-spacing: 0.06em;
+  color: var(--recommend-strong);
+  white-space: nowrap;
+}
+
 .hint, .legend, .notice {
   font-size: 0.82rem;
   color: var(--text-muted);
@@ -644,6 +712,11 @@ input:focus-visible {
   padding-top: 0.65rem;
   color: var(--text-muted);
 }
+
+/* The legend's one line is the honesty sentence plus the two marker swatches; the swatches are
+   spaced inline so the line reads as one sentence. The swatch treatments themselves live with the
+   other legend styles near the end of this file. */
+.legend .marker-legend { margin-left: 0.35rem; }
 
 .notice {
   background: var(--warning-soft);
