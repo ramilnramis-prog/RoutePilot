@@ -11,9 +11,10 @@ What this module verifies, and what it deliberately cannot
   real files);
 * every element id this unit and U16 depend on is present in the delivered HTML;
 * the honesty strings are really there - DEMO/SYNTHETIC, the advisory statement that a
-  recommendation is not an applied decision and that the driver decides, the synthetic
-  straight-line geometry label, the latency notice naming the accepted ~8 s worst case at the
-  ~50-stop scale, and the tzdata/unimplemented-capability wiring;
+  recommendation is not an applied decision and that the driver decides, the honesty statement that
+  real road routing is not implemented and no line is drawn between the stops (carried verbatim by
+  both the markup next to the map and ``web/map.js``), the latency notice naming the accepted ~8 s
+  worst case at the ~50-stop scale, and the tzdata/unimplemented-capability wiring;
 * the unimplemented-capability list is **wired to the API**, not restated in the page: the script
   reads ``not_implemented_capabilities``, ``route_modes`` and ``timezone_data`` from
   ``GET /api/health``, and the served health payload really carries traffic, side-of-road,
@@ -102,7 +103,8 @@ bytes, never the rendered result.
    or ``manual_choice`` (manual picker) and ``pinned: true`` - all re-read from the server.
 9. **See the full ordered route**: the route panel and the timeline show the engine's own order with
    the per-stop ETA/arrival, waiting, service start, service duration, departure, the local service
-   window and the lateness; the map redraws that order as synthetic straight-line geometry.
+   window and the lateness; the map presents that same order as a 1-based number badge on each stop
+   marker and draws no line between the stops.
 10. **See ETA / waiting / service / FINISH**: the timeline columns above plus the summary's FINISH
     arrival - every figure the API's own, unchanged.
 11. **Compare BEFORE vs AFTER**: the summary's BEFORE (the driver's own input order) against the
@@ -337,13 +339,32 @@ OTHER_ROUTE_MODES = ("FASTEST", "SHORTEST", "MINIMUM_TURNS", "ON_THE_WAY", "STAR
 #: tile-provider URL - must come from configuration.
 URL_LITERAL_ALLOWED_SUBSTRINGS = ("leaflet", "openstreetmap.org/copyright")
 
+#: The one honesty statement the workspace must carry about what the map shows, verbatim in BOTH the
+#: markup next to the map and ``web/map.js``. The map-presentation hotfix removed the fabricated
+#: straight line between stops, so the string it used to carry for that line is replaced by this
+#: disclosure of the same fact: real road routing is not implemented and no line is drawn. The
+#: substance of the old expectation - an honesty statement about the map's geometry, present in the
+#: markup and in the map module - is unchanged; only the wording follows the map.
+NO_ROUTE_GEOMETRY_DISCLOSURE = (
+    "Real road routing is not implemented: no line is drawn between the stops. Only the stop "
+    "locations, their route order and the recommended or driver-selected first stop are shown."
+)
+
+#: The disclosure's first sentence, which is what both assets carry on one line: the honesty-string
+#: table matches plain substrings, and the full statement is wrapped across lines in the markup. The
+#: full statement is asserted in :meth:`MapPresentationTests.test_the_page_no_longer_claims_a_line_is_drawn`,
+#: where the markup's whitespace is collapsed first.
+NO_ROUTE_GEOMETRY_HEADLINE = (
+    "Real road routing is not implemented: no line is drawn between the stops."
+)
+
 #: The honesty strings the workspace must contain, with the asset each one lives in.
 HONESTY_STRINGS = {
     "demo_synthetic": ("DEMO / SYNTHETIC", "index.html"),
     "not_real_routing": ("not real routing", "index.html"),
     "advisory_not_applied": ("NOT an applied decision", "index.html"),
     "driver_decides": ("driver decides", "index.html"),
-    "synthetic_geometry_label": ("synthetic straight-line geometry", "index.html"),
+    "no_route_geometry_label": (NO_ROUTE_GEOMETRY_HEADLINE, "index.html"),
     "latency_scale": ("~50-stop", "index.html"),
     "latency_eight_seconds": ("about 8 seconds", "index.html"),
     "loading_state": ("Computing", "index.html"),
@@ -396,6 +417,19 @@ def strip_js_comments_and_strings(script: str) -> str:
 def read_asset(path: Path) -> str:
     """One delivered asset, as text."""
     return path.read_text(encoding="utf-8")
+
+
+def flatten_javascript_strings(script: str) -> str:
+    """A JavaScript asset with its string-literal wrapping removed, so a sentence can be matched.
+
+    A long sentence in a script is written as several concatenated string literals, one per source
+    line, so ``"a " + "b"`` never contains ``"a b"`` as a substring. Removing the double-quote
+    concatenation operators and the double-quote characters and collapsing all whitespace makes the
+    sentence findable whatever way the lines were wrapped.
+    """
+    for noise in ('" +', '+ "', '"'):
+        script = script.replace(noise, " ")
+    return " ".join(script.split())
 
 
 def element_markup(element_id: str, path: Path = INDEX_HTML) -> str:
@@ -602,12 +636,33 @@ class WebWorkspaceTestCase(ServerBackedTestCase):
         self.assertIn("driver", banner)
         self.assertIn("advisory", banner.lower())
 
-    def test_the_synthetic_geometry_label_is_next_to_the_map(self) -> None:
-        for asset in (INDEX_HTML, MAP_JS):
-            content = read_asset(asset)
+    def test_the_map_discloses_that_no_line_is_drawn_between_stops(self) -> None:
+        """The map's honesty statement, verbatim in the markup AND in the map module.
+
+        The map-presentation hotfix removed the fabricated straight line between stops, so the one
+        honesty string that described that line follows the new, honest wording. The substance is
+        unchanged: an honesty statement about the map sits next to the map, and the map module that
+        draws it carries the same statement.
+        """
+        html = read_asset(INDEX_HTML)
+        script = read_asset(MAP_JS)
+        flattened_html = " ".join(html.split())
+        self.assertIn(NO_ROUTE_GEOMETRY_HEADLINE, flattened_html)
+        self.assertIn(NO_ROUTE_GEOMETRY_DISCLOSURE, flattened_html)
+        # The module is JavaScript: its string may be wrapped across lines, so the source is
+        # normalised (concatenation operators and quotes removed, whitespace collapsed) before the
+        # same statement is looked for.
+        flattened = flatten_javascript_strings(script)
+        self.assertIn(NO_ROUTE_GEOMETRY_DISCLOSURE, flattened)
+        # ...and the module exports that very statement, so the page and the drawer cannot drift.
+        self.assertIn("NO_ROUTE_GEOMETRY_DISCLOSURE", script)
+        # The map's "this is not road routing" claim survives, next to the map.
+        self.assertIn("not road routing", html)
+        # The removed geometry is gone from both assets: nothing claims a line is drawn.
+        for asset, content in ((INDEX_HTML, html), (MAP_JS, script)):
             with self.subTest(asset=asset.name):
-                self.assertIn("synthetic straight-line geometry", content.lower())
-        self.assertIn("not road routing", read_asset(INDEX_HTML))
+                self.assertNotIn("synthetic straight-line geometry", content.lower())
+                self.assertNotIn("polyline", content.lower())
 
     def test_the_latency_notice_names_the_accepted_worst_case(self) -> None:
         notice = element_markup("latency-notice")
@@ -1317,6 +1372,32 @@ class U16ErrorAndLoadingTests(unittest.TestCase):
             with self.subTest(action=action):
                 self.assertIn("clearError()", function_body(script, action))
 
+    def test_a_successful_plan_load_clears_a_previously_shown_error(self) -> None:
+        """The stale-error hole: the banner is cleared by the plan LOAD path too, not only by actions.
+
+        The banner used to be cleared by ``changePlan``, ``createOrOpenDemoPlan`` and each action,
+        but not by ``openPlan`` itself - and ``boot`` auto-opens the first stored plan by calling
+        ``openPlan(planId)`` directly. A refusal left on screen by an earlier build or session could
+        therefore sit above a perfectly healthy workspace. ``openPlan``'s success path now clears it,
+        so a successful load can never leave a stale error behind. A real API failure is untouched:
+        the clear sits on the resolved load path, after the plan is in state, and no message text or
+        error contract changes.
+        """
+        script = read_asset(APP_JS)
+        body = function_body(script, "openPlan")
+        self.assertIn("clearError()", body, "openPlan must clear a previous error on its success path")
+        self.assertLess(
+            body.index("state.plan = plan"),
+            body.index("clearError()"),
+            "the clear must happen on the resolved load, not before the response arrived",
+        )
+        # The gap the fix closes: boot reaches the load path directly, without an action clearing.
+        boot = function_body(script, "boot")
+        self.assertIn("openPlan(planId)", boot)
+        self.assertNotIn("clearError()", boot)
+        # A failure still shows: openPlan keeps its rejection path, and the boot chain reports it.
+        self.assertIn("showError(", boot)
+
     def test_the_loading_state_is_wired_for_the_two_slow_requests(self) -> None:
         """The recommendation and the recalculation show ``#loading`` (D39(e))."""
         script = read_asset(APP_JS)
@@ -1636,6 +1717,127 @@ class MapContainerAndStylesheetTests(unittest.TestCase):
         self.assertIn("position: absolute", styles)
         self.assertIn(".map img.leaflet-tile", styles)
         self.assertIn("max-width: none", styles)
+
+
+class MapPresentationTests(unittest.TestCase):
+    """The map-presentation hotfix: no fabricated line, route order via numbered stop markers.
+
+    Every assertion is a source-level check of the delivered bytes, so it is deterministic and needs
+    no browser, no Leaflet and no network. Nothing here computes a value: the order number is the
+    index inside the API's own ``order`` array, and the recommendation/selection ids are payload
+    values passed straight through.
+    """
+
+    def test_no_line_is_created_anywhere_in_the_map_module(self) -> None:
+        """The fabricated straight-line geometry is gone for good, with no replacement geometry."""
+        script = read_asset(MAP_JS)
+        self.assertNotIn("polyline", script.lower())
+        self.assertNotRegex(script, r"L\.\s*(polygon|polyline|curve|geodesic)\b")
+        self.assertNotIn("synthetic straight-line geometry", script.lower())
+        # No routing provider or URL was introduced with the removal.
+        self.assertNotRegex(script.lower(), r"osrm|graphhopper|openrouteservice|mapbox|valhalla")
+        self.assertNotRegex(script, r"https?://")
+
+    def test_the_map_still_degrades_honestly_and_its_notices_promise_no_line(self) -> None:
+        script = read_asset(MAP_JS)
+        for wiring in (
+            "could not be loaded",
+            "unavailable_note",
+            "tileerror",
+            "tileload",
+            "setNoticeSink",
+            "reportTilesAfterGrace",
+        ):
+            with self.subTest(wiring=wiring):
+                self.assertIn(wiring, script)
+        flattened = flatten_javascript_strings(script).lower()
+        self.assertIn("route-order numbers", flattened)
+        self.assertNotIn("straight-line route order", flattened)
+
+    def test_draw_route_numbers_stop_markers_from_the_payload_order(self) -> None:
+        """The badge is the 1-based index in ``route.order`` - nothing derived, nothing sorted."""
+        script = read_asset(MAP_JS)
+        body = function_body(script, "drawRoute")
+        self.assertIn("route.order", body)
+        self.assertIn("orderPosition(", body)
+        position = function_body(script, "orderPosition")
+        self.assertIn("order.indexOf(", position)
+        self.assertIn("index + 1", position)
+        # No client-side ordering and no derivation primitive: the map module's one arithmetic
+        # expression is the 1-based index above. (`.map(` is Leaflet's own map constructor here,
+        # never an array projection - so the constructor is pinned and the projection is refused.)
+        self.assertIn("return index < 0 ? null : index + 1;", position)
+        self.assertIn("window.L.map(container", script)
+        self.assertIsNone(re.search(r"(?<!window\.L)\.map\(", script))
+        for primitive in ("sort(", ".reduce(", "Math.", "function distance("):
+            with self.subTest(primitive=primitive):
+                self.assertNotIn(primitive, script)
+        # The markers are numbered with the payload position, and the popup states position N of M.
+        self.assertIn("marker-number", function_body(script, "marker"))
+        stop_marker = function_body(script, "stopMarker")
+        self.assertIn("Route order position", stop_marker)
+        self.assertIn(" of ", stop_marker)
+
+    def test_the_plan_enabled_stops_are_drawn_when_no_route_is_in_hand(self) -> None:
+        """No committed route yet still draws the payload's ENABLED stops, unnumbered."""
+        body = function_body(read_asset(MAP_JS), "drawRoute")
+        self.assertIn("stop.enabled === true", body)
+        self.assertIn("order.length ? order : enabledStopIds", body)
+        # Coordinates come from the payload stop records only; no point is invented.
+        self.assertIn("stop.latitude", body)
+        self.assertIn("stop.longitude", body)
+
+    def test_the_recommended_and_driver_selected_stops_are_passed_and_styled_apart(self) -> None:
+        script = read_asset(APP_JS)
+        draw = function_body(script, "drawMap")
+        self.assertIn("recommendedStopId:", draw)
+        self.assertIn("recommendation.recommended_stop_id", draw)
+        self.assertIn("selectedStopId:", draw)
+        self.assertIn("firstStop.selected_stop_id", draw)
+
+        map_script = read_asset(MAP_JS)
+        body = function_body(map_script, "drawRoute")
+        self.assertIn("payload.recommendedStopId", body)
+        self.assertIn("payload.selectedStopId", body)
+        self.assertIn("marker-recommended", body)
+        self.assertIn("marker-selected", body)
+        # The recommendation is advisory and is never applied by the map: nothing here reaches the
+        # API, and the map only ever reads the two ids the caller passed in.
+        self.assertIn("advisory only, not applied", function_body(map_script, "stopRoleText"))
+        self.assertNotIn("apply", body.lower())
+
+        styles = read_asset(STYLES_CSS)
+        self.assertIn(".routepilot-marker .marker-recommended {", styles)
+        self.assertIn(".routepilot-marker .marker-selected {", styles)
+        recommended = styles.split(".routepilot-marker .marker-recommended {", 1)[1].split("}", 1)[0]
+        selected = styles.split(".routepilot-marker .marker-selected {", 1)[1].split("}", 1)[0]
+        self.assertNotEqual(recommended, selected, "the advice and the driver's decision must differ")
+        self.assertIn("dashed", recommended)
+        self.assertIn("var(--accent-strong)", selected)
+        # The same stop can be both only when the driver accepted the recommendation, and the
+        # combined state is styled as the driver's selection, which is what actually happened.
+        self.assertIn(".routepilot-marker .marker-recommended.marker-selected {", styles)
+        combined = styles.split(".routepilot-marker .marker-recommended.marker-selected {", 1)[1]
+        self.assertIn("var(--accent-strong)", combined.split("}", 1)[0])
+
+    def test_the_fit_bounds_survives_over_the_drawn_points_only(self) -> None:
+        body = function_body(read_asset(MAP_JS), "drawRoute")
+        self.assertIn("fitBounds(window.L.latLngBounds(points)", body)
+        for point in ("startPoint", "finishPoint", "points.push(latlng)"):
+            with self.subTest(point=point):
+                self.assertIn(point, body)
+
+    def test_the_page_no_longer_claims_a_line_is_drawn(self) -> None:
+        html = read_asset(INDEX_HTML)
+        script = read_asset(APP_JS)
+        for asset, content in ((INDEX_HTML, html), (APP_JS, script)):
+            with self.subTest(asset=asset.name):
+                self.assertNotIn("synthetic straight-line geometry", content.lower())
+        flattened = flatten_javascript_strings(script)
+        self.assertIn("draws no line between the stops", flattened)
+        # The collapsed technical details carry the same honest disclosure.
+        details = html.split("Demo limitations / technical details", 1)[1]
+        self.assertIn(NO_ROUTE_GEOMETRY_DISCLOSURE, " ".join(details.split()))
 
 
 if __name__ == "__main__":

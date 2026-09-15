@@ -389,7 +389,9 @@ summary:focus-visible {
   max-width: none;
 }
 
-/* Marker glyphs drawn by web/map.js inside Leaflet div icons (label text only, no data). */
+/* Marker glyphs drawn by web/map.js inside Leaflet div icons (labels and payload position numbers
+   only, no data of their own). No line is drawn between stops: the route order is carried by the
+   number badge on the stop markers. */
 .routepilot-marker span {
   display: inline-block;
   font-size: 0.6rem;
@@ -400,11 +402,44 @@ summary:focus-visible {
   border: 1px solid var(--accent);
   background: var(--surface);
   color: var(--accent);
-  transform: translate(-25%, -25%);
+  transform: translate(-50%, -25%);
 }
 .routepilot-marker .marker-start { border-color: var(--ok-line); color: var(--ok-ink); }
 .routepilot-marker .marker-finish { border-color: var(--alert-line); color: var(--alert-ink); }
 .routepilot-marker .marker-stop { border-color: var(--synthetic); color: var(--synthetic); }
+
+/* The route-order position, taken from the API's own `order` array: 1-based, and nothing but that
+   array index. Purely presentational, and every marker keeps its own label next to it. */
+.routepilot-marker .marker-number {
+  background: var(--synthetic);
+  border-color: var(--synthetic);
+  color: #ffffff;
+  min-width: 1.35rem;
+  text-align: center;
+}
+
+/* The recommended first stop (advisory only) and the driver's own selection are styled
+   differently on purpose: one is advice, the other is a decision (D4/D32). */
+.routepilot-marker .marker-recommended {
+  border-style: dashed;
+  border-color: var(--ok-line);
+  color: var(--ok-ink);
+  background: var(--ok-bg);
+}
+.routepilot-marker .marker-selected {
+  border-width: 2px;
+  border-color: var(--accent-strong);
+  color: var(--surface);
+  background: var(--accent-strong);
+}
+/* The same stop carries both roles only when the driver accepted the recommendation: it then reads
+   as the driver's selection, which is what actually happened. */
+.routepilot-marker .marker-recommended.marker-selected {
+  border-style: solid;
+  border-color: var(--accent-strong);
+  color: var(--surface);
+  background: var(--accent-strong);
+}
 
 /* ---------------------------------------------------- decision + figures */
 .recommended {
@@ -742,17 +777,32 @@ tr.rejected-row td { background: var(--alert-bg); }
   font-size: 0.84rem;
 }
 
-/* --------------------------------------------------- synthetic geometry */
+/* ------------------------------------------------------ honesty / legend */
 /*
-  The straight-line geometry the map draws is synthetic and is labelled as such in two places: the
-  legend under the map and the marker/polyline labels inside web/map.js. The dashed stroke below is
-  the visual half of that label.
+  The map draws NO line between stops: real road routing is not implemented, and the route order is
+  presented as a 1-based number badge on each stop marker. The legend under the map and the
+  disclosure text inside web/map.js say exactly that. The historical dashed stroke that belonged to
+  the removed line is gone with it; the class below now only carries the disclosure's typography, and
+  the swatches mark the recommended and driver-selected markers.
 */
 .map-legend-synthetic {
   font-size: 0.76rem;
   color: var(--synthetic);
   font-weight: 600;
 }
+
+/* Small legend swatches mirroring the two role markers drawn by web/map.js. */
+.marker-legend {
+  display: inline-block;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-weight: 700;
+  font-size: 0.72rem;
+  background: var(--surface-alt);
+}
+.marker-legend-recommended { border: 1px dashed var(--ok-line); color: var(--ok-ink); background: var(--ok-bg); }
+.marker-legend-selected { border: 2px solid var(--accent-strong); color: var(--surface); background: var(--accent-strong); }
 
 /* --------------------------------------------------------------- footer */
 .footer {

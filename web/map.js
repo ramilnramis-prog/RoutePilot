@@ -1,26 +1,39 @@
 /*
   RoutePilot demo workspace - map controller (Stage 4 U15; spec section 34, D15/D39(c)).
+  Map presentation hotfix: the fabricated line between stops was removed and the route order is now
+  shown through numbered stop markers.
 
   What this file does
   ===================
 
-  Draws the departure, the finish and the stops on a Leaflet map with an OSM-compatible tile layer,
-  and joins the route order with straight-line segments.
+  Draws the departure (START), the finish (FINISH) and the service stops on a Leaflet map with an
+  OSM-compatible tile layer. NO LINE, arc or any other geometry is drawn between the stops: the
+  route order is presented as a 1-based number badge on each stop marker, and each stop marker's
+  popup states the stop's label, its `position N of M` and what that stop is (recommended first
+  stop, selected by driver, or both).
+
+  With no committed route in hand, the plan's enabled stops are drawn as plain (unnumbered) markers
+  instead of nothing, so the relevant points stay visible. A stop the API recommends or the driver
+  has selected is marked as such even before a route exists.
 
   What this file must NEVER do
   ============================
 
   * It computes no route and no metric. The order it draws is `order`, exactly as
     `GET /api/plans/{id}/route` returned it; the coordinates are the stop/plan coordinates exactly as
-    the API returned them. No distance, duration, saving, rank, feasibility or fingerprint is
-    derived here (D39(f)).
+    the API returned them. The number badge is the index inside that payload array (1-based) and
+    nothing else - no distance, duration, saving, rank, feasibility or fingerprint is derived here
+    (D39(f)).
+  * It draws no line between stops: real road routing is not implemented, and no fabricated geometry
+    stands in for it. Stop locations, their route order and the recommendation/selection state are
+    the whole of what is shown.
   * It does not decide the tile provider. `tile_url`, `tile_attribution`, `tile_max_zoom` and the
     Leaflet library URL all arrive from `GET /api/health` -> `map.configuration.values`, which
     resolves the approved `app_settings` keys with their documented defaults
     (`api/map_configuration.py`). No vendor URL is written into this file, and no map asset is
     vendored into this repository.
-  * It never presents the drawn line as road routing. Every segment is a straight line between two
-    payload coordinates and is labelled synthetic / straight-line wherever it is described.
+  * It never presents anything here as road routing: the disclosure text below says so next to the
+    map and in the collapsed technical details.
 
   Honest degradation (D39(c))
   ===========================
@@ -40,6 +53,20 @@
   is shown when the library or the tiles fail, and that the rest of the workspace is unaffected.
   Browser rendering is confirmed manually - see the manual visual checklist in
   `tests/web/test_web_workspace.py`.
+
+  MANUAL VISUAL CHECKLIST (to confirm in a real browser once a network is available)
+  =================================================================================
+
+  1. The map draws the START, the FINISH and the stops with NO line at all between them - not even a
+     dashed one. Only marker positions and their number badges carry the order.
+  2. Each stop marker shows its 1-based position from the API's `order` array, and its popup reads
+     `position N of M`. Before any route is read the markers are unnumbered (plain enabled stops).
+  3. The recommended first stop and the driver's own selected first stop are styled differently and
+     labelled differently; when they are the same stop the marker says the driver accepted the
+     recommendation, and never implies a recommendation applied itself.
+  4. START, FINISH and every drawn stop stay inside the viewport (fitBounds over these points only).
+  5. With tiles unreachable, the markers and the notice still render and the rest of the workspace
+     stays usable.
 */
 
 (function () {
@@ -51,6 +78,14 @@
   //: How many tile requests may fail before the layer is called unreachable. One bad tile in the
   //: middle of a working map must not be reported as "the map is unavailable".
   var TILE_FAILURE_THRESHOLD = 4;
+
+  //: The honest disclosure this module carries for the reader. It is repeated verbatim in
+  //: `web/index.html` (next to the map and in the collapsed technical details), so the page and the
+  //: module that draws the map can never disagree about what is shown. No line is drawn between
+  //: stops, and real road routing is not implemented.
+  var NO_ROUTE_GEOMETRY_DISCLOSURE =
+    "Real road routing is not implemented: no line is drawn between the stops. Only the stop " +
+    "locations, their route order and the recommended or driver-selected first stop are shown.";
 
   var state = {
     map: null,
@@ -132,8 +167,8 @@
         state.tilesReported = true;
         setNotice(
           "The tile service could not be reached, so the map shows no map imagery. The stop " +
-            "markers and the synthetic straight-line route order are still drawn; the timeline, " +
-            "summary, recommendation and selection state below are unaffected.",
+            "markers and their route-order numbers are still drawn; the timeline, summary, " +
+            "recommendation and selection state below are unaffected.",
           "warning"
         );
       }
@@ -149,16 +184,6 @@
     return map;
   }
 
-  function marker(latlng, label, cssClass) {
-    var icon = window.L.divIcon({
-      className: "routepilot-marker",
-      html: '<span class="' + cssClass + '">' + escapeHtml(label) + "</span>",
-      iconSize: [24, 24],
-      iconAnchor: [12, 12]
-    });
-    return window.L.marker(latlng, { icon: icon, title: label });
-  }
-
   function escapeHtml(value) {
     return text(value)
       .replace(/&/g, "&amp;")
@@ -168,10 +193,77 @@
   }
 
   /**
+   * How this stop is presented, in the words the page uses elsewhere: the API's recommendation is
+   * advice, the driver's own selection is a decision, and a stop that is both is the driver having
+   * accepted the recommendation - never a recommendation that applied itself (D4/D32).
+   */
+  function stopRoleText(isRecommended, isSelected) {
+    if (isRecommended && isSelected) {
+      return "the driver's selection, which accepted the RoutePilot recommendation";
+    }
+    if (isRecommended) {
+      return "the recommended first stop (advisory only, not applied)";
+    }
+    return "the driver's selection (their own decision)";
+  }
+
+  /** The route order position of a stop: the 1-based index in the payload's own `order` array. */
+  function orderPosition(order, stopId) {
+    var index = order.indexOf(stopId);
+    return index < 0 ? null : index + 1;
+  }
+
+  /**
+   * One marker whose div icon carries a compact label badge and, for a stop, its 1-based position
+   * from the payload order (the `marker-number` span). `classes` only ever adds presentation classes
+   * this module owns; the label text is escaped because it comes from a payload.
+   */
+  function marker(latlng, label, classes, badge) {
+    var hasBadge = badge !== null && badge !== undefined && text(badge) !== "";
+    var html = hasBadge
+      ? '<span class="marker-number">' + escapeHtml(badge) + "</span>" +
+        '<span class="' + classes + '">' + escapeHtml(label) + "</span>"
+      : '<span class="' + classes + '">' + escapeHtml(label) + "</span>";
+    var icon = window.L.divIcon({
+      className: "routepilot-marker",
+      html: html,
+      iconSize: hasBadge ? [42, 24] : [24, 24],
+      iconAnchor: hasBadge ? [21, 12] : [12, 12]
+    });
+    return window.L.marker(latlng, { icon: icon, title: label });
+  }
+
+  /** The START / FINISH marker: a plan location, never a service stop and never numbered. */
+  function locationMarker(latlng, name, classes, containerLabel) {
+    return marker(latlng, name, classes, null).bindPopup(
+      "<strong>" + escapeHtml(name) + "</strong> - " + escapeHtml(containerLabel) +
+        " (plan location)"
+    );
+  }
+
+  /** One stop marker: the payload order number, the payload label and the stop's own role(s). */
+  function stopMarker(stopId, latlng, label, position, orderLength, roles) {
+    var badge = position === null ? null : position;
+    var classes = "marker-stop" + (roles.length ? " " + roles.join(" ") : "");
+    var isRecommended = roles.indexOf("marker-recommended") >= 0;
+    var isSelected = roles.indexOf("marker-selected") >= 0;
+    var positionText = position === null
+      ? "Position in the route order: not read yet (no committed route in hand)."
+      : "Route order position " + escapeHtml(position) + " of " + escapeHtml(orderLength) + ".";
+    var roleText = isRecommended || isSelected
+      ? "<br>" + escapeHtml("This stop is " + stopRoleText(isRecommended, isSelected) + ".")
+      : "";
+    var popup = "<strong>" + escapeHtml(label) + "</strong><br>" + positionText + roleText;
+    return marker(latlng, text(stopId), classes, badge).bindPopup(popup);
+  }
+
+  /**
    * Draw the plan locations, the stops and the committed route order.
    *
    * `payload` is exactly what the API returned:
-   *   { plan: <plan payload>, route: <committed-route payload>|null, stopLabels: {id: label} }
+   *   { plan: <plan payload>, route: <committed-route payload>|null, stopLabels: {id: label},
+   *     recommendedStopId: <the recommendation payload's own stop id>|null,
+   *     selectedStopId: <plan.first_stop.selected_stop_id>|null }
    * Every coordinate and every id is used as given. `order` comes from the route payload, so the
    * drawn sequence is the engine's sequence, never a client-side sort.
    */
@@ -182,6 +274,8 @@
     var plan = payload.plan || {};
     var route = payload.route || null;
     var labels = payload.stopLabels || {};
+    var recommendedStopId = text(payload.recommendedStopId) || null;
+    var selectedStopId = text(payload.selectedStopId) || null;
     var points = [];
     var byId = {};
 
@@ -207,55 +301,51 @@
     if (startPoint) {
       points.push(startPoint);
       state.layer.addLayer(
-        marker(startPoint, "START", "marker-start").bindPopup(
-          "<strong>START</strong> - " + escapeHtml(plan.departure.label) + " (plan location)"
-        )
+        locationMarker(startPoint, "START", "marker-start", plan.departure.label)
       );
     }
 
+    // The route order is a payload value. With no route in hand the plan's ENABLED stops are drawn
+    // instead, unnumbered: coordinates still come from the payload, and no point is ever invented.
     var order = route && route.order ? route.order : [];
-    order.forEach(function (stopId) {
+    var enabledStopIds = [];
+    (plan.stops || []).forEach(function (stop) {
+      if (stop.enabled === true) {
+        enabledStopIds.push(text(stop.id));
+      }
+    });
+    var drawn = order.length ? order : enabledStopIds;
+
+    drawn.forEach(function (stopId) {
       var latlng = stopLatLng(stopId);
       if (!latlng) {
         return;
       }
       points.push(latlng);
       var label = labels[text(stopId)] || text(stopId);
-      state.layer.addLayer(
-        marker(latlng, text(stopId), "marker-stop").bindPopup(
-          "<strong>" + escapeHtml(label) + "</strong><br>" +
-            "Route order position " + (order.indexOf(stopId) + 1) + " of " + order.length + "."
-        )
-      );
+      var isRecommended = recommendedStopId !== null && text(stopId) === recommendedStopId;
+      var isSelected = selectedStopId !== null && text(stopId) === selectedStopId;
+      var roles = [];
+      if (isRecommended) {
+        roles.push("marker-recommended");
+      }
+      if (isSelected) {
+        roles.push("marker-selected");
+      }
+      state.layer.addLayer(stopMarker(
+        stopId, latlng, label, orderPosition(order, text(stopId)), order.length, roles
+      ));
     });
 
     if (finishPoint) {
       points.push(finishPoint);
       state.layer.addLayer(
-        marker(finishPoint, "FINISH", "marker-finish").bindPopup(
-          "<strong>FINISH</strong> - " + escapeHtml(plan.finish.label) + " (plan location)"
-        )
+        locationMarker(finishPoint, "FINISH", "marker-finish", plan.finish.label)
       );
     }
 
-    if (points.length > 1) {
-      // SYNTHETIC STRAIGHT-LINE GEOMETRY: one straight segment per consecutive pair of the route
-      // order above. This is not road geometry, carries no road distance and is never presented as
-      // road routing (spec section 34, D15).
-      var line = window.L.polyline(points, {
-        color: "#6b4bb5",
-        weight: 3,
-        opacity: 0.85,
-        dashArray: "6 6"
-      });
-      line.bindPopup(
-        "<strong>Synthetic straight-line geometry</strong><br>" +
-          "The straight segments joining the route order returned by the API. This is NOT road " +
-          "routing: no roads, no turn instructions, no traffic and no road distance."
-      );
-      line.bindTooltip("synthetic straight-line geometry (not road routing)", { sticky: true });
-      state.layer.addLayer(line);
-    }
+    // NO line, arc or other geometry is drawn between the stops: the route order is carried by the
+    // number badge on each stop marker alone (real road routing is not implemented).
 
     if (points.length) {
       state.map.fitBounds(window.L.latLngBounds(points).pad(0.15));
@@ -279,8 +369,8 @@
         state.tilesReported = true;
         setNotice(
           "No map tiles could be loaded (the tile service is unreachable from this machine, or " +
-            "this environment is offline). The stop markers and the synthetic straight-line route " +
-            "order are still drawn; the timeline, summary, recommendation and selection state are " +
+            "this environment is offline). The stop markers and their route-order numbers are " +
+            "still drawn; the timeline, summary, recommendation and selection state are " +
             "unaffected and stay usable.",
           "warning"
         );
@@ -289,6 +379,7 @@
   }
 
   window.RoutePilotMap = {
+    NO_ROUTE_GEOMETRY_DISCLOSURE: NO_ROUTE_GEOMETRY_DISCLOSURE,
     drawRoute: drawRoute,
     mountMap: mountMap,
     reportTilesAfterGrace: reportTilesAfterGrace,

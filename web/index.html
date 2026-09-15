@@ -62,15 +62,22 @@
     <section class="card card-map" aria-labelledby="map-heading">
       <div class="card-head">
         <h2 id="map-heading">Route map</h2>
-        <span class="card-kicker">Synthetic straight-line geometry</span>
+        <span class="card-kicker">Stop locations and route order - no line drawn</span>
       </div>
       <div id="map" class="map" role="img"
-           aria-label="Map of the departure, finish and service stops"></div>
+           aria-label="Map of the departure, finish and service stops, with the route order shown as numbers on the stop markers"></div>
       <p class="notice" id="map-notice" hidden></p>
       <p class="legend">
-        The line drawn between the stops is <strong>synthetic straight-line geometry</strong>: it is
-        the route order the engine returned, joined by straight segments. It is not road routing and
-        carries no road distance, no turn instructions and no traffic.
+        <strong>Real road routing is not implemented: no line is drawn between the stops. Only the
+        stop locations, their route order and the recommended or driver-selected first stop are
+        shown.</strong> The number badge on a stop marker is its 1-based position in the order the
+        API returned; with no committed route yet, the plan's enabled stops are drawn unnumbered.
+        The recommended first stop
+        (<span class="marker-legend marker-legend-recommended">advisory only, never applied by
+        itself</span>) is styled differently from the stop the driver selects
+        (<span class="marker-legend marker-legend-selected">the driver's own decision</span>); when
+        they are the same stop, that stop is the driver having accepted the recommendation, never a
+        recommendation that applied itself.
       </p>
     </section>
 
@@ -305,13 +312,16 @@
       </p>
       <div id="capabilities-panel" class="tbody"></div>
 
-      <h3>Synthetic data and geometry</h3>
+      <h3>Synthetic data and the map</h3>
       <p class="hint">
         The data is DEMO / SYNTHETIC: not real addresses, not real opening hours, not real routing, no
-        traffic. The line on the map is synthetic straight-line geometry joining the returned route
-        order - it is not road routing, carries no road distance and answers no turn-by-turn or
-        geocoding request. Travel time and distance come from the DEMO/SYNTHETIC provider, never from a
-        real RoutingProvider.
+        traffic. <strong>Real road routing is not implemented: no line is drawn between the stops.
+        Only the stop locations, their route order and the recommended or driver-selected first stop
+        are shown.</strong> The map presents the API's route order as a 1-based number badge on each
+        stop marker, plainly labelled "not road routing" - it carries no road distance, no turn
+        instructions and answers no turn-by-turn or geocoding request. The recommended first stop and
+        the driver's own selection are visibly distinct and separately labelled. Travel time and
+        distance come from the DEMO/SYNTHETIC provider, never from a real RoutingProvider.
       </p>
     </details>
   </section>

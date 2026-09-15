@@ -883,18 +883,25 @@
   /**
    * Redraw the map from the payloads currently in hand (never from a client-side computation).
    *
-   * A selection change may change what is drawn (the route order is a payload value), but the
-   * drawing itself is unchanged: the synthetic straight-line label and the tile / degradation
-   * behaviour are exactly as they were.
+   * The map is presentation only: it draws START, FINISH and the stops, and it presents the route
+   * order as a 1-based number badge on each stop marker. No line is drawn between the stops (real
+   * road routing is not implemented). The recommended first stop (the recommendation payload's own
+   * `recommended_stop_id`) and the driver's own selection (`plan.first_stop.selected_stop_id`) are
+   * passed through unchanged so the map can style them differently - the recommendation stays
+   * advisory and is never applied by this page.
    */
   function drawMap() {
     if (!state.plan) {
       return;
     }
+    var recommendation = (state.recommendation && state.recommendation.data) || null;
+    var firstStop = state.plan.first_stop || {};
     RoutePilotMap.drawRoute({
       plan: state.plan,
       route: state.route,
-      stopLabels: state.stopLabels
+      stopLabels: state.stopLabels,
+      recommendedStopId: recommendation ? recommendation.recommended_stop_id : null,
+      selectedStopId: firstStop.selected_stop_id || null
     });
   }
 
@@ -953,6 +960,9 @@
       renderSummaryEmpty();
       renderRunDetailEmpty();
       drawMap();
+      // The plan loaded successfully, so any earlier refusal shown in the banner is stale. This is
+      // the load path boot's auto-open uses, so a healthy workspace can never keep an old error.
+      clearError();
       return plan;
     });
   }
@@ -1592,8 +1602,8 @@
             ],
             violations)
         : paragraph("muted", "No violations were reported for this committed route."),
-      paragraph("legend map-legend-synthetic", "The map draws this exact order as synthetic " +
-        "straight-line geometry - not road routing.")
+      paragraph("legend map-legend-synthetic", "The map shows this exact order as a 1-based number " +
+        "badge on each stop marker and draws no line between the stops - not road routing.")
     ]);
     showPreviewControl("timeline", "timeline-toggle");
 
