@@ -86,12 +86,15 @@ MAP_LIBRARY_KEYS: tuple[str, ...] = ("map_library_url", "map_library_css_url")
 #: Every settings key the map configuration is assembled from, in the order the UI reads them.
 MAP_SETTING_KEYS: tuple[str, ...] = MAP_TILE_KEYS + MAP_LIBRARY_KEYS
 
-#: The documented default of each map setting. ``None`` means "this key has no default in this
-#: build", which is the honest state of ``map_library_css_url``: the page renders without Leaflet's
-#: stylesheet (markers and polylines still appear, the zoom control looks plainer), so a missing
-#: stylesheet is a degraded look, not a broken map, and inventing a second stylesheet URL here
-#: would add a vendor URL nobody asked for. Every non-``None`` value is a real, working,
-#: OSM-compatible default, and no value is a RoutePilot business figure.
+#: The documented default of each map setting. No key is ``None``: ``map_library_css_url`` carries a
+#: real stylesheet URL, because Leaflet positions its panes and its tile ``<img>`` elements
+#: **absolutely** and those rules live in ``leaflet.css``. Without the stylesheet the 256x256 tiles
+#: fall back to normal document flow and escape the map container (confirmed in a real browser, and
+#: fixed in the Stage 4 browser hotfix), so the stylesheet is part of "Leaflet works", not
+#: decoration. Both library URLs point at the same pinned Leaflet release, so overriding one can be
+#: mirrored by the other, and ``web/app.js`` derives the sibling ``leaflet.css`` when only the script
+#: URL is configured. Every value is a real, working, OSM-compatible or pinned-distribution default,
+#: and none of them is a RoutePilot business figure.
 MAP_SETTING_DEFAULTS: dict[str, Any] = {
     # OSM-compatible tiles. Visible attribution is supplied by ``tile_attribution`` below and is
     # displayed whenever tiles are shown (spec section 34, D15).
@@ -101,7 +104,10 @@ MAP_SETTING_DEFAULTS: dict[str, Any] = {
     "tile_max_zoom": 19,
     # Pinned Leaflet distribution (BSD-2-Clause). Loaded by the browser, never vendored here.
     "map_library_url": "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
-    "map_library_css_url": None,
+    # The matching stylesheet of that same pinned release. Required for a correctly laid-out map:
+    # without it Leaflet's absolutely-positioned panes and tiles have no rules at all and the tiles
+    # escape the container into the page (Stage 4 browser hotfix).
+    "map_library_css_url": "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css",
 }
 
 #: The honest sentence shown when the tile map cannot be drawn (Leaflet failed to load, tiles could

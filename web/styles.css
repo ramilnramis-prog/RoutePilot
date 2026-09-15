@@ -198,13 +198,40 @@ button:disabled { opacity: 0.55; cursor: progress; }
 }
 
 /* ------------------------------------------------------------------- map */
+/* The map container is a positioned, clipped box with an explicit height. Both properties are
+   load-bearing, not cosmetic: Leaflet positions its panes and its tile <img> elements absolutely,
+   so without `position: relative` they are positioned against the page, and without
+   `overflow: hidden` a 256x256 tile can escape the container and scatter through the document
+   (confirmed in a real browser - Stage 4 hotfix). */
 .map {
+  position: relative;
+  overflow: hidden;
   height: 420px;
   min-height: 260px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background:
     repeating-linear-gradient(45deg, #e7edf3 0 12px, #eef2f6 12px 24px);
+}
+
+/* Defence in depth for the case where leaflet.css itself fails to load (offline, blocked CDN, a
+   bad configured stylesheet URL): keep every Leaflet pane and tile image out of normal document
+   flow and inside the container. These mirror Leaflet's own values, so a loaded leaflet.css changes
+   nothing here. */
+.map.leaflet-container {
+  overflow: hidden;
+}
+.map .leaflet-pane {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+.map .leaflet-tile,
+.map img.leaflet-tile {
+  position: absolute;
+}
+.map img {
+  max-width: none;
 }
 
 /* ------------------------------------------------------------------ data */

@@ -691,8 +691,14 @@
 
     var values = (configuration && configuration.values) || {};
     var libraryUrl = values.map_library_url;
-    var stylesheetUrl = values.map_library_css_url;
-    if (stylesheetUrl) {
+    // Leaflet's stylesheet is NOT decoration: the library positions its panes and its tile images
+    // absolutely, and without those rules a 256x256 tile falls back to normal document flow and
+    // escapes the map container into the rest of the page (confirmed in a real browser; Stage 4
+    // hotfix). The URL comes from the API like every other vendor URL; when only the script URL is
+    // configured, the sibling leaflet.css of the same distribution is derived from it. The <link>
+    // is appended BEFORE the script so the rules are already in place when Leaflet initializes.
+    var stylesheetUrl = values.map_library_css_url || deriveStylesheetUrl(libraryUrl);
+    if (libraryUrl && stylesheetUrl) {
       var link = document.createElement("link");
       link.rel = "stylesheet";
       link.href = stylesheetUrl;
@@ -710,6 +716,24 @@
       .catch(function () {
         RoutePilotMap.mountMap(null, "map");
       });
+  }
+
+  /**
+   * The sibling stylesheet of a configured Leaflet script URL - an asset location, never a business
+   * value, and never a hardcoded vendor URL: `.../leaflet.js`, `.../leaflet.min.js` and
+   * `.../leaflet-src.js` all resolve to `leaflet.css` in the same directory (Leaflet ships exactly
+   * one stylesheet name). Anything that is not a Leaflet script URL returns null rather than a
+   * guess, and the configured `map_library_css_url` always wins over this derivation.
+   */
+  function deriveStylesheetUrl(libraryUrl) {
+    if (typeof libraryUrl !== "string" || !libraryUrl) {
+      return null;
+    }
+    var match = /^(.*\/)?leaflet(?:-src|\.min)?\.js(\?.*)?$/i.exec(libraryUrl);
+    if (!match) {
+      return null;
+    }
+    return (match[1] || "") + "leaflet.css" + (match[2] || "");
   }
 
   function loadScript(url) {

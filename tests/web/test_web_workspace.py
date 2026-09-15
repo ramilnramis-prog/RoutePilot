@@ -1562,5 +1562,81 @@ class WebWorkspaceWithoutWebDirectoryTests(ServerBackedTestCase):
                 self.assertEqual(response.json()["error"]["code"], "unknown_path")
 
 
+class MapContainerAndStylesheetTests(unittest.TestCase):
+    """Stage 4 browser hotfix: Leaflet CSS loads with Leaflet JS, and the container clips its tiles.
+
+    The defect, seen in a real browser: the OSM tiles loaded but escaped the map container and
+    scattered through the whole page. Cause - the API's documented default for
+    ``map_library_css_url`` was ``None`` and the page injected the ``<link>`` only for a truthy URL,
+    so ``leaflet.css`` was never loaded. Leaflet positions its panes and its 256x256 tile ``<img>``
+    elements **absolutely** and those rules live in its stylesheet, so with the stylesheet missing
+    the tiles fell back to normal document flow, and ``.map`` had neither ``position`` nor
+    ``overflow`` to contain them.
+
+    These guards are structural and deterministic (no browser is available here): they pin the
+    configured stylesheet, the load order, the fallback derivation and the container rules. The
+    rendered result itself stays human-verified - see the manual checklist above.
+    """
+
+    def test_the_stylesheet_default_is_a_real_leaflet_stylesheet(self) -> None:
+        css_url = MAP_SETTING_DEFAULTS["map_library_css_url"]
+        js_url = MAP_SETTING_DEFAULTS["map_library_url"]
+        self.assertIsInstance(css_url, str, "the map stylesheet must be configured, not None")
+        self.assertTrue(css_url.strip())
+        self.assertTrue(css_url.startswith("https://"), css_url)
+        self.assertTrue(css_url.endswith(".css"), css_url)
+        # The stylesheet is the sibling of the script in the SAME pinned release, so overriding one
+        # library URL cannot silently point the two at different Leaflet versions.
+        self.assertEqual(css_url.rsplit("/", 1)[0], js_url.rsplit("/", 1)[0])
+
+    def test_the_page_appends_leaflet_css_before_it_loads_leaflet_js(self) -> None:
+        script = read_asset(APP_JS)
+        self.assertIn('link.rel = "stylesheet"', script)
+        self.assertIn("values.map_library_css_url", script)
+        # The configured stylesheet wins; when only the script URL is configured, the sibling
+        # leaflet.css of the same distribution is derived from it.
+        self.assertIn("|| deriveStylesheetUrl(libraryUrl)", script)
+        self.assertIn("function deriveStylesheetUrl", script)
+        # Order matters: the rules must be in place before Leaflet initializes.
+        self.assertLess(
+            script.index('link.rel = "stylesheet"'),
+            script.index("loadScript(libraryUrl)"),
+            "the Leaflet stylesheet must be injected before the Leaflet script is loaded",
+        )
+
+    def test_the_derivation_accepts_the_leaflet_script_names_and_nothing_else(self) -> None:
+        """The fallback maps the known Leaflet script names to `leaflet.css` beside them.
+
+        The rule is exercised through its source: it is a fallback for a configuration that sets
+        only the script URL, and the shipped default always supplies the stylesheet URL, so the
+        configured value is what a running page uses today.
+        """
+        script = read_asset(APP_JS)
+        match = re.search(r"var match = /(.*)/[a-z]*\.exec\(libraryUrl\);", script)
+        self.assertIsNotNone(match, "the derivation pattern is missing from web/app.js")
+        pattern = match.group(1)
+        for accepted in ("leaflet.js", "leaflet.min.js", "leaflet-src.js"):
+            self.assertRegex(accepted, pattern, f"{accepted} must resolve to a sibling leaflet.css")
+        for refused in ("openlayers.js", "mapbox-gl.js", "leaflet.png"):
+            self.assertNotRegex(refused, pattern, f"{refused} must not be treated as Leaflet")
+
+    def test_the_map_container_is_positioned_and_clipped(self) -> None:
+        styles = read_asset(STYLES_CSS)
+        block = re.search(r"^\.map \{(?P<body>.*?)^\}", styles, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(block, "the .map rule is missing from web/styles.css")
+        body = block.group("body")
+        self.assertIn("position: relative", body, "Leaflet needs a positioned container")
+        self.assertIn("overflow: hidden", body, "a tile must never escape the map container")
+        self.assertIn("height: 420px", body, "the container needs a stable explicit height")
+
+    def test_tiles_and_panes_are_kept_out_of_normal_document_flow(self) -> None:
+        """Defence in depth: even if leaflet.css fails to load, tiles cannot join the page flow."""
+        styles = read_asset(STYLES_CSS)
+        self.assertIn(".map .leaflet-pane", styles)
+        self.assertIn("position: absolute", styles)
+        self.assertIn(".map img.leaflet-tile", styles)
+        self.assertIn("max-width: none", styles)
+
+
 if __name__ == "__main__":
     unittest.main()
