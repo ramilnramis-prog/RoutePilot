@@ -720,10 +720,11 @@ def health_payload(
         "implemented_units": (
             "U13 ships the read/config surface (health, plans, plan controls, settings), U14 adds "
             "the engine-facing surface (the recommendation, the driver's selection, the committed "
-            "route, the recalculation that appends one run row and the run history), and U15 ships "
-            "the static web workspace in web/ that renders them (map, route/timeline panel and "
-            "summary). U16 (the interactive override controls and the run-history view) and U17 "
-            "(end-to-end demo and Stage 4 documentation) are still pending."
+            "route, the recalculation that appends one run row and the run history), U15 ships the "
+            "static web workspace in web/ that renders them (map, route/timeline panel and "
+            "summary), and U16 wires the approved override controls and the read-only run-history "
+            "view to those endpoints. U17 (end-to-end demo and Stage 4 documentation) is still "
+            "pending."
         ),
         "timezone_data": _tzdata_payload(),
         "demo_data": {

@@ -319,6 +319,102 @@ tr.rejected-row td { background: var(--alert-bg); }
   font-size: 0.86rem;
 }
 
+/* -------------------------------------------------- U16 controls + stops */
+/*
+  The override controls, the per-stop edit rows and the run-history/run-detail surfaces. Every
+  value these controls show is an API payload value; the styling only makes the driver's decision
+  surfaces readable and keeps the read-only history visibly separate from the edit controls.
+*/
+.panel-controls {
+  background: var(--surface);
+}
+
+.stop-list {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.4rem 0 0.6rem;
+}
+
+.stop-row {
+  display: grid;
+  gap: 0.35rem;
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface-alt);
+  padding: 0.45rem 0.6rem;
+}
+
+.stop-row.stop-row-disabled { border-left-color: var(--alert-line); }
+
+.stop-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.6rem;
+  align-items: baseline;
+  font-size: 0.86rem;
+}
+
+.stop-row-id { font-weight: 700; }
+
+.stop-row-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.stop-row-controls label { font-size: 0.82rem; }
+
+.stop-row-controls select { min-width: 6rem; }
+
+.stop-row-controls button {
+  font-size: 0.84rem;
+  padding: 0.3rem 0.5rem;
+  background: var(--surface);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.stop-row-controls button:hover { background: var(--accent-soft); }
+
+.stop-row-controls .priority-input {
+  font: inherit;
+  font-size: 0.84rem;
+  width: 6rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.run-row-button {
+  font-size: 0.82rem;
+  padding: 0.3rem 0.5rem;
+  background: var(--surface);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.run-row-button:hover { background: var(--accent-soft); }
+
+.run-detail {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-alt);
+  padding: 0.6rem 0.7rem;
+  font-size: 0.88rem;
+}
+
+.run-detail h4 {
+  margin: 0.8rem 0 0.3rem;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+
 /* --------------------------------------------------- synthetic geometry */
 /*
   The straight-line geometry the map draws is synthetic and is labelled as such in two places: the

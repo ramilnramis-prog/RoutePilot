@@ -1,67 +1,160 @@
 /*
-  RoutePilot demo workspace - application script (Stage 4 U15; spec sections 26, 31, 34; D15/D16/
-  D19/D32/D39).
-
-  READ AND RENDER ONLY. This unit renders what the U13/U14 API already serves: the plan list, one
-  plan, the recommendation (on request), the committed route (on request) and the run-history
-  placeholder. The interactive override controls - accept the recommendation, choose another first
-  stop, cancel/unpin, disable/restore a stop, change a priority, recalculate - and the full
-  run-history view are U16; this file deliberately contains no such control and no code that changes
-  server state beyond `POST /api/plans` (the documented "create or open the DEMO plan" step).
+  RoutePilot demo workspace - application script (Stage 4 U16; spec sections 26, 31, 34; D15/D16/
+  D19/D21/D32/D39).
 
   THE ONE RULE THIS FILE EXISTS TO KEEP
   =====================================
 
   NO BUSINESS FORMULA LIVES HERE. Every number, order, metric, feasibility result, violation,
   fingerprint, duration, saving and rank is rendered from an API payload UNCHANGED. This file may
-  format a value for reading (seconds -> "1 h 58 min", an ISO instant -> local wall-clock text, a
+  format a value for reading (seconds -> "00h 02m 15s", an ISO instant -> local wall-clock text, a
   metre count -> "12.3 km") and it may place payload values into a table in the order the payload
   gave them. It must never add, subtract, average, total, rank, re-order, re-score, infer feasibility
   or hash anything, and it must never invent a route, a candidate order, a saving or a fingerprint.
 
-  WHAT IS READ FROM WHERE
-  =======================
+  WHAT THIS UNIT ADDS (U16)
+  ========================
 
-  | UI surface                              | payload                                     |
-  |-----------------------------------------|---------------------------------------------|
-  | DEMO/SYNTHETIC and capability honesty    | `GET /api/health` (data_provenance,          |
-  |                                         | demo_data, implemented/not_implemented       |
-  |                                         | capabilities, route_modes, timezone_data,    |
-  |                                         | computation)                                 |
-  | map configuration (tiles + library)      | `GET /api/health` -> `map`                   |
-  | plan list / one plan / plan summary      | `GET /api/plans`, `GET /api/plans/{id}`,     |
-  |                                         | `POST /api/plans` (open-or-create the demo)  |
-  | recommendation, alternatives, rejected   | `GET /api/plans/{id}/recommendation`         |
-  | order, timeline, metrics, violations     | `GET /api/plans/{id}/route`                  |
-  | run history (placeholder)                | `GET /api/plans/{id}/runs`                   |
+  The approved MVP override controls, each wired to the EXISTING endpoint with the documented method
+  and body, and each refreshing the affected panels FROM THE SERVER afterwards (D39(d)):
 
-  The recommendation and the route are only requested when the driver presses the button, because
-  each one is a real synchronous engine computation (up to the accepted ~8 s worst case) and the
-  measured `computation_seconds` is shown afterwards.
+  | control                        | endpoint (method, body)                                  |
+  |--------------------------------|---------------------------------------------------------|
+  | `#get-recommendation`          | `GET /api/plans/{id}/recommendation`                     |
+  | `#accept-recommendation`       | `POST /api/plans/{id}/selection` `{mode:"recommend",     |
+  |                                | stop_id:<the recommended stop>}`                          |
+  | `#manual-stop-select` +        | `POST /api/plans/{id}/selection` `{mode:"manual",        |
+  | `#choose-first-stop`           | stop_id:<the chosen enabled stop>}`                       |
+  | `#cancel-selection`            | `DELETE /api/plans/{id}/selection` (no body)             |
+  | per-stop `disable`/`restore`   | `PUT /api/plans/{id}` `{stops:[{stop_id, enabled}]}`     |
+  | per-stop priority control      | `PUT /api/plans/{id}` `{stops:[{stop_id, priority}]}`    |
+  | `#recalculate`                 | `POST /api/plans/{id}/optimize` (no body)                |
+  | run-history row `#run-detail`  | `GET /api/runs/{run_id}` (read-only)                     |
 
-  A recommendation is never presented as applied or selected state, and the plan's first-stop state
-  is only ever read: `selection-panel` and `first-stop-state` report what the API says the driver's
-  decision currently is, with its provenance and pinning (D4-D11/D32).
+  Endpoint -> method -> body live in the single `ENDPOINTS` table below, so a control cannot drift
+  from its documented contract.
+
+  STATE HONESTY (D32/D39(f))
+  ==========================
+
+  * A recommendation is **never** applied by this page. The accept control only ever sends the stop
+    the API's own recommendation payload named, and the API refuses the request unless that stop
+    really is the current recommendation; this page never picks a stop on the engine's behalf.
+  * After every action the displayed first-stop state, mode, provenance (`accepted_recommendation`
+    vs `manual_choice`), pinned flag, route, run history and recommendation come from the **server
+    response** of that action - never from an optimistic client-side edit.
+  * The run history is READ-ONLY. The page offers no control that edits, reorders or deletes a run,
+    and it never presents a run's recorded recommendation as the plan's current decision: a stored
+    recommendation is labelled as the audit of what that run showed.
+  * API error envelopes are surfaced verbatim in `#error-banner`. The page adds a short, clearly
+    marked guidance line for the documented refusals (for example the `409 plan_busy` retry
+    guidance) but never replaces the API's own code, type or message with a guess.
+  * A request that can take seconds (the recommendation and the recalculation) shows the `#loading`
+    computing state and reports the measured `computation_seconds` afterwards.
+
+  WHAT THIS FILE DELIBERATELY DOES NOT DO
+  =======================================
+
+  No drag/reorder control (out of scope, D21/D39(d)), no active-leg behaviour (D24), no route-mode
+  control of any kind (`SMART_ROUTE` is the only implemented mode and the plan's own `route_mode` is
+  displayed from the payload, D19), and no way to make the engine apply a recommendation itself
+  (D4/D32).
 */
 
 (function () {
   "use strict";
 
-  var API = {
-    health: "/api/health",
-    plans: "/api/plans",
-    plan: function (planId) {
-      return "/api/plans/" + encodeURIComponent(planId);
+  // ------------------------------------------------------------ endpoints --
+  /*
+    Every call this page makes, in one table: the URL builder, the documented HTTP method and the
+    request body. `body` is a function of the caller's arguments, so a control physically cannot
+    send a body the API does not document.
+  */
+  var ENDPOINTS = {
+    health: {
+      method: "GET",
+      url: function () { return "/api/health"; },
+      body: function () { return null; }
     },
-    recommendation: function (planId) {
-      return "/api/plans/" + encodeURIComponent(planId) + "/recommendation";
+    plans: {
+      method: "GET",
+      url: function () { return "/api/plans"; },
+      body: function () { return null; }
     },
-    route: function (planId) {
-      return "/api/plans/" + encodeURIComponent(planId) + "/route";
+    createDemoPlan: {
+      method: "POST",
+      url: function () { return "/api/plans"; },
+      body: function () { return {}; }
     },
-    runs: function (planId) {
-      return "/api/plans/" + encodeURIComponent(planId) + "/runs";
+    plan: {
+      method: "GET",
+      url: function (planId) { return "/api/plans/" + encodeURIComponent(planId); },
+      body: function () { return null; }
+    },
+    updateStop: {
+      method: "PUT",
+      url: function (planId) { return "/api/plans/" + encodeURIComponent(planId); },
+      body: function (planId, stopId, changes) {
+        var entry = { stop_id: stopId };
+        if (changes && changes.enabled !== undefined) { entry.enabled = changes.enabled; }
+        if (changes && changes.priority !== undefined) { entry.priority = changes.priority; }
+        return { stops: [entry] };
+      }
+    },
+    recommendation: {
+      method: "GET",
+      url: function (planId) {
+        return "/api/plans/" + encodeURIComponent(planId) + "/recommendation";
+      },
+      body: function () { return null; }
+    },
+    selection: {
+      method: "POST",
+      url: function (planId) {
+        return "/api/plans/" + encodeURIComponent(planId) + "/selection";
+      },
+      body: function (planId, mode, stopId) { return { mode: mode, stop_id: stopId }; }
+    },
+    clearSelection: {
+      method: "DELETE",
+      url: function (planId) {
+        return "/api/plans/" + encodeURIComponent(planId) + "/selection";
+      },
+      body: function () { return null; }
+    },
+    route: {
+      method: "GET",
+      url: function (planId) {
+        return "/api/plans/" + encodeURIComponent(planId) + "/route";
+      },
+      body: function () { return null; }
+    },
+    optimize: {
+      method: "POST",
+      url: function (planId) {
+        return "/api/plans/" + encodeURIComponent(planId) + "/optimize";
+      },
+      body: function () { return null; }
+    },
+    runs: {
+      method: "GET",
+      url: function (planId) {
+        return "/api/plans/" + encodeURIComponent(planId) + "/runs";
+      },
+      body: function () { return null; }
+    },
+    run: {
+      method: "GET",
+      url: function (runId) { return "/api/runs/" + encodeURIComponent(runId); },
+      body: function () { return null; }
     }
+  };
+
+  //: The two documented first-stop request modes (D4/D6). Keeping them here means this file can
+  //: express the driver's decision and nothing else.
+  var FIRST_STOP_MODES = {
+    recommend: "recommend",
+    manual: "manual"
   };
 
   var state = {
@@ -71,14 +164,32 @@
     planId: null,
     recommendation: null,
     route: null,
-    stopLabels: {}
+    runs: null,
+    runDetail: null,
+    stopLabels: {},
+    //: True while a synchronous engine computation is in flight, so a render that knows the
+    //: recommendation cannot re-enable the accept control behind `setLoading`'s back.
+    computing: false,
+    //: True when the plan changed after the recommendation in hand was computed: the payload stays
+    //: visible (it is what the driver saw) but is labelled stale and can no longer be accepted.
+    recommendationIsStale: false
   };
 
   var REQUIRED_IDS = [
     "status-banner", "latency-notice", "plan-select", "create-demo-plan",
+    "get-recommendation", "accept-recommendation", "manual-stop-select", "choose-first-stop",
+    "cancel-selection", "stop-list", "recalculate", "error-banner", "run-history", "run-detail",
     "recommendation-panel", "advisory-banner", "recommended-stop", "alternatives",
     "rejected-candidates", "selection-panel", "first-stop-state", "route-panel", "timeline",
     "summary-panel", "before-after", "map", "map-notice", "history-panel", "loading"
+  ];
+
+  //: The controls that must be disabled while a synchronous engine computation is in flight. The
+  //: recommendation and the recalculation both go through `withComputation`, so these are the
+  //: controls that could start a second multi-second request.
+  var COMPUTING_CONTROLS = [
+    "get-recommendation", "accept-recommendation", "cancel-selection", "choose-first-stop",
+    "recalculate", "request-route", "create-demo-plan", "manual-stop-select", "plan-select"
   ];
 
   // ------------------------------------------------------------------ DOM --
@@ -204,15 +315,12 @@
     var hours = Math.floor(total / 3600);
     var minutes = Math.floor((total % 3600) / 60);
     var secs = total % 60;
-    var parts = [];
-    if (hours) {
-      parts.push(hours + " h");
-    }
-    if (minutes || hours) {
-      parts.push(minutes + " min");
-    }
-    parts.push(secs + " s");
-    return sign + parts.join(" ");
+    return sign + pad(hours) + "h " + pad(minutes) + "m " + pad(secs) + "s";
+  }
+
+  /** Two-digit display padding. FORMATTING ONLY: it changes no payload value. */
+  function pad(value) {
+    return value < 10 ? "0" + String(value) : String(value);
   }
 
   /** A metre count as readable text. FORMATTING ONLY. */
@@ -267,35 +375,122 @@
     return value ? el("span", "mono", String(value)) : null;
   }
 
+  /** A `{code: guidance}` lookup with no arithmetic and no derivation: a label for a known code. */
+  function lookup(map, key) {
+    if (key === null || key === undefined) {
+      return null;
+    }
+    var value = map[String(key)];
+    return value === undefined ? null : value;
+  }
+
+  /** The display label for one stop: the payload's own text, with the id as the last resort. */
+  function stopLabel(stop) {
+    return text(stop.normalized_address || stop.raw_address || stop.id);
+  }
+
   // ---------------------------------------------------------------- http --
-  function ApiError(message, status, code) {
+  function ApiError(message, status, code, type, guidance) {
     this.name = "ApiError";
     this.message = message;
     this.status = status;
     this.code = code;
+    this.type = type;
+    this.guidance = guidance || null;
   }
   ApiError.prototype = Object.create(Error.prototype);
 
-  function request(path, options) {
-    return fetch(path, options || {}).then(function (response) {
-      return response.text().then(function (body) {
+  /*
+    The documented API error envelopes this page knows how to add guidance for. The code, the type
+    and the message always come from the API's own envelope (`{"error": {code, type, message}}`);
+    the guidance line is this page's own text and is labelled as such. Several undocumented-in-this-
+    page codes (404/405/503/500) are still surfaced verbatim without any guidance at all.
+  */
+  var ERROR_GUIDANCE = {
+    no_first_stop_selected:
+      "Refusal code 409 no_first_stop_selected: the plan is awaiting_first_stop_choice, so there is " +
+      "no committed route and this page shows none. Choose a first stop (accept the recommendation " +
+      "or use the manual picker) and try again - no route is invented in the meantime.",
+    plan_busy:
+      "Refusal code 409 plan_busy: this plan's synchronous single-flight computation lock did not " +
+      "become free inside the documented bound. Retry guidance: wait for the in-flight computation " +
+      "to finish and press the control again; this API has no background job queue, so waiting and " +
+      "retrying is the documented behaviour and no partial or fabricated result is returned.",
+    invalid_input:
+      "Refusal code 422 invalid_input: the request was understood and violates a domain rule (for " +
+      "example a disabled stop chosen as the first stop, or a malformed stop update). The API's own " +
+      "message above is the reason; this page changed nothing.",
+    unsupported_capability:
+      "Refusal code 501 unsupported_capability: the request asks for a capability this build does " +
+      "not implement (this build implements the SMART_ROUTE route mode only, D16/D19). Nothing is " +
+      "faked and no fallback to SMART_ROUTE is applied silently.",
+    illegal_state:
+      "Refusal code 409 illegal_state: the requested change is not legal in the plan's current " +
+      "state (for example cancelling when nothing is selected). The plan is unchanged.",
+    unknown_plan:
+      "Refusal code 404 unknown_plan: no stored plan has that id. Re-read the plan list and open a " +
+      "plan again.",
+    unknown_stop:
+      "Refusal code 404 unknown_stop: the plan has no stop with that id. Re-read the plan and " +
+      "choose from the stops the API reports.",
+    unknown_run:
+      "Refusal code 404 unknown_run: no stored optimization run has that id. Re-read the run " +
+      "history and open a run from the list.",
+    unknown_setting:
+      "Refusal code 404 unknown_setting: no value is stored for that settings key.",
+    invalid_body:
+      "Refusal code 400 invalid_body: the request body was not a valid JSON object. This page sends " +
+      "only the documented bodies; the API's own message above says what arrived.",
+    method_not_allowed:
+      "Refusal code 405 method_not_allowed: the path exists but does not accept this HTTP method.",
+    unknown_path:
+      "Refusal code 404 unknown_path: the requested path is not part of this API.",
+    timezone_data_unavailable:
+      "Refusal code 503 timezone_data_unavailable: no IANA time zone database is reachable, so local " +
+      "wall-clock times cannot be resolved. See the API's install command above; the strict IANA / " +
+      "DST model is not weakened for this.",
+    storage_error:
+      "Refusal code 500 storage_error: stored state is unreadable or the database refused the " +
+      "operation. Nothing was changed by this page.",
+    internal_error:
+      "Refusal code 500 internal_error: the request failed for a reason the API does not classify. " +
+      "The API's own message above is the whole explanation available."
+  };
+
+  function request(endpoint, args) {
+    var options = { method: endpoint.method };
+    var body = endpoint.body.apply(null, args || []);
+    if (body !== null && body !== undefined) {
+      options.headers = { "Content-Type": "application/json" };
+      options.body = JSON.stringify(body);
+    }
+    return fetch(endpoint.url.apply(null, args || []), options).then(function (response) {
+      return response.text().then(function (raw) {
         var payload = null;
         try {
-          payload = JSON.parse(body);
+          payload = JSON.parse(raw);
         } catch (error) {
           payload = null;
         }
         if (!response.ok) {
           var detail = payload && payload.error ? payload.error : null;
+          var code = detail ? detail.code : "unknown";
           throw new ApiError(
-            detail ? detail.message : "HTTP " + response.status + " from " + path,
+            detail ? detail.message : "HTTP " + response.status + " from " + endpoint.url(),
             response.status,
-            detail ? detail.code : "unknown"
+            code,
+            detail ? detail.type : "unknown",
+            lookup(ERROR_GUIDANCE, code)
           );
         }
         if (payload === null) {
-          throw new ApiError("the API answered " + path + " with a body that is not JSON", 0,
-            "invalid_body");
+          throw new ApiError(
+            "the API answered " + endpoint.url() + " with a body that is not JSON",
+            0,
+            "invalid_body",
+            "NotJSON",
+            null
+          );
         }
         return payload;
       });
@@ -309,26 +504,83 @@
     banner.className = "banner banner-status" + (tone ? " banner-" + tone : "");
   }
 
-  function showError(error) {
+  /**
+   * Surface an API error envelope honestly in `#error-banner`, with the optional context sentence
+   * describing the action that failed. Nothing is swallowed, retried silently or replaced with a
+   * client-side guess: the API's own code, type and message are printed verbatim.
+   */
+  function showError(error, context) {
+    var banner = byId("error-banner");
     var message = error && error.message ? error.message : String(error);
-    var suffix = error && error.code ? " [" + error.code + "]" : "";
-    setStatus("Request failed: " + message + suffix, "error");
+    var code = error && error.code ? String(error.code) : "unknown";
+    var type = error && error.type ? String(error.type) : "unknown";
+    var status = error && error.status ? String(error.status) : "no HTTP status";
+    var children = [
+      el("strong", null, "API error" + (context ? " - " + context : "") + ": "),
+      document.createTextNode(
+        "code " + code + ", type " + type + ", HTTP " + status + ". The API said: " + message
+      )
+    ];
+    if (error && error.guidance) {
+      children.push(el("p", "hint", "This page's own note (not the API's message): " +
+        error.guidance));
+    }
+    replace(banner, children);
+    banner.hidden = false;
+  }
+
+  /** Clear the error banner: called when an action succeeds, so it never shows a stale refusal. */
+  function clearError() {
+    var banner = byId("error-banner");
+    banner.textContent = "";
+    banner.hidden = true;
   }
 
   /** The computing/loading state of D39(e): shown while a computation is in flight. */
   function setLoading(isLoading, note) {
     var loading = byId("loading");
     var extra = note ? " " + note : "";
+    state.computing = !!isLoading;
     loading.textContent = isLoading
       ? "Computing\u2026 the API is recomputing this request synchronously. This can take several " +
         "seconds at the ~50-stop scale." + extra
       : "";
     loading.hidden = !isLoading;
-    ["request-recommendation", "request-route"].forEach(function (id) {
-      var button = byId(id);
-      if (button) {
-        button.disabled = !!isLoading;
+    COMPUTING_CONTROLS.forEach(function (id) {
+      var control = byId(id);
+      if (control) {
+        control.disabled = !!isLoading;
       }
+    });
+    // The accept control has its own condition (a recommendation must name a stop), so it is
+    // re-evaluated here rather than blindly re-enabled.
+    updateAcceptControl();
+  }
+
+  /**
+   * Run one request that can take seconds (the recommendation and the recalculation), with the
+   * `#loading` computing state shown for the whole flight and the measured `computation_seconds`
+   * reported afterwards. The state is always cleared, including on failure.
+   *
+   * The computing state also covers the follow-up work `report` starts, and is cleared only once
+   * that whole chain has settled: a recalculation re-reads the route (`GET /api/plans/{id}/route`,
+   * measured in seconds at the ~50-stop scale) and the run history, and leaving the computing state
+   * early would claim the page is idle and re-enable the plan chooser while those reads are still in
+   * flight (D39(d)/D39(e), D26/D32).
+   */
+  function withComputation(label, endpoint, args, report) {
+    setLoading(true, label ? label + "\u2026" : null);
+    setStatus(label ? label + " \u2026" : "Working \u2026");
+    return request(endpoint, args).then(function (document_) {
+      // The report runs first and its follow-up chain is awaited, so `setLoading(false)` is reached
+      // only after everything the action re-reads from the server has come back.
+      return Promise.resolve(report(document_)).then(function (result) {
+        setLoading(false);
+        return result;
+      });
+    }).catch(function (error) {
+      setLoading(false);
+      throw error;
     });
   }
 
@@ -487,7 +739,13 @@
     });
   }
 
-  /** Redraw the map from the payloads currently in hand (never from a client-side computation). */
+  /**
+   * Redraw the map from the payloads currently in hand (never from a client-side computation).
+   *
+   * A selection change may change what is drawn (the route order is a payload value), but the
+   * drawing itself is unchanged from U15: the synthetic straight-line label and the tile /
+   * degradation behaviour are exactly as they were.
+   */
   function drawMap() {
     if (!state.plan) {
       return;
@@ -501,7 +759,7 @@
 
   // --------------------------------------------------------------- plans --
   function loadPlans() {
-    return request(API.plans).then(function (document_) {
+    return request(ENDPOINTS.plans).then(function (document_) {
       state.planList = document_.data || [];
       var select = byId("plan-select");
       replace(select, []);
@@ -515,42 +773,77 @@
         option.value = summary.id;
         select.appendChild(option);
       });
-      return state.planList[0].id;
+      select.value = state.planId || state.planList[0].id;
+      return state.planId || state.planList[0].id;
     });
   }
 
   /** `POST /api/plans` - the documented "create or open the deterministic DEMO plan" step. */
   function createDemoPlan() {
-    return request(API.plans, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}"
-    }).then(function (document_) {
+    return request(ENDPOINTS.createDemoPlan).then(function (document_) {
       return document_.data;
     });
   }
 
   function openPlan(planId) {
-    return request(API.plan(planId)).then(function (document_) {
+    return request(ENDPOINTS.plan, [planId]).then(function (document_) {
       var plan = document_.data;
       state.plan = plan;
       state.planId = plan.id;
       state.recommendation = null;
+      state.recommendationIsStale = false;
       state.route = null;
+      state.runDetail = null;
       state.stopLabels = {};
       (plan.stops || []).forEach(function (stop) {
-        state.stopLabels[text(stop.id)] = text(stop.normalized_address || stop.raw_address ||
-          stop.id);
+        state.stopLabels[text(stop.id)] = stopLabel(stop);
       });
       var select = byId("plan-select");
       if (select && !select.value) {
         select.value = plan.id;
       }
       renderPlan(plan, document_);
-      renderRecommendationEmpty();
+      refreshManualStopChoices(plan);
+      renderRecommendationUnavailable(
+        "No recommendation has been read for this plan yet. Press \u201cGet recommendation\u201d: " +
+          "the API recomputes it live for that request and writes nothing."
+      );
       renderRouteEmpty();
       renderSummaryEmpty();
+      renderRunDetailEmpty();
       drawMap();
+      return plan;
+    });
+  }
+
+  /**
+   * Re-read the plan from the server and refresh every panel that reports the driver's decision.
+   *
+   * This is the "never optimistic" step of D39(d): after a selection change, a stop edit or a
+   * recalculation the plan summary, the first-stop state, the route and the run history are all
+   * rebuilt from server responses, never from a local edit.
+   */
+  function refreshFromServer(planId) {
+    var identifier = planId || state.planId;
+    if (!identifier) {
+      setStatus("Open a plan first.", "error");
+      return Promise.resolve(null);
+    }
+    return request(ENDPOINTS.plan, [identifier]).then(function (document_) {
+      var plan = document_.data;
+      state.plan = plan;
+      state.planId = plan.id;
+      state.stopLabels = {};
+      (plan.stops || []).forEach(function (stop) {
+        state.stopLabels[text(stop.id)] = stopLabel(stop);
+      });
+      renderPlan(plan, document_);
+      // D39(d): the first-stop state is part of what every selection change must re-read. It is
+      // rebuilt here, on the refresh path itself, so accept, manual choose and cancel/unpin all
+      // re-render it from the server response - not only the recommendation render paths, which a
+      // manual change (and a cancel, which never reaches them) would otherwise leave stale.
+      renderFirstStopState();
+      refreshManualStopChoices(plan);
       return plan;
     });
   }
@@ -583,14 +876,11 @@
         ["API payload type", document_ ? text(document_.type) + " / api_version " +
           text(document_.api_version) : null]
       ]),
-      el("h3", null, "First-stop state and its provenance (read-only)"),
+      el("h3", null, "First-stop state and its provenance (the driver's decision, from the API)"),
       // The plan's own first-stop state: the DRIVER's decision, never the engine's recommendation.
-      firstStopBlock(firstStop),
-      el("p", "hint", "The selection controls that change this state (accept, choose another stop, " +
-        "cancel) are the U16 override controls. This page only reports what the API says the " +
-        "decision currently is.")
+      firstStopBlock(firstStop)
     ]);
-    renderStopTable(plan);
+    renderStopList(plan);
   }
 
   function firstStopBlock(firstStop) {
@@ -604,46 +894,100 @@
     ]);
   }
 
-  function renderStopTable(plan) {
-    var stops = (plan.stops || []).map(function (stop) {
-      var window_ = stop.service_window || {};
-      return {
-        id: stop.id,
-        input_position: stop.input_position,
-        label: stop.normalized_address || stop.raw_address || "",
-        enabled: stop.enabled,
-        priority: stop.priority,
-        duration: stop.service_duration_sec,
-        window: window_.description,
-        geocode_status: stop.geocode_status,
-        service_status: stop.service_status
-      };
+  /** The manual first-stop picker: only the stops the API reports as enabled are offered. */
+  function refreshManualStopChoices(plan) {
+    var select = byId("manual-stop-select");
+    if (!select) {
+      return;
+    }
+    replace(select, []);
+    var enabled = (plan.stops || []).filter(function (stop) {
+      return stop.enabled === true;
     });
-    var container = el("div");
-    container.appendChild(table(
-      "Stops as stored (input_position is the driver's own order; every column is a payload value)",
-      [
-        ["#", "input_position", { numeric: true }],
-        ["Stop id", "id"],
-        ["Label", "label"],
-        ["Enabled", "enabled", { render: function (value) { return badgeFor(value); } }],
-        ["Priority", "priority", { numeric: true }],
-        ["Service duration", "duration", { render: duration, numeric: true }],
-        ["Service window", "window"],
-        ["Geocode status", "geocode_status"],
-        ["Service status", "service_status"]
-      ],
-      stops
-    ));
-    byId("plan-summary").appendChild(container);
+    if (!enabled.length) {
+      select.appendChild(el("option", null, "no enabled stop in this plan"));
+      return;
+    }
+    enabled.forEach(function (stop) {
+      var option = el("option", null, text(stop.id) + " \u2014 " + stopLabel(stop));
+      option.value = stop.id;
+      select.appendChild(option);
+    });
+  }
+
+  /**
+   * The per-stop controls of D39(d): disable, restore and priority, each one `PUT /api/plans/{id}`
+   * carrying exactly one change. Deliberately absent: any drag/reorder control (D21/D39(d)) and any
+   * control that could change the first-stop choice through a stop attribute.
+   */
+  function renderStopList(plan) {
+    var container = byId("stop-list");
+    clear(container);
+    (plan.stops || []).forEach(function (stop) {
+      container.appendChild(stopRow(stop));
+    });
+    if (!container.firstChild) {
+      container.appendChild(paragraph("muted", "This plan holds no stop."));
+    }
+  }
+
+  function stopRow(stop) {
+    var row = el("div", "stop-row" + (stop.enabled ? "" : " stop-row-disabled"));
+    var head = el("div", "stop-row-head");
+    head.appendChild(el("span", "stop-row-id", text(stop.id)));
+    head.appendChild(el("span", null, stopLabel(stop)));
+    head.appendChild(badgeFor(stop.enabled));
+    head.appendChild(el("span", null, "priority " + text(stop.priority)));
+    head.appendChild(el("span", "muted", "input position " + text(stop.input_position)));
+    row.appendChild(head);
+
+    var controls = el("div", "stop-row-controls");
+    if (stop.enabled) {
+      var disable = el("button", null, "Disable this stop");
+      disable.type = "button";
+      disable.addEventListener("click", function () {
+        updateStop(stop.id, { enabled: false });
+      });
+      controls.appendChild(disable);
+    } else {
+      var restore = el("button", null, "Restore this stop");
+      restore.type = "button";
+      restore.addEventListener("click", function () {
+        updateStop(stop.id, { enabled: true });
+      });
+      controls.appendChild(restore);
+    }
+
+    var priorityLabel = el("label", null, "New priority");
+    priorityLabel.setAttribute("for", "priority-" + text(stop.id));
+    controls.appendChild(priorityLabel);
+    var input = el("input", "priority-input");
+    input.type = "number";
+    input.id = "priority-" + text(stop.id);
+    input.value = text(stop.priority);
+    input.setAttribute("aria-label", "New priority for stop " + text(stop.id));
+    controls.appendChild(input);
+    var apply = el("button", null, "Change priority");
+    apply.type = "button";
+    apply.addEventListener("click", function () {
+      updateStop(stop.id, { priority: Number(input.value) });
+    });
+    controls.appendChild(apply);
+
+    controls.appendChild(el("span", "muted", "no reorder control: drag/reorder is out of scope"));
+    row.appendChild(controls);
+    return row;
   }
 
   // ------------------------------------------------------ recommendation --
-  function renderRecommendationEmpty() {
-    replace(byId("recommendation-panel"), [
-      paragraph("muted", "No recommendation requested yet for this plan. Press \u201cCompute the " +
-        "recommendation\u201d: the API recomputes it live for that request and writes nothing.")
-    ]);
+  /**
+   * The recommendation panel's "nothing current" state. A recommendation is derived and
+   * recomputable: after the plan changed (a selection, a stop edit or a recalculation) the previous
+   * payload is no longer this plan's current inputs, so it is marked stale (or cleared when a new
+   * plan is opened) instead of being presented as if it still applied.
+   */
+  function renderRecommendationUnavailable(message) {
+    replace(byId("recommendation-panel"), [paragraph("muted", message)]);
     byId("recommended-stop").textContent = "";
     replace(byId("alternatives"), [
       paragraph("muted", "The ranked alternatives appear here with their complete-route metrics.")
@@ -651,12 +995,85 @@
     replace(byId("rejected-candidates"), [
       paragraph("muted", "The rejected candidates and their violating stops appear here.")
     ]);
-    replace(byId("selection-panel"), [
-      el("h3", null, "Selection (the driver's decision - reported, not changed here)"),
-      paragraph("muted", "The API's own first-stop state for this plan is shown in the plan " +
-        "summary above. Changing it is the U16 override control, not this unit.")
+    renderSelectionPanel(null);
+    renderFirstStopState();
+    updateAcceptControl();
+  }
+
+  /**
+   * Mark the recommendation in hand as stale: the plan changed after it was computed, so it is no
+   * longer this plan's current inputs. The payload that was displayed stays visible (it is what the
+   * driver acted on) but it is never presented as current, and accepting it is no longer offered.
+   */
+  function markRecommendationStale(reason) {
+    state.recommendationIsStale = true;
+    if (!state.recommendation) {
+      return;
+    }
+    renderRecommendation(state.recommendation);
+    var panel = byId("recommendation-panel");
+    panel.insertBefore(
+      paragraph("error-text", "STALE: this recommendation was computed before " + text(reason) +
+        ". It is no longer this plan's current inputs, it is NOT the plan's state, and it is not " +
+        "applied. Press \u201cGet recommendation\u201d to recompute it live."),
+      panel.firstChild
+    );
+  }
+
+  /**
+   * The selection panel: what the API says the driver's decision currently is, plus the controls'
+   * own honesty note. It never states a recommendation as applied state (D32/I5).
+   */
+  function renderSelectionPanel(selection) {
+    var children = [el("h3", null, "Selection (the driver's decision, from the API)")];
+    children.push(paragraph(null, "The stored first-stop state of this plan reads: " +
+      firstStopSentence()));
+    if (selection) {
+      children.push(paragraph(null, "The API's answer to this selection change says: " +
+        text(selection.note)));
+      children.push(definitionList([
+        ["Endpoint state after the change", badge(text(selection.state), "mode")],
+        ["Mode", text(selection.mode)],
+        ["Selected first stop", selection.selected_stop_id || "none"],
+        ["Selection source (provenance)", selection.selection_source || "none"],
+        ["Pinned", text(selection.pinned)]
+      ]));
+    }
+    children.push(paragraph("hint", "The controls above change this state through the documented " +
+      "endpoints and then re-read the plan from the server. A recommendation is never applied by " +
+      "this page, and a stored run's recommendation is history, not this state."));
+    replace(byId("selection-panel"), children);
+  }
+
+  function renderFirstStopState() {
+    replace(byId("first-stop-state"), [
+      el("h3", null, "First-stop state (from the server)"),
+      firstStopBlock((state.plan && state.plan.first_stop) || {})
     ]);
-    replace(byId("first-stop-state"), []);
+  }
+
+  function firstStopSentence() {
+    var firstStop = (state.plan && state.plan.first_stop) || {};
+    return text(firstStop.state) + " (mode " + text(firstStop.mode) + ", selected " +
+      text(firstStop.selected_stop_id || "none") + ", source " +
+      text(firstStop.selection_source || "none") + ", pinned " + text(firstStop.pinned) + ")";
+  }
+
+  /** The accept control is only enabled when the API's own recommendation names a stop. */
+  function updateAcceptControl() {
+    var button = byId("accept-recommendation");
+    if (!button) {
+      return;
+    }
+    var data = (state.recommendation && state.recommendation.data) || null;
+    var recommended = data ? data.recommended_stop_id : null;
+    button.disabled = state.computing || state.recommendationIsStale || !recommended;
+    button.setAttribute(
+      "title",
+      recommended && !state.recommendationIsStale
+        ? "Send POST /api/plans/{id}/selection with mode=recommend and stop_id=" + text(recommended)
+        : "Read a current recommendation first: accepting needs the stop the API recommended"
+    );
   }
 
   function candidateRows(candidates) {
@@ -743,17 +1160,24 @@
       ])
     ]);
 
+    // Both branches build DOM nodes: `replace` appends its children, and `appendChild` refuses a
+    // plain string in a real DOM, so a bare string here would throw and take the whole render with
+    // it (the recommendation, the top-K/rejected tables, the selection panel and the first-stop
+    // state are all built after this point).
     var recommended = byId("recommended-stop");
     if (data.recommended_stop_id) {
       replace(recommended, [
-        "Recommended first stop: ", el("strong", null, text(data.recommended_stop_id)),
-        " \u2014 advisory only; the plan's first stop is unchanged until the driver decides."
+        document.createTextNode("Recommended first stop: "),
+        el("strong", null, text(data.recommended_stop_id)),
+        document.createTextNode(" \u2014 advisory only; the plan's first stop is unchanged until " +
+          "the driver decides.")
       ]);
     } else {
       replace(recommended, [
-        "No fully feasible first stop: the engine's outcome is ", el("strong", null, text(data.status)),
-        ". This is a valid answer with the diagnostics below, not an error and not a fabricated " +
-          "winner (v2 section 14)."
+        document.createTextNode("No fully feasible first stop: the engine's outcome is "),
+        el("strong", null, text(data.status)),
+        document.createTextNode(". This is a valid answer with the diagnostics below, not an error " +
+          "and not a fabricated winner (v2 section 14).")
       ]);
     }
 
@@ -761,7 +1185,8 @@
     replace(byId("alternatives"), [
       paragraph("hint", "Top-K view: " + text(counts.ranked_returned) + " of " +
         text(counts.ranked) + " ranked candidates, in the engine's own rank order. Every metric " +
-        "below is the complete route the engine evaluated."),
+        "below is the complete route the engine evaluated. Choose one with the manual picker above " +
+        "to make it the driver's own choice."),
       alternatives.length
         ? table("Ranked alternatives (complete-route metrics, as returned)",
             candidateColumns(timezoneName), candidateRows(alternatives))
@@ -793,37 +1218,40 @@
       ));
     }
 
-    replace(byId("selection-panel"), [
-      el("h3", null, "Selection (the driver's decision - reported, not changed here)"),
-      paragraph(null, "This recommendation did NOT change the plan. The stored first-stop state " +
-        "still reads: " + firstStopSentence()),
-      paragraph("hint", "Accepting the recommendation, choosing another stop or cancelling it are " +
-        "the U16 override controls; this unit requests and renders only.")
-    ]);
-    replace(byId("first-stop-state"), [
-      el("h3", null, "First-stop state after this recommendation (unchanged)"),
-      firstStopBlock((state.plan && state.plan.first_stop) || {})
-    ]);
-    byId("first-stop-state").appendChild(paragraph("hint", text(data.note)));
-  }
-
-  function firstStopSentence() {
-    var firstStop = (state.plan && state.plan.first_stop) || {};
-    return text(firstStop.state) + " (mode " + text(firstStop.mode) + ", selected " +
-      text(firstStop.selected_stop_id || "none") + ", source " +
-      text(firstStop.selection_source || "none") + ", pinned " + text(firstStop.pinned) + ")";
+    renderSelectionPanel(null);
+    renderFirstStopState();
+    updateAcceptControl();
   }
 
   // --------------------------------------------------------------- route --
   function renderRouteEmpty() {
     replace(byId("route-panel"), [
-      paragraph("muted", "No committed route requested yet. Press \u201cCompute the committed " +
-        "route\u201d: the API computes the route for the plan's current selection and writes " +
-        "nothing.")
+      paragraph("muted", "No committed route read yet. After a selection, \u201cShow the committed " +
+        "route\u201d (or \u201cRecalculate\u201d) computes the route for the plan's current selection " +
+        "and writes nothing.")
     ]);
     replace(byId("timeline"), [
       paragraph("muted", "The route order and per-stop timeline appear here.")
     ]);
+  }
+
+  /** The honest no-route state: the documented 409 refusal instead of an invented route (D9/I4). */
+  function renderRouteRefused(error) {
+    replace(byId("route-panel"), [
+      paragraph("error-text", "The API refused the route with " + text(error.code) + ": " +
+        text(error.message)),
+      paragraph("hint", "That refusal is the honest answer while the plan is " +
+        "awaiting_first_stop_choice: there is no committed route to show, and no route is " +
+        "invented. Choose a first stop with the controls above and try again.")
+    ]);
+    replace(byId("timeline"), [
+      paragraph("muted", "No timeline is shown, because there is no committed route.")
+    ]);
+    replace(byId("summary-panel"), [
+      paragraph("muted", "No BEFORE vs AFTER is shown, because there is no committed route.")
+    ]);
+    replace(byId("before-after"), []);
+    drawMap();
   }
 
   function timelineRows(timeline) {
@@ -937,8 +1365,8 @@
   // ------------------------------------------------------------- summary --
   function renderSummaryEmpty() {
     replace(byId("summary-panel"), [
-      paragraph("muted", "Compute the committed route to see BEFORE vs AFTER. No saving, distance " +
-        "or duration is computed on this page: every figure is the API's.")
+      paragraph("muted", "Compute or read the committed route to see BEFORE vs AFTER. No saving, " +
+        "distance or duration is computed on this page: every figure is the API's.")
     ]);
     replace(byId("before-after"), []);
   }
@@ -1031,112 +1459,480 @@
   }
 
   // ------------------------------------------------------------- history --
+  /**
+   * The run-history view: `GET /api/plans/{id}/runs`, oldest first, exactly as the API orders it.
+   *
+   * READ-ONLY. The only control on a row reads one stored run back through `GET /api/runs/{id}`;
+   * nothing here offers to edit, reorder or delete a run, and no run's recorded recommendation is
+   * ever presented as the plan's current first-stop decision.
+   */
   function loadRuns() {
     if (!state.planId) {
       return Promise.resolve();
     }
-    return request(API.runs(state.planId)).then(function (document_) {
-      var runs = document_.data || [];
-      var panel = byId("history-panel");
-      var children = [
-        definitionList([
-          ["Runs stored for this plan", text(document_.count)],
-          ["Read-only", text(document_.read_only)],
-          ["Note (from the API)", text(document_.note)]
-        ])
-      ];
-      if (!runs.length) {
-        children.push(paragraph("muted", "No run has been recorded for this plan yet. Only " +
-          "POST /api/plans/{id}/optimize appends one, and that recalculation control is U16."));
-      } else {
-        children.push(table("Stored runs, oldest first",
-          [
-            ["Run id", "id"],
-            ["Kind", "run_kind"],
-            ["Status", "status"],
-            ["Created at (UTC)", "created_at"],
-            ["Algorithm", "algorithm"],
-            ["Route fingerprint", "route_fingerprint"],
-            ["Inputs fingerprint", "inputs_fingerprint"],
-            ["Recorded recommended stop", "recommended_stop_id"]
-          ],
-          runs.map(function (run) {
-            return {
-              id: run.id,
-              run_kind: run.run_kind,
-              status: run.status,
-              created_at: run.created_at,
-              algorithm: text(run.algorithm) + " " + text(run.algorithm_version),
-              route_fingerprint: (run.fingerprints || {}).route_fingerprint,
-              inputs_fingerprint: (run.fingerprints || {}).inputs_fingerprint,
-              recommended_stop_id: (run.recommendation || {}).recommended_stop_id
-            };
-          })));
-      }
-      replace(panel, children);
+    return request(ENDPOINTS.runs, [state.planId]).then(function (document_) {
+      state.runs = document_.data || [];
+      renderRunHistory(document_);
+      return state.runs;
     });
+  }
+
+  function renderRunHistory(document_) {
+    var runs = document_.data || [];
+    var children = [
+      definitionList([
+        ["Runs stored for this plan", text(document_.count)],
+        ["Read-only history", text(document_.read_only)],
+        ["Note (from the API)", text(document_.note)],
+        ["Stored as the plan's current decision", "never: a run records what that execution showed, " +
+          "and the plan's first-stop state above is the only place the driver's decision lives"]
+      ])
+    ];
+    if (!runs.length) {
+      children.push(paragraph("muted", "No run has been recorded for this plan yet. Only " +
+        "POST /api/plans/{id}/optimize (the Recalculate control) appends one, and this view never " +
+        "writes history."));
+    } else {
+      children.push(table("Stored runs, oldest first (read-only; every column is a payload value)",
+        [
+          ["Run id", "id"],
+          ["Kind", "run_kind"],
+          ["Status", "status"],
+          ["Created at (UTC)", "created_at"],
+          ["Algorithm", "algorithm"],
+          ["Algorithm version", "algorithm_version"],
+          ["tzdata version", "tzdata_version"],
+          ["Policy (reported by the API)", "policy"],
+          ["Inputs fingerprint", "inputs_fingerprint"],
+          ["Route fingerprint", "route_fingerprint"],
+          ["Order (as recorded)", "order"],
+          ["Committed route recorded", "has_committed_route", { render: function (value) {
+            return badgeFor(value);
+          } }],
+          ["Recorded recommended stop (history, not the plan's decision)", "recommended_stop_id"],
+          ["Stored top-K candidates", "top_k_count"],
+          ["Show one run (read-only)", "detail", { render: function (value, row) {
+            var button = el("button", "run-row-button", "Show run detail (read-only)");
+            button.type = "button";
+            button.addEventListener("click", function () {
+              showRunDetail(row.id);
+            });
+            return button;
+          } }]
+        ],
+        runs.map(function (run) {
+          var recommendation = run.recommendation || {};
+          var fingerprints = run.fingerprints || {};
+          return {
+            id: run.id,
+            run_kind: run.run_kind,
+            status: run.status,
+            created_at: run.created_at,
+            algorithm: run.algorithm,
+            algorithm_version: run.algorithm_version,
+            tzdata_version: run.tzdata_version,
+            policy: text((run.cost_policy || {}).name) +
+              ((run.cost_policy || {}).provisional ? " (provisional)" : ""),
+            inputs_fingerprint: fingerprints.inputs_fingerprint,
+            route_fingerprint: fingerprints.route_fingerprint,
+            order: (run.order || []).join(" \u2192 "),
+            has_committed_route: run.has_committed_route,
+            recommended_stop_id: recommendation.recommended_stop_id ||
+              "none recorded by that run",
+            top_k_count: run.top_k === null || run.top_k === undefined
+              ? "none stored" : text((run.top_k || []).length),
+            detail: run.id
+          };
+        })));
+    }
+    replace(byId("run-history"), children);
+  }
+
+  function renderRunDetailEmpty() {
+    replace(byId("run-detail"), [
+      paragraph("muted", "No run is open. A stored run is immutable history: pressing \u201cShow run " +
+        "detail (read-only)\u201d reads it back with GET /api/runs/{run_id} and changes nothing.")
+    ]);
+  }
+
+  /** `GET /api/runs/{run_id}`: the audit of one execution, rendered as returned. */
+  function showRunDetail(runId) {
+    clearError();
+    setStatus("Reading stored run " + text(runId) + " \u2026");
+    return request(ENDPOINTS.run, [runId]).then(function (document_) {
+      state.runDetail = document_.data;
+      renderRunDetail(document_);
+      setStatus("Stored run " + text(runId) + " read back from the API (read-only: this page never " +
+        "writes history).", "ok");
+    }).catch(function (error) {
+      showError(error, "reading stored run " + text(runId));
+    });
+  }
+
+  function renderRunDetail(document_) {
+    var run = document_.data || {};
+    var metrics = run.metrics || {};
+    var after = metrics.after || {};
+    var before = metrics.user_baseline || {};
+    var algorithm = metrics.algorithm_baseline || {};
+    var recommendation = run.recommendation || {};
+    var timezoneName = state.plan ? state.plan.timezone : null;
+
+    var detail = el("div", "run-detail");
+    replace(byId("run-detail"), [
+      detail,
+      el("p", "hint", "Read-only audit of one stored run. The recorded recommendation below is " +
+        "what that run showed at the time - it is history and is never the plan's current decision.")
+    ]);
+
+    detail.appendChild(el("h4", null, "Identity and provenance (as stored)"));
+    detail.appendChild(definitionList([
+      ["Run id", text(run.id)],
+      ["Plan id", text(run.plan_id)],
+      ["Kind", badge(text(run.run_kind), "mode")],
+      ["Status", badge(text(run.status), run.status === "ok" ? "true" : "false")],
+      ["Created at (UTC)", text(run.created_at)],
+      ["Algorithm", text(run.algorithm) + " " + text(run.algorithm_version)],
+      ["tzdata version", text(run.tzdata_version)],
+      ["Cost policy used", text((run.cost_policy || {}).name) +
+        ((run.cost_policy || {}).provisional ? " (provisional)" : "")],
+      ["Data provenance", text(run.data_provenance)],
+      ["Inputs fingerprint", fingerprint((run.fingerprints || {}).inputs_fingerprint)],
+      ["Route fingerprint", fingerprint((run.fingerprints || {}).route_fingerprint)],
+      ["Committed route recorded", text(run.has_committed_route)],
+      ["Order (as recorded)", (run.order || []).join(" \u2192 ") || "empty"]
+    ]));
+
+    detail.appendChild(el("h4", null, "Metrics with both baselines (the stored figures)"));
+    detail.appendChild(definitionList([
+      ["AFTER: complete route duration", duration(after.duration_sec)],
+      ["AFTER: travel / waiting / service", duration(after.travel_sec) + " / " +
+        duration(after.waiting_sec) + " / " + duration(after.service_sec)],
+      ["AFTER: distance", distance(after.distance_m)],
+      ["AFTER: FINISH arrival", instant(after.finish_arrival, timezoneName)],
+      ["AFTER: feasible", badgeFor(after.feasible)],
+      ["BEFORE (user baseline, as stored)", duration(before.duration_sec) + ", " +
+        distance(before.distance_m) + ", " + text(before.baseline_kind)],
+      ["Algorithm baseline (internal, as stored)", duration(algorithm.duration_sec) + ", " +
+        distance(algorithm.distance_m) + ", " + text(algorithm.baseline_kind)],
+      ["Saved duration (stored)", duration(metrics.saved_duration_sec)],
+      ["Saved distance (stored)", distance(metrics.saved_distance_m)]
+    ]));
+
+    var violations = run.violations || [];
+    detail.appendChild(el("h4", null, "Violations of that execution"));
+    if (violations.length) {
+      detail.appendChild(table("Violations (as stored)",
+        [
+          ["Stop", "stop_id"],
+          ["Kind", "kind"],
+          ["Message", "message"]
+        ],
+        violations));
+    } else {
+      detail.appendChild(paragraph("muted", "That run recorded no violation."));
+    }
+
+    detail.appendChild(el("h4", null, "Recorded recommendation of that run (history, never the " +
+      "plan's decision)"));
+    detail.appendChild(definitionList([
+      ["Recorded outcome status", text(recommendation.status)],
+      ["Recorded recommended stop", recommendation.recommended_stop_id ||
+        "none recorded by that run"],
+      ["Recorded ranked stop ids", (recommendation.ranked_stop_ids || []).join(", ") || "none"],
+      ["Recorded resolved_at", instant(recommendation.resolved_at, timezoneName)],
+      ["Recorded inputs fingerprint", fingerprint(recommendation.inputs_fingerprint)],
+      ["Recorded as plan state", text(recommendation.as_plan_state)]
+    ]));
+    var diagnostics = recommendation.diagnostics || [];
+    if (diagnostics.length) {
+      detail.appendChild(table("Recorded diagnostics",
+        [
+          ["Violating stop", "stop_id"],
+          ["Candidate first stop", "candidate_stop_id"],
+          ["Code", "code"],
+          ["Message", "message"]
+        ],
+        diagnostics));
+    }
+
+    var topK = run.top_k;
+    detail.appendChild(el("h4", null, "Recorded top-K candidates of that run"));
+    if (topK === null || topK === undefined) {
+      detail.appendChild(paragraph("muted", "That run stored no candidate detail. \u201cNothing " +
+        "stored\u201d and \u201cno candidate existed\u201d are different facts, and this page does " +
+        "not guess which one it was."));
+    } else if (!topK.length) {
+      detail.appendChild(paragraph("muted", "That run recorded an empty candidate list."));
+    } else {
+      detail.appendChild(table("Recorded top-K (complete-route metrics, as stored)",
+        candidateColumns(timezoneName), candidateRows(topK)));
+    }
   }
 
   // -------------------------------------------------------------- actions --
-  function requestRecommendation() {
+  /** `GET /api/plans/{id}/recommendation` - the one advisory read of this page. */
+  function getRecommendation() {
     if (!state.planId) {
       setStatus("Open a plan first.", "error");
-      return;
+      return Promise.resolve();
     }
-    setLoading(true);
-    setStatus("Requesting the recommendation for " + state.planId + " \u2026");
-    request(API.recommendation(state.planId)).then(function (document_) {
-      state.recommendation = document_;
-      renderRecommendation(document_);
-      var seconds = (document_.data || {}).computation_seconds;
-      setLoading(false);
-      setStatus(
-        "Recommendation recomputed live for " + state.planId + " in " + text(seconds) +
-          " s (measured computation_seconds). It is advisory: nothing was applied and the plan is " +
-          "unchanged.",
-        "ok"
-      );
-    }).catch(function (error) {
-      setLoading(false);
-      showError(error);
+    clearError();
+    return withComputation(
+      "Get recommendation for " + state.planId,
+      ENDPOINTS.recommendation,
+      [state.planId],
+      function (document_) {
+        state.recommendation = document_;
+        state.recommendationIsStale = false;
+        renderRecommendation(document_);
+        var seconds = (document_.data || {}).computation_seconds;
+        setStatus(
+          "Recommendation recomputed live for " + state.planId + " in " + text(seconds) +
+            " s (measured computation_seconds). It is advisory: nothing was applied and the plan is " +
+            "unchanged.",
+          "ok"
+        );
+      }
+    ).catch(function (error) {
+      showError(error, "getting the recommendation for " + state.planId);
     });
   }
 
+  /**
+   * `POST /api/plans/{id}/selection` with `mode=recommend` and the stop the API recommended.
+   *
+   * The stop id is read from the recommendation payload this page displayed - never chosen here -
+   * and the API independently refuses the request unless that stop really is the current
+   * recommendation, so a stale or absent recommendation cannot commit a stop (D4/D32).
+   */
+  function acceptRecommendation() {
+    if (!state.planId) {
+      setStatus("Open a plan first.", "error");
+      return Promise.resolve();
+    }
+    var data = (state.recommendation && state.recommendation.data) || null;
+    var recommended = data ? data.recommended_stop_id : null;
+    if (!recommended) {
+      showError({
+        code: "no_recommendation_read",
+        type: "ClientPrecondition",
+        status: 0,
+        message: "no recommendation is currently displayed, so there is no stop to accept. This " +
+          "page will not invent one: press \u201cGet recommendation\u201d first."
+      }, "accepting the recommendation");
+      return Promise.resolve();
+    }
+    clearError();
+    setStatus("Accepting the recommended first stop " + text(recommended) + " for " +
+      state.planId + " \u2026");
+    return request(ENDPOINTS.selection, [
+      state.planId, FIRST_STOP_MODES.recommend, recommended
+    ]).then(function (document_) {
+      return applySelection(document_, "The recommendation was accepted as the driver's own " +
+        "decision");
+    }).catch(function (error) {
+      showError(error, "accepting the recommendation for " + state.planId);
+    });
+  }
+
+  /** `POST /api/plans/{id}/selection` with `mode=manual` and the chosen ENABLED stop. */
+  function chooseFirstStop() {
+    if (!state.planId) {
+      setStatus("Open a plan first.", "error");
+      return Promise.resolve();
+    }
+    var select = byId("manual-stop-select");
+    var chosen = select ? select.value : "";
+    if (!chosen) {
+      showError({
+        code: "no_stop_chosen",
+        type: "ClientPrecondition",
+        status: 0,
+        message: "no enabled stop is chosen in the manual picker, so there is nothing to send. " +
+          "This page will not choose a stop on the driver's behalf."
+      }, "choosing a first stop");
+      return Promise.resolve();
+    }
+    clearError();
+    setStatus("Choosing " + text(chosen) + " as the driver's first stop for " + state.planId +
+      " \u2026");
+    return request(ENDPOINTS.selection, [
+      state.planId, FIRST_STOP_MODES.manual, chosen
+    ]).then(function (document_) {
+      return applySelection(document_, "The stop was chosen manually by the driver");
+    }).catch(function (error) {
+      showError(error, "choosing a first stop for " + state.planId);
+    });
+  }
+
+  /** `DELETE /api/plans/{id}/selection` - back to awaiting_first_stop_choice (D8). */
+  function cancelSelection() {
+    if (!state.planId) {
+      setStatus("Open a plan first.", "error");
+      return Promise.resolve();
+    }
+    clearError();
+    setStatus("Cancelling the first-stop selection for " + state.planId + " \u2026");
+    return request(ENDPOINTS.clearSelection, [state.planId]).then(function (document_) {
+      return applySelection(document_, "The selection was cancelled");
+    }).catch(function (error) {
+      showError(error, "cancelling the selection for " + state.planId);
+    });
+  }
+
+  /**
+   * Shared follow-up of every selection change: refresh the plan (state, mode, provenance, pinned),
+   * the manual picker, the route, the summary and the run history FROM THE SERVER.
+   */
+  function applySelection(document_, label) {
+    var selection = document_.data || {};
+    return refreshFromServer(state.planId).then(function () {
+      renderSelectionPanel(selection);
+      var firstStop = (state.plan && state.plan.first_stop) || {};
+      setStatus(
+        label + " for " + state.planId + ". The API now reports state " +
+          text(firstStop.state) + ", mode " + text(firstStop.mode) + ", selected " +
+          text(firstStop.selected_stop_id || "none") + ", source " +
+          text(firstStop.selection_source || "none") + ", pinned " + text(firstStop.pinned) +
+          ". " + text(selection.note),
+        "ok"
+      );
+      return reloadRouteFromServer("the new selection");
+    });
+  }
+
+  /**
+   * Re-read the committed route from the server for the plan's current selection.
+   *
+   * The route is never carried over from a previous selection and never computed here: the
+   * documented `409 no_first_stop_selected` refusal is shown as the honest answer when the plan is
+   * awaiting a choice.
+   */
+  function reloadRouteFromServer(reason) {
+    if (!state.planId) {
+      return Promise.resolve();
+    }
+    return request(ENDPOINTS.route, [state.planId]).then(function (document_) {
+      state.route = document_.data;
+      renderRoute(document_);
+      markRecommendationStale(reason);
+      return loadRuns();
+    }).catch(function (error) {
+      if (error && error.code === "no_first_stop_selected") {
+        state.route = null;
+        renderRouteRefused(error);
+        renderSummaryEmpty();
+        showError(error, "reading the committed route after " + text(reason));
+        return loadRuns();
+      }
+      showError(error, "reading the committed route after " + text(reason));
+    });
+  }
+
+  /** `PUT /api/plans/{id}` with exactly one stop change: `enabled` or `priority`. */
+  function updateStop(stopId, changes) {
+    if (!state.planId) {
+      setStatus("Open a plan first.", "error");
+      return Promise.resolve();
+    }
+    clearError();
+    var what = changes.enabled === undefined
+      ? "priority " + text(changes.priority)
+      : (changes.enabled ? "restore" : "disable");
+    setStatus("Sending " + what + " for stop " + text(stopId) + " \u2026");
+    return request(ENDPOINTS.updateStop, [state.planId, stopId, changes])
+      .then(function (document_) {
+        var plan = document_.data || {};
+        var counts = plan.counts || {};
+        return refreshFromServer(state.planId).then(function () {
+          setStatus(
+            "PUT /api/plans/" + text(state.planId) + " applied " + what + " for stop " +
+              text(stopId) + ". The server now reports " + text(counts.stops) + " stops, " +
+              text(counts.enabled_stops) + " enabled and " + text(counts.disabled_stops) +
+              " disabled. Recalculate to record a run for this change.",
+            "ok"
+          );
+          return reloadRouteFromServer("the stop change");
+        });
+      })
+      .catch(function (error) {
+        showError(error, "changing stop " + text(stopId) + " of " + state.planId +
+          " (PUT /api/plans/{id} with " + JSON.stringify(changes) + ")");
+      });
+  }
+
+  /**
+   * `POST /api/plans/{id}/optimize` - recalculate, append exactly one run row, then re-read the
+   * route, the plan (selection state) and the run history FROM THE SERVER.
+   */
+  function recalculate() {
+    if (!state.planId) {
+      setStatus("Open a plan first.", "error");
+      return Promise.resolve();
+    }
+    clearError();
+    return withComputation(
+      "Recalculate " + state.planId,
+      ENDPOINTS.optimize,
+      [state.planId],
+      function (document_) {
+        var run = document_.data || {};
+        var computation = document_.computation || {};
+        return refreshFromServer(state.planId).then(function () {
+          return loadRuns();
+        }).then(function () {
+          return reloadRouteFromServer("the recalculation");
+        }).then(function () {
+          setStatus(
+            "Recalculated " + state.planId + " in " + text(computation.computation_seconds) +
+              " s (measured computation_seconds) and appended run " + text(run.id) + " (" +
+              text(run.run_kind) + ", " + text(run.status) + "). The route, the selection state and " +
+              "the run history above were re-read from the server.",
+            "ok"
+          );
+        });
+      }
+    ).catch(function (error) {
+      showError(error, "recalculating " + state.planId);
+    });
+  }
+
+  /** `GET /api/plans/{id}/route` - read the committed route, no write, no run row. */
   function requestRoute() {
     if (!state.planId) {
       setStatus("Open a plan first.", "error");
-      return;
+      return Promise.resolve();
     }
-    setLoading(true);
-    setStatus("Requesting the committed route for " + state.planId + " \u2026");
-    request(API.route(state.planId)).then(function (document_) {
-      state.route = document_.data;
-      renderRoute(document_);
-      var seconds = (document_.data || {}).computation_seconds;
-      setLoading(false);
-      setStatus(
-        "Committed route computed for " + state.planId + " in " + text(seconds) +
-          " s (measured computation_seconds). The order, timeline and metrics are the engine's " +
-          "own.",
-        "ok"
-      );
-      return loadRuns();
-    }).catch(function (error) {
-      setLoading(false);
-      showError(error);
-      if (error && error.code === "no_first_stop_selected") {
-        replace(byId("route-panel"), [
-          paragraph("error-text", "The API refused the route with " + text(error.code) + ": " +
-            text(error.message)),
-          paragraph("hint", "That refusal is the honest answer while the plan is " +
-            "awaiting_first_stop_choice: there is no committed route to show, and no route is " +
-            "invented. Choosing a first stop is the U16 override control.")
-        ]);
+    clearError();
+    return withComputation(
+      "Read the committed route for " + state.planId,
+      ENDPOINTS.route,
+      [state.planId],
+      function (document_) {
+        state.route = document_.data;
+        renderRoute(document_);
+        var seconds = (document_.data || {}).computation_seconds;
+        setStatus(
+          "Committed route computed for " + state.planId + " in " + text(seconds) +
+            " s (measured computation_seconds). The order, timeline and metrics are the engine's " +
+            "own.",
+          "ok"
+        );
+        return loadRuns();
       }
+    ).catch(function (error) {
+      if (error && error.code === "no_first_stop_selected") {
+        state.route = null;
+        renderRouteRefused(error);
+        renderSummaryEmpty();
+      }
+      showError(error, "reading the committed route for " + state.planId);
     });
   }
 
   function createOrOpenDemoPlan() {
+    clearError();
     setStatus("Creating or opening the deterministic DEMO plan \u2026");
     createDemoPlan().then(function (plan) {
       return loadPlans().then(function () {
@@ -1146,7 +1942,19 @@
       setStatus("Opened the DEMO/SYNTHETIC plan " + plan.id + " (provenance " +
         text(plan.data_provenance) + ").", "ok");
       return loadRuns();
-    }).catch(showError);
+    }).catch(function (error) {
+      showError(error, "creating or opening the DEMO plan");
+    });
+  }
+
+  function changePlan(event) {
+    var planId = event.target.value;
+    clearError();
+    openPlan(planId).then(function () {
+      return loadRuns();
+    }).catch(function (error) {
+      showError(error, "opening plan " + text(planId));
+    });
   }
 
   // ------------------------------------------------------------------ boot --
@@ -1159,16 +1967,42 @@
     return missing;
   }
 
+  function bind(id, handler) {
+    var node = byId(id);
+    if (node) {
+      node.addEventListener("click", handler);
+    }
+    return node;
+  }
+
   function boot() {
     checkRequiredElements();
-    byId("create-demo-plan").addEventListener("click", createOrOpenDemoPlan);
-    byId("plan-select").addEventListener("change", function (event) {
-      openPlan(event.target.value).then(loadRuns).catch(showError);
-    });
-    byId("request-recommendation").addEventListener("click", requestRecommendation);
-    byId("request-route").addEventListener("click", requestRoute);
+    bind("create-demo-plan", createOrOpenDemoPlan);
+    bind("get-recommendation", getRecommendation);
+    bind("accept-recommendation", acceptRecommendation);
+    bind("choose-first-stop", chooseFirstStop);
+    bind("cancel-selection", cancelSelection);
+    bind("recalculate", recalculate);
+    bind("request-route", requestRoute);
+    var planSelect = byId("plan-select");
+    if (planSelect) {
+      planSelect.addEventListener("change", changePlan);
+    }
 
-    request(API.health).then(function (health) {
+    renderRecommendationUnavailable(
+      "No recommendation has been read yet. Press \u201cGet recommendation\u201d: the API " +
+        "recomputes it live for that request and writes nothing."
+    );
+    renderRouteEmpty();
+    renderSummaryEmpty();
+    renderRunDetailEmpty();
+    replace(byId("run-history"), [
+      paragraph("muted", "Open or create a plan to read its immutable run history.")
+    ]);
+    renderStopList({ stops: [] });
+    updateAcceptControl();
+
+    request(ENDPOINTS.health).then(function (health) {
       state.health = health;
       renderHealth(health);
       setupMap(health);
@@ -1182,11 +2016,10 @@
           "deterministic DEMO/SYNTHETIC fixture through POST /api/plans.",
         "ok"
       );
-      renderRecommendationEmpty();
-      renderRouteEmpty();
-      renderSummaryEmpty();
       return null;
-    }).catch(showError);
+    }).catch(function (error) {
+      showError(error, "loading the workspace");
+    });
   }
 
   if (document.readyState === "loading") {

@@ -5,21 +5,25 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RoutePilot demo workspace (DEMO / SYNTHETIC)</title>
 <!--
-  RoutePilot demo workspace - Stage 4 U15 (spec sections 26, 31, 34; decisions D15/D16/D19/D32/D39).
+  RoutePilot demo workspace - Stage 4 U16 (spec sections 26, 31, 34; decisions D15/D16/D19/D32/D39).
 
   Vanilla HTML + CSS + JavaScript. No framework, no bundler, no build step, no npm and no vendored
   map asset: this file is served as-is by the stdlib server in api/http_server.py, together with
   web/styles.css, web/app.js and web/map.js.
 
-  Two rules this page exists to keep:
+  Three rules this page exists to keep:
 
   1. NOTHING here is computed. Every number, order, metric, feasibility result, violation and
      fingerprint is rendered from an API payload unchanged (D39(f)). The page may format a duration
      for reading and may display an instant in the plan's own time zone; it never adds, averages,
      ranks, re-orders, re-scores or derives anything.
   2. A recommendation is NOT a decision. The engine recommends and the driver decides (D4/D32); the
-     advisory banner, the selection panel and the recommendation panel state that plainly, and the
-     recommendation controls that actually apply a decision are U16 - this unit reads and renders.
+     advisory banner and the recommendation panel state that plainly, and only an explicit driver
+     press of "Accept the recommendation"/"Use this stop" makes a selection.
+  3. Every control refreshes the affected panels FROM THE SERVER (D39(d)): a selection change
+     re-reads the plan, a recalculation re-reads the run history, and no panel is ever updated with a
+     client-side guess. The run history is READ-ONLY: the page offers no control that edits,
+     reorders or deletes a run.
 
   The DEMO/SYNTHETIC banner is deliberately static markup: it must be on screen even when no script
   has run yet, so the synthetic nature of the data is never a consequence of JavaScript succeeding.
@@ -38,6 +42,7 @@
   <div class="banner banner-status" id="status-banner" role="status" aria-live="polite">
     Loading the workspace and the API capability report&hellip;
   </div>
+  <div class="banner banner-error" id="error-banner" role="alert" aria-live="assertive" hidden></div>
   <div class="banner banner-latency" id="latency-notice">
     Latency: the exhaustive first-stop recommendation is computed synchronously and has no
     background job queue. The accepted MVP worst case at the ~50-enabled-stop portfolio scale is
@@ -65,6 +70,67 @@
     <div id="plan-summary" class="plan-summary"></div>
   </section>
 
+  <section class="panel panel-controls" aria-labelledby="controls-heading">
+    <h2 id="controls-heading">Override controls (the driver decides)</h2>
+    <p class="banner banner-advisory">
+      Every control below changes <strong>server state</strong> through one documented endpoint and
+      then <strong>re-reads the affected panels from the server</strong>. Nothing on this page
+      applies a recommendation by itself: the accept control only ever sends
+      <code>mode=recommend</code> with the stop the engine recommended and this page displayed
+      (D4/D32/D39(d)).
+    </p>
+
+    <h3>First-stop decision</h3>
+    <div class="row">
+      <button type="button" id="get-recommendation">Get recommendation</button>
+      <button type="button" id="accept-recommendation">Accept the recommendation</button>
+      <button type="button" id="cancel-selection">Cancel the selection</button>
+    </div>
+    <p class="hint" id="accept-hint">
+      &ldquo;Accept the recommendation&rdquo; sends <code>POST /api/plans/{id}/selection</code> with
+      <code>{"mode": "recommend", "stop_id": &lt;the recommended stop&gt;}</code> and is refused
+      unless that stop really is the engine's current recommendation. It is disabled until a
+      recommendation has been read.
+    </p>
+    <div class="row">
+      <label for="manual-stop-select">First stop (manual)</label>
+      <select id="manual-stop-select" aria-label="Choose an enabled stop as the first service stop"></select>
+      <button type="button" id="choose-first-stop">Use this stop</button>
+    </div>
+    <p class="hint">
+      The manual picker lists only the stops the API reports as <code>enabled</code>. &ldquo;Use this
+      stop&rdquo; sends <code>POST /api/plans/{id}/selection</code> with
+      <code>{"mode": "manual", "stop_id": &lt;the chosen stop&gt;}</code>: the choice is the
+      driver's, its provenance is <code>manual_choice</code> and it is pinned (D5/D6/D7).
+    </p>
+    <p class="hint">
+      &ldquo;Cancel the selection&rdquo; sends <code>DELETE /api/plans/{id}/selection</code> and the
+      plan returns to <code>awaiting_first_stop_choice</code> - the domain never substitutes a stop
+      (D8/D9).
+    </p>
+
+    <h3>Stops: disable / restore / priority</h3>
+    <p class="hint">
+      Each stop row below offers its own edit controls. Both send
+      <code>PUT /api/plans/{id}</code> with a <code>stops</code> list carrying exactly one change:
+      <code>{"stops": [{"stop_id": &hellip;, "enabled": false|true}]}</code> to disable or restore,
+      and <code>{"stops": [{"stop_id": &hellip;, "priority": &lt;the new priority&gt;}]}</code> to
+      change the priority. There is deliberately no drag/reorder control (out of scope, D21/D39(d)).
+    </p>
+    <div id="stop-list" class="stop-list"></div>
+
+    <h3>Recalculate</h3>
+    <div class="row">
+      <button type="button" id="recalculate">Recalculate</button>
+    </div>
+    <p class="hint">
+      <code>POST /api/plans/{id}/optimize</code> recomputes the recommendation, computes the
+      committed route and appends exactly one immutable run row. Afterwards the route, the
+      selection state and the run history are all re-read from the server; the measured
+      <code>computation_seconds</code> of the recalculation is shown.
+    </p>
+  </section>
+
   <div class="split">
     <section class="panel panel-map" aria-labelledby="map-heading">
       <h2 id="map-heading">Map (Leaflet + OSM-compatible tiles)</h2>
@@ -86,9 +152,6 @@
           live for this request, it is not plan state, and it does not change the plan: the driver
           decides whether to accept it or choose another stop (D4/D11/D32).
         </p>
-        <div class="row">
-          <button type="button" id="request-recommendation">Compute the recommendation</button>
-        </div>
         <div id="recommendation-panel" class="panel-body"></div>
         <p class="recommended" id="recommended-stop"></p>
         <h3 id="alternatives-heading">Alternatives (ranked, complete-route metrics)</h3>
@@ -102,7 +165,7 @@
       <section class="panel panel-route" aria-labelledby="route-heading">
         <h2 id="route-heading">Committed route (order, ETA, waiting, service, windows, lateness)</h2>
         <div class="row">
-          <button type="button" id="request-route">Compute the committed route</button>
+          <button type="button" id="request-route">Show the committed route (read-only)</button>
         </div>
         <div id="route-panel" class="panel-body"></div>
         <div id="timeline" class="tbody"></div>
@@ -117,12 +180,17 @@
       <section class="panel panel-history" aria-labelledby="history-heading">
         <h2 id="history-heading">Run history (read-only)</h2>
         <p class="hint">
-          Immutable history, oldest first, from <code>GET /api/plans/{id}/runs</code>. This panel is
-          a placeholder: the full run-history view and the interactive override controls (accept,
-          choose another stop, cancel, disable, restore, priority, recalculate) are U16. Nothing on
-          this page writes history - only <code>POST /api/plans/{id}/optimize</code> appends a run.
+          Immutable history, oldest first, from <code>GET /api/plans/{id}/runs</code>. A run is
+          never edited, reordered or deleted: only
+          <code>POST /api/plans/{id}/optimize</code> (the Recalculate control) appends one row. The
+          recorded recommendation of a run is the <strong>audit of what that run showed</strong> - it
+          is history, never the plan's current first-stop decision.
         </p>
-        <div id="history-panel" class="panel-body"></div>
+        <div id="history-panel" class="panel-body">
+          <div id="run-history" class="tbody"></div>
+          <h3>Run detail (read-only)</h3>
+          <div id="run-detail" class="panel-body"></div>
+        </div>
       </section>
     </div>
   </div>

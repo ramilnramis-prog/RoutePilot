@@ -1,4 +1,4 @@
-"""The U15 web workspace: the static assets, the honesty strings and the no-business-formula gate.
+"""The U15/U16 web workspace: the static assets, the controls, the honesty strings and the gate.
 
 What this module verifies, and what it deliberately cannot
 ==========================================================
@@ -36,39 +36,98 @@ What this module verifies, and what it deliberately cannot
 * ``node --check`` passes for every ``web/*.js`` when ``node`` is on the machine. The suite does
   **not** require node: the check skips cleanly when the binary is absent.
 
-**Confirmed manually only (a browser is required, and this machine is offline):** the page as it
-actually renders - Leaflet loading from the configured URL, tiles painting, the map drawn, and the
-DOM ``app.js`` builds at runtime. No test here loads Leaflet, fetches a tile or executes the script:
-there is no working network on this machine and no browser in the test environment. That is an
-accepted environment limitation, recorded rather than hidden.
+**U16 additions (the override controls, the run-history view and the end-to-end integration):**
 
-Manual visual checklist (browser: ``python -m api.serve``, then open the printed URL)
--------------------------------------------------------------------------------------
+* every new required element id is present in the **served** HTML (the U15 ids stay too);
+* each control is wired to exactly the documented endpoint with the documented method and body:
+  ``GET .../recommendation``, ``POST .../selection`` with ``{mode:"recommend", stop_id:<the
+  recommended stop>}``, ``POST .../selection`` with ``{mode:"manual", stop_id:<the chosen enabled
+  stop>}``, ``DELETE .../selection``, ``PUT /api/plans/{id}`` with ``{stops:[{stop_id, enabled}]}``
+  / ``{stops:[{stop_id, priority}]}``, ``POST .../optimize`` and the read-only ``GET
+  /api/runs/{run_id}`` for the detail view. This is asserted against the **served script text**, so
+  the check is on the bytes the browser would receive;
+* the run-history view is **read-only**: no PUT/DELETE and no run-appending POST is issued against
+  ``/api/runs/...`` anywhere in the script, and the markup offers no edit/delete/reorder control;
+* no drag/reorder control exists and no route mode other than ``SMART_ROUTE`` can be chosen (there
+  is no route-mode control at all);
+* error envelopes are **surfaced, not swallowed**: the ``{"error": {code, type, message}}`` envelope
+  is read, every control has a failure path that reaches ``#error-banner``, the guidance table is
+  keyed by documented codes (including ``no_first_stop_selected``, ``plan_busy`` with its retry
+  guidance, ``invalid_input`` and ``unsupported_capability``), and no success message is written in
+  a ``catch``;
+* the ``#loading`` computing state is wired for the two requests that can take seconds: the
+  recommendation and the recalculation;
+* the selected stop is never invented client-side: the accept path uses the stop the **payload**
+  named and the manual path uses the stop the **picker** returned.
 
-1. Open ``http://127.0.0.1:8000/`` (the server root is the workspace entry point).
-2. See the persistent **DEMO / SYNTHETIC DATA** banner before anything else, plus the latency notice
-   naming the accepted ~8 s worst case at the ~50-stop scale.
-3. See the plan summary: stops, departure, START and FINISH as plan **locations**, and the
-   first-stop state with its provenance and pinning.
-4. Press **"Create / open the DEMO plan"** if no plan is listed; it should open ``demo-route-01`` and
-   report provenance ``DEMO_SYNTHETIC``.
-5. Press **"Compute the recommendation"**: the loading/computing state must appear while the request
-   is in flight, and the measured ``computation_seconds`` must be displayed afterwards.
-6. Read the recommendation: the advisory banner says it is **not an applied decision**, the
-   recommended stop is named, the ranked alternatives show their **complete-route** metrics, and the
-   rejected candidates show their **violating stops**. The plan's first-stop state must still read
-   ``awaiting_first_stop_choice`` - a recommendation changes nothing (D32).
-7. Press **"Compute the committed route"**: read the route order and timeline (ETA/arrival, waiting,
-   service start, service duration, departure, the local service window and the lateness), then the
-   BEFORE vs AFTER summary with saved time and distance, feasibility, violations and fingerprints.
-   On a plan with no selection yet the honest answer is the documented
-   ``409 no_first_stop_selected`` refusal, not an invented route.
-8. Look at the map: START, FINISH and the stops drawn, the route order joined by **straight-line
-   synthetic geometry** labelled as such, and visible tile attribution. Offline (as on this machine)
-   expect the honest fallback instead: ``#map-notice`` explains that the tile map is unavailable
-   while the timeline, summary, recommendation and selection stay fully usable.
-9. Read "What this build does NOT do": traffic, side-of-road, turn-by-turn, geocoding, real routing
-   and every route mode except SMART_ROUTE, straight from the API's capability report.
+**Still confirmed manually only (a browser is required, and this machine is offline):** the page as
+it actually renders - Leaflet loading from the configured URL, tiles painting, the map drawn, the
+DOM ``app.js`` builds at runtime, and the click-through of the controls below. No test here loads
+Leaflet, fetches a tile or executes the script: there is no working network on this machine and no
+browser in the test environment. That is an accepted environment limitation, recorded rather than
+hidden.
+
+Manual end-to-end checklist - the owner's portfolio flow, in order (D39(f))
+==========================================================================
+
+Run: ``python -m api.serve`` (prints its bound URL), then open that URL in a browser. The whole
+flow below is exercised by hand; the automated half of this module can only assert the delivered
+bytes, never the rendered result.
+
+1. **Start the server** locally: ``python -m api.serve`` (the server root *is* the workspace entry
+   point, served as ``/index.html``).
+2. **Open it in a browser** at the printed URL. The persistent **DEMO / SYNTHETIC DATA** banner and
+   the latency notice (the accepted ~8 s worst case at the ~50-enabled-stop portfolio scale) are on
+   screen before any script runs.
+3. **Open or create the DEMO/SYNTHETIC plan**: pick a stored plan in "Open plan", or press
+   "Create / open the DEMO plan" (``POST /api/plans``, which returns the same deterministic fixture
+   instead of duplicating it). The plan summary shows the stops, START and FINISH as plan
+   *locations*, the route mode, and the first-stop state - which must read
+   ``awaiting_first_stop_choice`` with no selected stop and no provenance.
+4. **Request a recommendation**: press "Get recommendation" (``GET
+   /api/plans/{id}/recommendation``). The ``#loading`` computing state must appear while the request
+   is in flight, and the measured ``computation_seconds`` must be displayed when it returns.
+5. **Understand that it is only a recommendation**: the advisory banner says it is *not an applied
+   decision*, the panel reports ``applied_decision: false`` / ``as_plan_state: false``, and the
+   plan's first-stop state is still ``awaiting_first_stop_choice`` - nothing was applied (D32).
+6. **Inspect the alternatives and the rejected candidates**: the ranked top-K candidates with their
+   complete-route metrics (travel, waiting, service, FINISH arrival, feasibility) and the rejected
+   candidates with the ids of the stops whose hard window their complete route misses.
+7. **Accept it or choose another stop**: press "Accept the recommendation" (``POST
+   /api/plans/{id}/selection`` with ``mode=recommend`` and the recommended stop the panel displayed),
+   or pick a different enabled stop in "First stop (manual)" and press "Use this stop" (the same
+   endpoint with ``mode=manual``).
+8. **See the selection pinned with provenance**: the plan summary and the selection panel must now
+   read ``first_stop_selected``, the selected stop, provenance ``accepted_recommendation`` (accept)
+   or ``manual_choice`` (manual picker) and ``pinned: true`` - all re-read from the server.
+9. **See the full ordered route**: the route panel and the timeline show the engine's own order with
+   the per-stop ETA/arrival, waiting, service start, service duration, departure, the local service
+   window and the lateness; the map redraws that order as synthetic straight-line geometry.
+10. **See ETA / waiting / service / FINISH**: the timeline columns above plus the summary's FINISH
+    arrival - every figure the API's own, unchanged.
+11. **Compare BEFORE vs AFTER**: the summary's BEFORE (the driver's own input order) against the
+    AFTER (the RoutePilot order), with the saved duration and distance the API reports, the explicit
+    violations, and both fingerprints. The algorithm baseline is labelled as internal, never as
+    BEFORE.
+12. **Disable / restore a stop or change priority and recalculate**: use a stop row's "Disable this
+    stop" / "Restore this stop" or the priority field plus "Change priority" (each a ``PUT
+    /api/plans/{id}`` with exactly one change), then press "Recalculate" (``POST
+    /api/plans/{id}/optimize``). The computing state appears, exactly one run row is appended, and
+    the route, the selection state and the run history are all re-read from the server. The computing
+    indicator and the disabled controls must **persist through the post-recalculate route re-read**
+    (``GET /api/plans/{id}/route``, measured in seconds at the ~50-stop scale), and must clear only
+    once the route and the run history have come back - the plan chooser is never re-enabled while
+    those reads are still in flight.
+13. **Inspect the immutable run history**: the run-history table lists the plan's runs (id, kind,
+    status, created_at, algorithm and version, tzdata version, both fingerprints, the recorded
+    order, the recorded recommended stop and the stored top-K count); "Show run detail (read-only)"
+    reads one run back through ``GET /api/runs/{run_id}`` and shows its metrics with the user **and**
+    algorithm baselines and the after route, its violations and the recorded recommendation/top-K as
+    the audit of what that run showed. Nothing in the view edits, reorders or deletes a run, and no
+    stored recommendation is ever presented as the plan's current decision.
+14. Finally read "What this build does NOT do": traffic, side-of-road, turn-by-turn, geocoding, real
+    routing and every route mode except SMART_ROUTE, straight from the API's own capability report -
+    and note that the page offers no control for any of them.
 """
 
 from __future__ import annotations
@@ -104,8 +163,10 @@ APP_JS = WEB_ROOT / "app.js"
 MAP_JS = WEB_ROOT / "map.js"
 WEB_ASSETS = (INDEX_HTML, STYLES_CSS, APP_JS, MAP_JS)
 
-#: Every element id the work unit requires (tests and U16 depend on them).
+#: Every element id the work units require (tests and U17 depend on them): the U15 ids stay working
+#: and U16 adds the override controls, the error banner, the run-history list and the run detail.
 REQUIRED_ELEMENT_IDS = (
+    # U15 (unchanged)
     "status-banner",
     "latency-notice",
     "plan-select",
@@ -125,7 +186,75 @@ REQUIRED_ELEMENT_IDS = (
     "map-notice",
     "history-panel",
     "loading",
+    # U16: the approved override controls and the run-history view
+    "get-recommendation",
+    "accept-recommendation",
+    "manual-stop-select",
+    "choose-first-stop",
+    "cancel-selection",
+    "stop-list",
+    "recalculate",
+    "error-banner",
+    "run-history",
+    "run-detail",
 )
+
+#: The controls whose click handler must call exactly one documented endpoint, and which endpoint
+#: that is (the key of the script's own ``ENDPOINTS`` table). The endpoint's *documented method and
+#: body* are asserted separately, below, against the same table.
+CONTROL_ENDPOINT_WIRING = {
+    "getRecommendation": "recommendation",
+    "acceptRecommendation": "selection",
+    "chooseFirstStop": "selection",
+    "cancelSelection": "clearSelection",
+    "updateStop": "updateStop",
+    "recalculate": "optimize",
+    "showRunDetail": "run",
+}
+
+#: Every endpoint the script's ``ENDPOINTS`` table declares, with the documented HTTP method and the
+#: documented request body shape. The methods come from ``api/http_server.py``'s route table and the
+#: bodies from the service layer's accepted fields; a control that drifted from either would fail
+#: here.
+DOCUMENTED_ENDPOINTS = {
+    "health": ("GET", "/api/health"),
+    "plans": ("GET", "/api/plans"),
+    "createDemoPlan": ("POST", "/api/plans"),
+    "plan": ("GET", "/api/plans/"),
+    "updateStop": ("PUT", "/api/plans/"),
+    "recommendation": ("GET", "/api/plans/", "/recommendation"),
+    "selection": ("POST", "/api/plans/", "/selection"),
+    "clearSelection": ("DELETE", "/api/plans/", "/selection"),
+    "route": ("GET", "/api/plans/", "/route"),
+    "optimize": ("POST", "/api/plans/", "/optimize"),
+    "runs": ("GET", "/api/plans/", "/runs"),
+    "run": ("GET", "/api/runs/"),
+}
+
+#: The error codes of the API's own documented envelope (``api.serialization.ERROR_CODES``) whose
+#: guidance the UI must carry. Two of them are the ones this unit names explicitly: the honest
+#: no-selection refusal and the busy plan with its retry guidance.
+REQUIRED_ERROR_GUIDANCE_CODES = (
+    "no_first_stop_selected",
+    "plan_busy",
+    "invalid_input",
+    "unsupported_capability",
+    "illegal_state",
+)
+
+#: The two actions that must show the ``#loading`` computing state (D39(e)): they run the
+#: synchronous exhaustive engine work the latency notice describes.
+COMPUTING_REQUESTS = ("recommendation", "optimize")
+
+#: Vocabulary that would mean a reorder/drag **control** (D21/D39(d) keep it out of scope). The
+#: words a page may honestly use to say it offers no such control are deliberately not listed.
+REORDER_VOCABULARY = (
+    "draggable", "ondragstart", "dragstart", "datatransfer", "sortable", "drop here", "move up",
+    "move down", "reorder this",
+)
+
+#: Actions the read-only history may never offer.
+HISTORY_EDIT_VOCABULARY = ("delete run", "edit run", "remove run", "reorder run", "rename run")
 
 #: The API payload fields the UI is documented to read, grouped by the response they come from.
 #: This is the anti-recomputation gate: a field the script stops reading - or starts deriving -
@@ -160,6 +289,13 @@ READ_PAYLOAD_FIELDS = {
         "document_.count", "read_only", "document_.note", "run_kind", "created_at",
         "recommendation",
     ),
+    # U16: the run-history view and the run detail read these too (list row + stored run).
+    "run_history": (
+        "document_.data", "algorithm_version", "tzdata_version", "cost_policy",
+        "has_committed_route", "top_k", "fingerprints.route_fingerprint",
+        "recommendation.recommended_stop_id", "recommendation.ranked_stop_ids",
+        "recommendation.resolved_at", "recommendation.as_plan_state",
+    ),
 }
 
 #: Derivation primitives a UI may not use on payload values. Formatting is allowed; deriving a
@@ -180,7 +316,7 @@ ALLOWED_ARITHMETIC_STATEMENTS = (
     "var hours = Math.floor(total / 3600);",
     "var minutes = Math.floor((total % 3600) / 60);",
     "var secs = total % 60;",
-    "return sign + parts.join(\" \");",
+    "return sign + pad(hours) + \"h \" + pad(minutes) + \"m \" + pad(secs) + \"s\";",
     "return (value / 1000).toFixed(1) + \" km\";",
 )
 
@@ -308,6 +444,28 @@ def function_body(script: str, name: str) -> str:
             if depth == 0:
                 return script[start : end + 1]
     raise AssertionError(f"function {name} has no closing brace")
+
+
+def endpoint_entry(script: str, name: str) -> str:
+    """The ``ENDPOINTS.<name>`` block of the script, as text.
+
+    ``web/app.js`` declares every request it can make in one ``ENDPOINTS`` table (URL builder,
+    documented HTTP method, documented body), so asserting on this block is asserting on the bytes
+    the browser would receive rather than on a Python restatement of them.
+    """
+    marker = re.search(r"\b" + re.escape(name) + r":\s*\{", script)
+    if marker is None:
+        raise AssertionError(f"ENDPOINTS.{name} was not found in the delivered script")
+    depth = 0
+    start = marker.end() - 1
+    for end in range(start, len(script)):
+        if script[end] == "{":
+            depth += 1
+        elif script[end] == "}":
+            depth -= 1
+            if depth == 0:
+                return script[start : end + 1]
+    raise AssertionError(f"ENDPOINTS.{name} has no closing brace")
 
 
 def fetch(server, path: str):
@@ -461,11 +619,23 @@ class WebWorkspaceTestCase(ServerBackedTestCase):
         self.assertIn("no", notice.lower())  # "has no background job queue"
 
     def test_the_computing_state_exists_and_is_driven_by_the_script(self) -> None:
+        """The ``#loading`` state is real, and the two slow requests run through it (D39(e)).
+
+        U16 moved the flag into one helper (``withComputation``) so the recommendation and the
+        recalculation cannot drift apart; the flag itself is still set and cleared for every request
+        that can take seconds, and the state is always cleared on failure too.
+        """
         self.assertRegex(read_asset(INDEX_HTML), r'id="loading"')
         script = read_asset(APP_JS)
-        self.assertIn("setLoading(true)", script)
+        self.assertIn("setLoading(true", script)
         self.assertIn("setLoading(false)", script)
         self.assertIn('byId("loading")', script)
+        computation = function_body(script, "withComputation")
+        self.assertIn("setLoading(true", computation)
+        self.assertIn("setLoading(false)", computation)
+        for action in ("getRecommendation", "recalculate"):
+            with self.subTest(action=action):
+                self.assertIn("withComputation", function_body(script, action))
 
     # -- capability honesty is wired to the API --------------------------- #
     def test_the_unimplemented_capabilities_the_page_must_show_come_from_the_api(self) -> None:
@@ -548,10 +718,17 @@ class WebWorkspaceTestCase(ServerBackedTestCase):
         self.assertIn("tzdata", read_asset(APP_JS).lower())
 
     # -- no route-mode control -------------------------------------------- #
-    def test_the_only_select_is_the_plan_chooser(self) -> None:
+    def test_there_is_no_route_mode_control_only_the_documented_pickers(self) -> None:
+        """The only selects are the plan chooser (U15) and the manual first-stop picker (U16).
+
+        There is deliberately no route-mode control of any kind: ``SMART_ROUTE`` is the only
+        implemented mode, the plan's own ``route_mode`` is displayed from the payload, and no
+        fallback to it is ever implied (D19/D39(d)).
+        """
         body = read_asset(INDEX_HTML)
-        self.assertEqual(len(re.findall(r"<select\b", body)), 1)
-        self.assertRegex(body, r'<select[^>]*id="plan-select"')
+        selects = re.findall(r'<select[^>]*id="([^"]+)"', body)
+        self.assertEqual(sorted(selects), ["manual-stop-select", "plan-select"])
+        self.assertEqual(len(re.findall(r"<select\b", body)), len(selects))
         self.assertNotIn("<option", body)  # the options are built from the API's plan list
 
     def test_no_route_mode_other_than_smart_route_appears_in_the_ui_assets(self) -> None:
@@ -644,22 +821,37 @@ class WebWorkspaceTestCase(ServerBackedTestCase):
                 self.assertIn(renderer, script)
 
     def test_the_script_does_not_fabricate_a_route_or_a_selection(self) -> None:
-        """No route, order, candidate or selection may be invented or written client-side."""
+        """No route, order, candidate or selection may be invented or written client-side.
+
+        The U16 write paths (the selection endpoints and the run-appending endpoint) now exist, so
+        they may only be reached through the ``ENDPOINTS`` table and the documented bodies - never as
+        an inline path, and never with a client-chosen stop. The one stop the accept path sends is
+        the stop the API's own recommendation payload named.
+        """
         script = read_asset(APP_JS)
-        # The selection endpoints and the run-appending endpoint are U16 write paths: this unit
-        # requests and renders only, so they are named in prose but never used as a request path.
-        for forbidden in ('"/selection"', '"/optimize"', '"/reoptimize"', "api.selection",
-                          "api.optimize"):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, script)
-        # The one write on the page is the documented open-or-create DEMO plan step.
-        self.assertEqual(script.count('method: "POST"'), 1)
-        self.assertIn("createDemoPlan", script)
-        self.assertIn('body: "{}"', script)
+        # No request path is ever built inline: every call goes through ENDPOINTS (the table is
+        # asserted in `test_every_endpoint_keeps_its_documented_method_and_path`). The one place a
+        # path may appear as a literal is that table itself.
+        table_start = script.index("var ENDPOINTS = {")
+        table_end = script.index("\n  };", table_start)
+        outside_table = script[:table_start] + script[table_end:]
+        for inline_path in ('"/selection"', '"/optimize"', '"/runs"', '"/route"'):
+            with self.subTest(inline_path=inline_path):
+                self.assertNotIn(inline_path, outside_table)
         # A recommendation is reported as advisory and never applied.
         self.assertIn("data.applied_decision", script)
         self.assertIn("data.as_plan_state", script)
         self.assertIn("data.advisory", script)
+        # The accept path takes the stop from the payload, and the manual path from the picker.
+        accept = function_body(script, "acceptRecommendation")
+        self.assertIn("data.recommended_stop_id", accept)
+        self.assertIn("recommended", accept)
+        self.assertNotIn("selected_stop_id", accept)
+        manual = function_body(script, "chooseFirstStop")
+        self.assertIn('byId("manual-stop-select")', manual)
+        self.assertIn("select.value", manual)
+        # The one write on the page that is not a driver decision is the open-or-create DEMO step.
+        self.assertIn("createDemoPlan", script)
 
     # -- the map configuration comes from the API -------------------------- #
     def test_no_tile_url_literal_is_written_into_the_ui_assets(self) -> None:
@@ -828,11 +1020,15 @@ class WebWorkspaceTestCase(ServerBackedTestCase):
         self.assertEqual(payload["data"], [])
         self.assertIn("only POST /api/plans/{id}/optimize", payload["note"])
 
-    def test_the_history_panel_says_it_is_a_u16_placeholder(self) -> None:
+    def test_the_history_panel_is_documented_as_read_only_history(self) -> None:
+        """The panel names the read endpoint, the only appending endpoint, and its read-only rule."""
         body = read_asset(INDEX_HTML)
         panel = body.split('id="history-panel"', 1)[0].rsplit("<section", 1)[1]
-        self.assertIn("U16", panel)
         self.assertIn("/runs", panel)
+        self.assertIn("read-only", panel.lower())
+        self.assertIn("only", panel.lower())
+        self.assertIn("POST /api/plans/{id}/optimize", panel)
+        self.assertIn("never the plan's current", panel)
 
     # -- node syntax check (optional) --------------------------------------- #
     @unittest.skipUnless(shutil.which("node"), "node is not installed on this machine")
@@ -856,6 +1052,499 @@ class WebWorkspaceTestCase(ServerBackedTestCase):
                     0,
                     f"node --check {path.name} failed:\n{completed.stdout}\n{completed.stderr}",
                 )
+
+
+class U16ControlWiringTests(unittest.TestCase):
+    """U16: every control is wired to the documented endpoint, method and body.
+
+    These cases read the **delivered** ``web/index.html`` and ``web/app.js`` - the same bytes the
+    transport serves - and assert the contract of each control against the route table and accepted
+    request fields of ``api/`` (D39(d)). No browser and no server are needed: the wiring is a
+    property of the delivered script.
+    """
+
+    def test_every_required_control_id_is_in_the_markup(self) -> None:
+        body = read_asset(INDEX_HTML)
+        for element_id in (
+            "get-recommendation", "accept-recommendation", "manual-stop-select",
+            "choose-first-stop", "cancel-selection", "stop-list", "recalculate",
+            "error-banner", "run-history", "run-detail",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertRegex(body, r'id="' + re.escape(element_id) + r'"')
+
+    def test_every_endpoint_keeps_its_documented_method_and_path(self) -> None:
+        """The script's own endpoint table carries the documented method and path of each call."""
+        script = read_asset(APP_JS)
+        for name, expected in DOCUMENTED_ENDPOINTS.items():
+            with self.subTest(endpoint=name):
+                block = endpoint_entry(script, name)
+                method, *path_parts = expected
+                self.assertRegex(block, r'method:\s*"' + re.escape(method) + r'"')
+                self.assertIn(path_parts[0], block)
+                for part in path_parts[1:]:
+                    self.assertIn(part, block)
+
+    def test_a_control_never_reaches_for_an_endpoint_it_does_not_own(self) -> None:
+        """Each control names its own documented endpoint, and no unexpected one."""
+        script = read_asset(APP_JS)
+        for control, endpoint in CONTROL_ENDPOINT_WIRING.items():
+            body = function_body(script, control)
+            with self.subTest(control=control):
+                self.assertIn(
+                    "ENDPOINTS." + endpoint,
+                    body,
+                    f"{control} no longer names ENDPOINTS.{endpoint}",
+                )
+                unexpected = [
+                    name for name in DOCUMENTED_ENDPOINTS
+                    if name != endpoint and ("ENDPOINTS." + name) in body
+                ]
+                self.assertEqual(
+                    unexpected,
+                    [],
+                    f"{control} reaches for endpoint(s) {unexpected} that are not its documented "
+                    f"one ({endpoint})",
+                )
+                # A control either calls the endpoint itself or hands it to the computing-state
+                # helper; both keep the endpoint in the control's own body.
+                names_endpoint = ("ENDPOINTS." + endpoint) in body
+                runs_through_helper = (
+                    "withComputation(" in body
+                    and re.search(r"\b" + re.escape(endpoint) + r"\s*,", body) is not None
+                )
+                self.assertTrue(
+                    names_endpoint or runs_through_helper,
+                    "%s neither uses ENDPOINTS.%s nor runs it through withComputation"
+                    % (control, endpoint),
+                )
+
+    def test_the_selection_bodies_carry_the_documented_mode_and_stop(self) -> None:
+        """``POST .../selection`` sends ``mode`` plus ``stop_id``, and cancel sends no body."""
+        script = read_asset(APP_JS)
+        selection = endpoint_entry(script, "selection")
+        self.assertIn('method: "POST"', selection)
+        self.assertIn("/selection", selection)
+        self.assertIn("mode:", selection)
+        self.assertIn("stop_id:", selection)
+        # The documented mode vocabulary lives in one table (D4/D6): `recommend` and `manual`.
+        self.assertIn('recommend: "recommend"', script)
+        self.assertIn('manual: "manual"', script)
+        self.assertIn("FIRST_STOP_MODES.recommend", function_body(script, "acceptRecommendation"))
+        self.assertIn("FIRST_STOP_MODES.manual", function_body(script, "chooseFirstStop"))
+        clear = endpoint_entry(script, "clearSelection")
+        self.assertIn('method: "DELETE"', clear)
+        self.assertIn("/selection", clear)
+        self.assertRegex(clear, r"body: function \(\) \{ return null; \}")
+
+    def test_the_stop_edit_body_is_a_single_documented_stop_change(self) -> None:
+        """``PUT /api/plans/{id}`` carries ``{stops:[{stop_id, enabled|priority}]}`` - one change."""
+        script = read_asset(APP_JS)
+        update = endpoint_entry(script, "updateStop")
+        self.assertIn('method: "PUT"', update)
+        self.assertIn("/api/plans/", update)
+        self.assertIn("stops: [entry]", update)
+        self.assertIn("stop_id: stopId", update)
+        self.assertIn("enabled", update)
+        self.assertIn("priority", update)
+        # The two controls that use it send exactly one of the two documented changes.
+        row = function_body(script, "stopRow")
+        self.assertIn("updateStop(stop.id, { enabled: false })", row)
+        self.assertIn("updateStop(stop.id, { enabled: true })", row)
+        self.assertIn("updateStop(stop.id, { priority:", row)
+        # No reorder/position field is ever sent: that control does not exist (D21/D39(d)).
+        for forbidden in ("input_position", "position:", "order_overrides"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, update)
+
+    def test_the_recommendation_and_optimize_calls_are_read_and_recalculate(self) -> None:
+        """``GET .../recommendation`` is a read and ``POST .../optimize`` is the recalculation."""
+        script = read_asset(APP_JS)
+        recommendation = endpoint_entry(script, "recommendation")
+        self.assertIn('method: "GET"', recommendation)
+        self.assertIn("/recommendation", recommendation)
+        optimize = endpoint_entry(script, "optimize")
+        self.assertIn('method: "POST"', optimize)
+        self.assertIn("/optimize", optimize)
+        self.assertRegex(optimize, r"body: function \(\) \{ return null; \}")
+        recalculate = function_body(script, "recalculate")
+        # Recalculate must re-read the plan (first-stop state), the history and the route.
+        for follow_up in ("refreshFromServer", "loadRuns", "reloadRouteFromServer"):
+            with self.subTest(follow_up=follow_up):
+                self.assertIn(follow_up, recalculate)
+
+    def test_every_action_refreshes_from_the_server_instead_of_editing_locally(self) -> None:
+        """No action may update a panel from its own request body (D39(d))."""
+        script = read_asset(APP_JS)
+        for action in ("applySelection", "updateStop"):
+            with self.subTest(action=action):
+                self.assertIn("refreshFromServer", function_body(script, action))
+        self.assertIn("refreshFromServer", function_body(script, "recalculate"))
+        # The refresh itself reads the plan back through the API.
+        refresh = function_body(script, "refreshFromServer")
+        self.assertIn("request(ENDPOINTS.plan", refresh)
+        self.assertIn("renderPlan(plan, document_)", refresh)
+
+    def test_no_reorder_or_drag_control_exists(self) -> None:
+        body = (read_asset(INDEX_HTML) + read_asset(APP_JS)).lower()
+        for word in REORDER_VOCABULARY:
+            with self.subTest(word=word):
+                self.assertNotIn(word, body)
+
+    def test_no_control_can_make_the_engine_apply_a_recommendation(self) -> None:
+        """A selection is always an explicit driver press carrying an explicit stop (D4/D32)."""
+        script = read_asset(APP_JS)
+        self.assertNotIn('mode: "accept"', script)
+        self.assertNotIn('"accept"', endpoint_entry(script, "selection"))
+        for control in ("acceptRecommendation", "chooseFirstStop"):
+            with self.subTest(control=control):
+                body = function_body(script, control)
+                self.assertIn("addEventListener", read_asset(APP_JS))  # bound from boot
+                self.assertIn("FIRST_STOP_MODES.", body)
+        binding = function_body(read_asset(APP_JS), "boot")
+        for control in ("accept-recommendation", "choose-first-stop", "cancel-selection"):
+            with self.subTest(control=control):
+                self.assertIn('bind("' + control + '"', binding)
+
+
+class U16RunHistoryTests(unittest.TestCase):
+    """U16: the run-history view is read-only, in the script and in the markup."""
+
+    def test_no_request_writes_to_a_run(self) -> None:
+        """No PUT/DELETE and no run-appending POST is ever issued against a run path."""
+        script = read_asset(APP_JS)
+        runs = endpoint_entry(script, "runs")
+        run = endpoint_entry(script, "run")
+        self.assertIn('/runs"', runs)          # the plan's own history path
+        self.assertIn('/api/runs/"', run)      # one stored run by its own id
+        self.assertIn("encodeURIComponent(runId)", run)
+        for name, block in (("runs", runs), ("run", run)):
+            with self.subTest(endpoint=name):
+                self.assertIn('method: "GET"', block)
+                for verb in ("PUT", "DELETE", "POST", "PATCH"):
+                    self.assertNotIn('method: "' + verb + '"', block)
+
+    def test_the_run_detail_control_only_reads_one_run(self) -> None:
+        body = function_body(read_asset(APP_JS), "showRunDetail")
+        self.assertIn("request(ENDPOINTS.run", body)
+        for verb in ("PUT", "DELETE", "POST"):
+            with self.subTest(verb=verb):
+                self.assertNotIn(verb, body)
+
+    def test_the_history_markup_offers_no_edit_delete_or_reorder_control(self) -> None:
+        body = read_asset(INDEX_HTML)
+        history = body.split('id="history-panel"', 1)[1].split("</section>", 1)[0].lower()
+        for word in HISTORY_EDIT_VOCABULARY:
+            with self.subTest(word=word):
+                self.assertNotIn(word, history)
+        self.assertIn("read-only", history)
+
+    def test_the_history_view_states_a_stored_recommendation_is_history(self) -> None:
+        """A stored recommendation must never be presented as the plan's current decision."""
+        script = read_asset(APP_JS)
+        detail = function_body(script, "renderRunDetail")
+        self.assertIn("recommendation.recommended_stop_id", detail)
+        self.assertIn("never the", detail.lower())
+        self.assertIn("recommendation.as_plan_state", detail)
+        self.assertIn("recommendation.ranked_stop_ids", detail)
+        history = function_body(script, "renderRunHistory")
+        self.assertIn("not the plan's", history.lower())
+        self.assertIn("read_only", history)
+
+    def test_the_run_detail_shows_both_baselines_and_the_after_route(self) -> None:
+        """Metrics with the user AND algorithm baselines, the after route, violations and top-K."""
+        detail = function_body(read_asset(APP_JS), "renderRunDetail")
+        for field in (
+            "metrics.after", "metrics.user_baseline", "metrics.algorithm_baseline",
+            "saved_duration_sec", "saved_distance_m", "has_committed_route", "run.top_k",
+            "run.violations", "algorithm_version", "tzdata_version",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, detail)
+        for field in ("fingerprints", "created_at", "run_kind", "status"):
+            with self.subTest(field=field):
+                self.assertIn(field, detail)
+
+
+class U16ErrorAndLoadingTests(unittest.TestCase):
+    """U16: error envelopes and the computing state are surfaced honestly."""
+
+    def test_the_error_envelope_is_read_from_the_api_response(self) -> None:
+        script = read_asset(APP_JS)
+        request = function_body(script, "request")
+        self.assertIn("payload.error", request)
+        self.assertIn("detail.code", request)
+        self.assertIn("detail.message", request)
+        self.assertIn("ApiError", request)
+        # A failing response is always an error: no 4xx/5xx becomes a returned payload.
+        self.assertIn("if (!response.ok)", request)
+
+    def test_every_action_has_a_failure_path_into_the_error_banner(self) -> None:
+        """No control and no load swallows a failure silently."""
+        script = read_asset(APP_JS)
+        for action in (
+            "getRecommendation", "acceptRecommendation", "chooseFirstStop", "cancelSelection",
+            "updateStop", "recalculate", "requestRoute", "showRunDetail", "createOrOpenDemoPlan",
+            "changePlan", "reloadRouteFromServer", "boot",
+        ):
+            with self.subTest(action=action):
+                self.assertIn("showError(", function_body(script, action))
+        # Nothing is hidden: the catch blocks never write a success message.
+        for forged_success in ("\"ok\"", '"ok"'):
+            for line in script.splitlines():
+                if ".catch(" in line and forged_success in line:
+                    self.fail(f"a catch block writes a success tone: {line.strip()}")
+
+    def test_the_documented_error_codes_carry_guidance(self) -> None:
+        script = read_asset(APP_JS)
+        for code in REQUIRED_ERROR_GUIDANCE_CODES:
+            with self.subTest(code=code):
+                self.assertIn(code + ":", script)
+        # The two the unit names explicitly: the honest refusal and the busy plan's retry guidance.
+        self.assertIn("awaiting_first_stop_choice", script)
+        self.assertIn("Retry guidance", script)
+        self.assertIn("single-flight", script)
+
+    def test_the_error_banner_is_wired_and_cleared(self) -> None:
+        markup = read_asset(INDEX_HTML)
+        self.assertRegex(markup, r'id="error-banner"[^>]*role="alert"')
+        script = read_asset(APP_JS)
+        self.assertIn('byId("error-banner")', function_body(script, "showError"))
+        self.assertIn('byId("error-banner")', function_body(script, "clearError"))
+        self.assertIn("banner.hidden = false", function_body(script, "showError"))
+        # Success paths clear the previous refusal instead of leaving a stale error on screen.
+        for action in ("getRecommendation", "recalculate", "updateStop", "acceptRecommendation"):
+            with self.subTest(action=action):
+                self.assertIn("clearError()", function_body(script, action))
+
+    def test_the_loading_state_is_wired_for_the_two_slow_requests(self) -> None:
+        """The recommendation and the recalculation show ``#loading`` (D39(e))."""
+        script = read_asset(APP_JS)
+        computation = function_body(script, "withComputation")
+        self.assertIn("setLoading(true", computation)
+        self.assertIn("setLoading(false)", computation)
+        self.assertIn("computation_seconds", script)
+        for action, endpoint in (
+            ("getRecommendation", "recommendation"), ("recalculate", "optimize")
+        ):
+            with self.subTest(action=action):
+                body = function_body(script, action)
+                self.assertIn("withComputation", body)
+                self.assertIn("ENDPOINTS." + endpoint, body)
+        # The computing state names the controls it disables while a computation is in flight.
+        loading = function_body(script, "setLoading")
+        self.assertIn("loading.hidden", loading)
+        self.assertIn("COMPUTING_CONTROLS", loading)
+        self.assertIn('"loading"', script)
+
+    def test_the_computing_state_outlives_the_follow_up_server_reads(self) -> None:
+        """`setLoading(false)` is reached only after the report chain has settled.
+
+        A recalculation's report then re-reads the route (``GET /api/plans/{id}/route``, measured in
+        seconds at the ~50-stop scale) and the run history. Clearing the computing state when the
+        request promise resolves would claim the page is idle and re-enable the plan chooser while
+        those reads are still in flight, so the served script must resolve the report promise first
+        and clear the state only inside the resolution handler (D39(d)/D39(e), D26/D32, U16
+        contracts 1 and 3).
+        """
+        script = read_asset(APP_JS)
+        computation = function_body(script, "withComputation")
+        # The report is invoked exactly once, and its promise is what the resolution handler wraps.
+        chain = re.search(
+            r"Promise\.resolve\(\s*report\(document_\)\s*\)\s*\.then\(",
+            computation,
+        )
+        self.assertIsNotNone(
+            chain, "withComputation must resolve the report promise before clearing the state"
+        )
+        invocations = [m.start() for m in re.finditer(r"report\(document_\)", computation)]
+        self.assertEqual(len(invocations), 1, "withComputation must invoke report exactly once")
+        clears = [m.start() for m in re.finditer(r"setLoading\(false\s*\)\s*;", computation)]
+        self.assertTrue(clears, "withComputation must clear the computing state somewhere")
+        # No clear may sit before the report has even been invoked.
+        self.assertFalse(
+            [index for index in clears if index < invocations[0]],
+            "setLoading(false) is reached before report is invoked at all",
+        )
+        # The clear that belongs to the success path is inside the awaited chain: the settled report
+        # result is what comes back and the clear precedes returning it.
+        resolved = computation[chain.start():]
+        self.assertIn("setLoading(false);", resolved, "the awaited chain never clears the state")
+        self.assertIn("return result;", resolved)
+        self.assertLess(
+            resolved.index("setLoading(false);"),
+            resolved.index("return result;"),
+            "the computing state must be cleared while the awaited report result is returned",
+        )
+        # The rejection handler still clears, so a failure cannot leave the page computing forever.
+        rejected = resolved[resolved.index("catch("):]
+        self.assertIn("setLoading(false);", rejected)
+        self.assertIn("throw error;", rejected)
+        # The recalculate report really is the chain that re-reads the route and the runs, so the
+        # state kept alive above is the state that covers those reads.
+        recalculate = function_body(script, "recalculate")
+        self.assertIn("reloadRouteFromServer", recalculate)
+        self.assertIn("loadRuns()", recalculate)
+
+
+class U16StateHonestyTests(unittest.TestCase):
+    """U16: what the panels show comes from the server, and every documented endpoint exists."""
+
+    def test_the_script_reads_the_u16_payload_fields(self) -> None:
+        script = read_asset(APP_JS)
+        for group, fields in READ_PAYLOAD_FIELDS.items():
+            for field in fields:
+                with self.subTest(group=group, field=field):
+                    self.assertIn(field, script, f"app.js no longer reads {group}.{field}")
+
+    def test_the_selection_state_surface_reports_mode_provenance_and_pinning(self) -> None:
+        script = read_asset(APP_JS)
+        for field in (
+            "firstStop.state", "firstStop.mode", "selected_stop_id", "selection_source", "pinned",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, script)
+        panel = function_body(script, "renderSelectionPanel")
+        self.assertIn("firstStopSentence", panel)
+
+    def test_a_stale_recommendation_is_labelled_and_cannot_be_accepted(self) -> None:
+        """After the plan changes, the recommendation in hand is stale, not current (D4/D11)."""
+        script = read_asset(APP_JS)
+        stale = function_body(script, "markRecommendationStale")
+        self.assertIn("recommendationIsStale = true", stale)
+        self.assertIn("STALE", stale)
+        self.assertIn("renderRecommendation(state.recommendation)", stale)
+        accept = function_body(script, "updateAcceptControl")
+        self.assertIn("state.recommendationIsStale", accept)
+        self.assertIn("state.computing", accept)
+        # Reading a fresh recommendation clears the stale mark.
+        self.assertIn(
+            "state.recommendationIsStale = false", function_body(script, "getRecommendation")
+        )
+        # Opening a plan drops the previous plan's recommendation entirely.
+        self.assertIn("state.recommendation = null", function_body(script, "openPlan"))
+        # The plan change reaches the stale path from the shared route reload.
+        self.assertIn("markRecommendationStale", function_body(script, "reloadRouteFromServer"))
+
+
+class U16ServerEndpointsTestCase(ServerBackedTestCase):
+    """The live half of U16: the documented endpoints the controls use, over the real transport.
+
+    The demo plan is created through the API in ``setUp``, exactly as the documented "create or open
+    the DEMO plan" step does, so the state under test is what the controls would meet in a browser.
+    """
+
+    def missing_static_root(self) -> Path:
+        """This case drives the API the controls call, so it needs no static files."""
+        return self.scratch / "no-web"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.create_demo_plan()
+
+    def test_the_endpoints_the_controls_depend_on_exist_and_behave(self) -> None:
+        """The documented methods of the endpoints the controls use, through the real transport."""
+        plan = self.get(f"/api/plans/{DEMO_PLAN_ID}").json()["data"]
+        enabled = [stop["id"] for stop in plan["stops"] if stop["enabled"]]
+        disabled = [stop["id"] for stop in plan["stops"] if not stop["enabled"]]
+
+        # GET recommendation: advisory, writes nothing.
+        recommendation = self.get(f"/api/plans/{DEMO_PLAN_ID}/recommendation")
+        self.assertEqual(recommendation.status, 200, recommendation.text)
+        payload = recommendation.json()["data"]
+        self.assertTrue(payload["advisory"])
+        self.assertFalse(payload["applied_decision"])
+        recommended = payload["recommended_stop_id"]
+
+        # POST selection with mode=recommend + the recommended stop.
+        accepted = self.post(
+            f"/api/plans/{DEMO_PLAN_ID}/selection",
+            body={"mode": "recommend", "stop_id": recommended},
+        )
+        self.assertEqual(accepted.status, 200, accepted.text)
+        selection = accepted.json()["data"]
+        self.assertEqual(selection["selection_source"], "accepted_recommendation")
+        self.assertTrue(selection["pinned"])
+        self.assertEqual(selection["state"], "first_stop_selected")
+
+        # DELETE selection: back to awaiting_first_stop_choice.
+        cleared = self.delete(f"/api/plans/{DEMO_PLAN_ID}/selection")
+        self.assertEqual(cleared.status, 200, cleared.text)
+        self.assertEqual(cleared.json()["data"]["state"], "awaiting_first_stop_choice")
+
+        # POST selection with mode=manual + a chosen enabled stop.
+        chosen = self.post(
+            f"/api/plans/{DEMO_PLAN_ID}/selection",
+            body={"mode": "manual", "stop_id": enabled[0]},
+        )
+        self.assertEqual(chosen.status, 200, chosen.text)
+        manual = chosen.json()["data"]
+        self.assertEqual(manual["selection_source"], "manual_choice")
+        self.assertEqual(manual["selected_stop_id"], enabled[0])
+
+        # PUT with enabled=false / true and with a new priority.
+        if disabled:
+            restored = self.put(
+                f"/api/plans/{DEMO_PLAN_ID}",
+                body={"stops": [{"stop_id": disabled[0], "enabled": True}]},
+            )
+            self.assertEqual(restored.status, 200, restored.text)
+        disabled_response = self.put(
+            f"/api/plans/{DEMO_PLAN_ID}",
+            body={"stops": [{"stop_id": enabled[-1], "enabled": False}]},
+        )
+        self.assertEqual(disabled_response.status, 200, disabled_response.text)
+        restored_response = self.put(
+            f"/api/plans/{DEMO_PLAN_ID}",
+            body={"stops": [{"stop_id": enabled[-1], "enabled": True}]},
+        )
+        self.assertEqual(restored_response.status, 200, restored_response.text)
+        # A priority the fixture itself reports, or 0 when the fixture stores none: either way the
+        # value sent is a plain integer, which is exactly what the UI's priority control sends.
+        reported_priorities = [
+            stop["priority"] for stop in plan["stops"] if stop["priority"] is not None
+        ]
+        new_priority = int(reported_priorities[0]) if reported_priorities else 0
+        priority = self.put(
+            f"/api/plans/{DEMO_PLAN_ID}",
+            body={"stops": [{"stop_id": enabled[0], "priority": new_priority}]},
+        )
+        self.assertEqual(priority.status, 200, priority.text)
+        stored = priority.json()["data"]
+        self.assertEqual(
+            next(stop["priority"] for stop in stored["stops"] if stop["id"] == enabled[0]),
+            new_priority,
+        )
+
+        # POST optimize: exactly one run row is appended and the history is still read-only.
+        before = self.get(f"/api/plans/{DEMO_PLAN_ID}/runs").json()
+        optimize = self.post(f"/api/plans/{DEMO_PLAN_ID}/optimize")
+        self.assertEqual(optimize.status, 201, optimize.text)
+        run = optimize.json()["data"]
+        after = self.get(f"/api/plans/{DEMO_PLAN_ID}/runs").json()
+        self.assertEqual(after["count"], before["count"] + 1)
+        self.assertTrue(after["read_only"])
+        self.assertEqual(after["data"][-1]["id"], run["id"])
+        self.assertIn("computation_seconds", optimize.json()["computation"])
+
+        # GET /api/runs/{run_id}: the read-only detail the UI renders.
+        detail = self.get(f"/api/runs/{run['id']}")
+        self.assertEqual(detail.status, 200, detail.text)
+        data = detail.json()["data"]
+        for field in ("metrics", "violations", "recommendation", "top_k", "fingerprints"):
+            with self.subTest(field=field):
+                self.assertIn(field, data)
+        self.assertIn("user_baseline", data["metrics"])
+        self.assertIn("algorithm_baseline", data["metrics"])
+        self.assertIn("after", data["metrics"])
+        # The recorded recommendation is history, never plan state.
+        self.assertFalse(data["recommendation"]["as_plan_state"])
+        # GET /api/runs/{id} exists as a read: the write verbs are refused (405).
+        for verb in ("PUT", "DELETE"):
+            with self.subTest(verb=verb):
+                refused = self.request(verb, f"/api/runs/{run['id']}")
+                self.assertEqual(refused.status, 405, refused.text)
+                self.assertEqual(refused.json()["error"]["code"], "method_not_allowed")
 
 
 class WebWorkspaceWithoutWebDirectoryTests(ServerBackedTestCase):
