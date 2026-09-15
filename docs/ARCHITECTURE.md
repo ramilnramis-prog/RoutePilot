@@ -27,8 +27,10 @@ scales** (D37).
 ## 1. Layers and the dependency rule
 
 ```
-web/      HTML/CSS/JS + Leaflet/OSM tiles        (pending, U15) -- never imported by core
-api/      transport: stdlib http.server (Stage 4, U13) -> FastAPI later -- depends on core
+web/      static HTML/CSS/JS workspace + Leaflet/OSM tiles (Stage 4 U15/U16)
+                                                       -- served as bytes, never imported by Python
+api/      transport: stdlib http.server + framework-agnostic service layer (Stage 4 U13/U14)
+                                                       -> FastAPI later -- depends on core
 storage/  SQLite repositories                    (Stage 3) -- depends on core, never the reverse
 demo/     deterministic demo dataset + synthetic matrix + demo report -- depends on core
 tools/    doctor, benchmark and developer utilities -- may inspect core, never imported by it
@@ -38,6 +40,8 @@ core/     domain model, time, engine              <-- depends on nothing but the
 The rule is one-directional: **`core/` imports only the Python standard library.** It contains no
 HTTP, no UI, no storage, no network, no vendor SDK, no Leaflet, no OSM. This is enforced by an
 automated import check in the test suite (`tests/test_core_isolation.py`), not by convention.
+`web/` is static: no Python module imports it, and it holds no business formula - every value it
+shows is rendered from an API payload unchanged.
 
 Two consequences that shape everything else:
 
@@ -112,6 +116,38 @@ storage/
     optimization_run_repository.py  append-only immutable run history (U11)
     app_settings_repository.py      the app_settings key/value store (U11)
 
+api/
+  http_server.py       the stdlib ThreadingHTTPServer transport: the route table, request parsing,
+                       response writing, static-asset serving, the pure static-path resolver and the
+                       documented error-mapping table; no business formula (Stage 4 U13/U14)
+  services.py          the framework-agnostic application layer over the repository Protocols: no
+                       HTTP type, no status code and no JSON, so a future transport can replace
+                       http_server.py without touching it (Stage 4 U13/U14)
+  serialization.py     domain -> JSON-ready payloads; the one place the API's serialisation contracts
+                       (UTC instants, integer seconds, real booleans, enum strings, fingerprints) are
+                       decided (Stage 4 U13/U14)
+  map_configuration.py the map configuration the workspace reads over the API: the approved
+                       tile_url / tile_attribution / tile_max_zoom settings plus the Leaflet library
+                       location, each with its documented default and its source (Stage 4 U15;
+                       D15/D39(c))
+  serve.py             the command-line entry point "python -m api.serve": loopback bind by default,
+                       --port / --db / --static-root / --quiet, and the gitignored default database
+                       var/routepilot.db (Stage 4 U13)
+
+web/
+  index.html           the workspace markup: the DEMO/SYNTHETIC banner, the latency notice, the plan
+                       chooser, the override controls, the map, the recommendation / alternatives /
+                       rejected candidates, the route timeline, the BEFORE vs AFTER summary and the
+                       read-only run history (Stage 4 U15/U16)
+  styles.css           the workspace stylesheet, served as-is (Stage 4 U15)
+  app.js               the workspace controller: calls the documented endpoints and renders payload
+                       values unchanged - it computes no route, metric, rank or saving
+                       (Stage 4 U15/U16)
+  map.js               the Leaflet map controller: draws START / FINISH / stops and the route order as
+                       labelled synthetic straight-line geometry from API payloads, and reports an
+                       honest notice when the library, the tiles or the configuration fail
+                       (Stage 4 U15; D15/D39(c))
+
 tools/
   doctor.py            environment health (D12)
   benchmark_optimizer.py  exhaustive first-stop benchmark over the ~30-stop demo plan, the
@@ -127,10 +163,13 @@ revoked AUTO model (D4/D32). `core/engine/optimizer/`, `core/engine/first_stop/e
 `demo/report.py` and `tools/benchmark_optimizer.py` are **Stage 2**. `storage/` (the migration runner
 and the three SQLite repositories), `core/repositories.py` (their pure Protocol ports) and
 `demo/storage_roundtrip.py` are **Stage 3** (U9–U12, D38), so storage code now exists; `core/` still
-contains none. **Stage 4 has started and its first unit is delivered (U13, D39):** the API exists
-under `api/` (the stdlib `http.server` transport, the framework-agnostic service layer, the JSON
-contracts, the error mapping and static-asset serving), while the **UI does not exist yet** - `web/`
-is **still pending** and belongs to **U15**. `core/` contains neither an API nor any UI code.
+contains none. **Stage 4 units U13–U16 are delivered** (D39): U13 is the stdlib transport, the
+framework-agnostic service layer, the JSON contracts and the error mapping, U14 the
+recommendation / selection / route / optimize / run-history endpoints with the synchronous
+single-flight contract, U15 the static `web/` workspace and U16 the override controls, the read-only
+run history and the integration guard. **U17 is this documentation and acceptance unit** and adds no
+code, test or spec file. `core/` contains **no** API, UI or storage code: the API, the workspace and
+the repositories all depend on `core/`, never the reverse.
 
 ## 3. Domain model
 
@@ -642,17 +681,33 @@ visible attribution; `core/` never references them.
 | 2 ✅ | complete-route evaluation (FINISH leg included) + deterministic optimizer (greedy seed, 2-opt/Or-opt improvement, leg cache) + **exhaustive** complete-route first-stop recommendation with top-K and rejected-candidate diagnostics + recommendation and route fingerprints + the three baselines + the complete elapsed-duration default objective with the owner's deterministic 5-key ranking (D35) + the scale decision (**~50 enabled stops is the primary MVP target**, D36) with the portfolio fixture and the ~100-stop stress benchmark + the complete-route demo narrative (U1–U6, U6b) + the exact incremental complete-route evaluator (U7) |
 | 2.2 ✅ | the **exact incremental / delta complete-route evaluator** (U7): prefix reuse from the base route's evaluated state at the move's own divergence, plus the FINISH leg, with the reference full pass kept intact as the comparison baseline and an opt-in slow equivalence gate. Same moves, same order, same accept/reject decisions, same `evaluations` ceiling - about 2.5x lower latency at the portfolio and stress scales and about 2.2x on the ~30-stop demo plan (D37) |
 | 3 ✅ | SQLite storage behind the approved schema (D38, U9–U12): `storage/sqlite/migrations/0001_init.sql` (the approved DDL, byte-unchanged) + `storage/sqlite/database.py` (connection helper, ordered and idempotent migration runner) + `core/repositories.py` (the pure Protocol ports) + `storage/sqlite/route_plan_repository.py` (plan/stop persistence, exact round-trip), `storage/sqlite/optimization_run_repository.py` (append-only immutable run history) and `storage/sqlite/app_settings_repository.py` (settings key/value store) + the end-to-end round-trip demo `python -m demo.storage_roundtrip`. No ORM, no new dependency, `core/` imports no storage module, no database file committed |
-| 4 | API transport + web UI (map, timeline panel, summary, override controls). **U13 delivered:** the `api/` transport (stdlib `http.server`), the framework-agnostic service layer, the JSON contracts, the error mapping and static-asset serving (D39). **U15 still owns `web/`** - the UI does not exist yet |
+| 4 ✅ | API transport + web workspace (D39, U13–U16): `api/http_server.py` (the stdlib `http.server` transport, the pure static-path resolver and the documented error-mapping table), `api/services.py` (the framework-agnostic service layer with per-plan single-flight) and `api/serialization.py` (the JSON contracts) plus `api/map_configuration.py` and `api/serve.py` (`python -m api.serve`, loopback by default, gitignored `var/routepilot.db`); the recommendation / selection / route / optimize / run-history endpoints; and the static workspace `web/index.html`, `web/styles.css`, `web/app.js`, `web/map.js` (override controls, read-only run history, honest map degradation). `core/` was not touched by Stage 4 |
 | 5 | reoptimization after each served stop, active-leg protection groundwork |
 
 ## 10. Explicit non-goals of the current stages
 
-Stages 0–2 deliberately contain no demo UI, no API, no geocoding, no routing
-provider, no traffic, no side-of-road logic, no active-leg handling, no LLM integration, no
-automatic commitment of a recommendation, and no candidate prefilter or approximation. **Stages 0–2
-also contained no SQLite code**; storage now exists under `storage/` (Stage 3, U9–U12, D38) as
-adapters behind the `core/repositories.py` ports, while `core/` itself still contains **no** SQLite
-code and no storage import. The exact
+Stages 0–2 contained no demo UI, no API, no geocoding, no routing provider, no traffic, no
+side-of-road logic, no active-leg handling, no LLM integration, no automatic commitment of a
+recommendation, and no candidate prefilter or approximation. **Stages 0–2 also contained no SQLite
+code**; storage now exists under `storage/` (Stage 3, U9–U12, D38), and the **API and the web
+workspace now exist** under `api/` and `web/` (Stage 4, U13–U16, D39) - both strictly outside
+`core/`. The still-forbidden list stands unchanged:
+
+- **no FastAPI and no other Python web framework**, and **no new dependency** of any kind: the
+  transport is the stdlib `http.server` and FastAPI remains a future replacement only (D1/D39(a));
+- **no npm, no bundler, no frontend framework and no build step**: `web/` is static HTML/CSS/JS
+  served by the same local server (D39(b));
+- **no real routing, geocoding or traffic provider** - every travel time and distance stays
+  DEMO/SYNTHETIC;
+- **no map vendor inside `core/`**: Leaflet and the OSM-compatible tiles live only in the browser and
+  are configured through `app_settings`, and no Leaflet asset is vendored (D15/D39(c));
+- **no drag/reorder** (D21), **no active-leg behaviour** (D24, Stage 5), and no reoptimization after a
+  served stop;
+- **no route mode other than `SMART_ROUTE`** (D19);
+- **no automatic application of a recommendation**: the engine recommends, the driver decides
+  (D4/D32), and a recommendation is never plan state.
+
+`core/` itself still contains **no** API, UI or SQLite code and never imports them. The exact
 incremental / delta evaluator is implemented (§9, U7) and changes only *how* a route is priced: it
 introduces no prefilter, no shortlist and no approximation, and the reference full pass remains the
 comparison baseline.

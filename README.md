@@ -14,7 +14,7 @@ The current product specification is [`docs/PRODUCT_SPEC_v2.md`](docs/PRODUCT_SP
 unchanged for traceability. Core product principle since v2: **RoutePilot recommends, the driver
 decides.**
 
-## Status: Stage 2 (complete-route optimizer + first-stop recommendation)
+## Status: Stage 4 (API transport + web demo workspace)
 
 Implemented so far:
 
@@ -71,11 +71,22 @@ Implemented so far:
   (`SqliteAppSettingsRepository`). `python -m demo.storage_roundtrip` saves the shipped demo plan,
   reloads it, re-runs the real engine on both, appends and reads back a real run and two settings,
   all in an in-memory database. The D38 non-negotiables hold: `core/` never imports storage, there
-  is no ORM, no database file is committed, and a recommendation is never plan state.
+  is no ORM, no database file is committed, and a recommendation is never plan state;
+- **the API and the web workspace are implemented** (Stage 4, U13–U16, D39): `api/` is a stdlib
+  `http.server` transport plus a framework-agnostic service layer (no FastAPI, no other web
+  framework, no new dependency) serving `GET /api/health`, `GET|POST /api/plans`,
+  `GET|PUT /api/plans/{id}`, the engine-facing `GET /api/plans/{id}/recommendation`,
+  `POST|DELETE /api/plans/{id}/selection`, `GET /api/plans/{id}/route`,
+  `POST /api/plans/{id}/optimize` (the only endpoint that appends a run), `GET /api/plans/{id}/runs`,
+  `GET /api/runs/{run_id}` and `GET|PUT /api/settings/{key}`; `web/` is a static HTML/CSS/JS
+  workspace served by the same process. Recommendation, selection and route are **synchronous with
+  per-plan single-flight** protection (no job queue), every number comes from `core`/`storage`, and
+  a recommendation is still never plan state (D4/D32).
 
-Not implemented yet (by design): web UI, map and routing providers, traffic, side-of-road logic and
-active-leg protection. No retention policy exists for stored runs (every run is kept, D38), and the
-~50-stop latency limitation of D36/D37 is unchanged.
+Not implemented yet (by design): real routing, geocoding and traffic providers, side-of-road logic,
+active-leg protection, drag/reorder (D21), reoptimization after a served stop, any route mode other
+than `SMART_ROUTE`, and any automatic application of a recommendation. No retention policy exists for
+stored runs (every run is kept, D38), and the ~50-stop latency limitation of D36/D37 is unchanged.
 
 **Every travel time and distance in the demo is synthetic** and is labelled as such. It is not road
 routing and must never be shown as such.
@@ -145,6 +156,105 @@ a warning:
 python -m demo.report --allow-system-tzdata
 ```
 
+## Run the demo workspace (Stage 4)
+
+`web/` is a static HTML/CSS/JS workspace served by the same local Python process: no npm, no bundler,
+no build step and no frontend framework. One command starts everything:
+
+```bash
+python -m api.serve
+```
+
+It prints the URL it bound and where it is serving from, for example:
+
+```
+RoutePilot API serving on http://127.0.0.1:8000
+  database: var\routepilot.db (schema version 1)
+  static root: <repo>\web
+  stop with Ctrl+C
+```
+
+- it binds **loopback only** by default (`--host`, default `127.0.0.1` - there is no authentication);
+- `--port` sets the TCP port (default `8000`; `--port 0` lets the operating system choose and prints
+  the chosen port);
+- `--db` sets the SQLite database (default `var/routepilot.db`, a **gitignored** path whose directory
+  is created on first start, so no database artifact can be committed); `--static-root` and `--quiet`
+  also exist;
+- **open the printed URL** - `http://127.0.0.1:8000` by default. The server root *is* the workspace:
+  `GET /` serves `index.html`.
+
+Engine endpoints need a time zone database exactly as the rest of the project does (see
+Requirements): without `tzdata`, or `PYTHONTZPATH` on an offline machine, `GET /api/health` still
+answers but the recommendation and route endpoints return `503 timezone_data_unavailable`.
+
+### Portfolio walkthrough
+
+1. **Start it**: `python -m api.serve`, then open the printed URL in a browser.
+2. **Open or create the DEMO/SYNTHETIC plan**: choose it in "Open plan", or press
+   "Create / open the DEMO plan" (the same deterministic fixture, never duplicated). The first-stop
+   state must read `awaiting_first_stop_choice` with no selected stop and no provenance.
+3. **Request a recommendation**: press "Get recommendation". A computing state appears while the
+   request is in flight and the measured `computation_seconds` is shown when it returns.
+4. **Understand that it is only a recommendation**: the advisory banner and the payload say it is
+   *not an applied decision* and *not plan state*, and nothing was applied to the plan.
+5. **Inspect the alternatives and the rejected candidates**: the ranked candidates with their
+   complete-route metrics, and the rejected candidates with the stops whose hard window their
+   complete route misses.
+6. **Accept it or choose another stop**: press "Accept the recommendation", or pick another enabled
+   stop in "First stop (manual)" and press "Use this stop".
+7. **See the selection pinned with provenance**: state `first_stop_selected`, the selected stop,
+   provenance `accepted_recommendation` or `manual_choice`, and `pinned: true` - all re-read from the
+   server.
+8. **See the full ordered route**: the route panel and the timeline show the engine's own order with
+   the per-stop ETA, waiting, service start and duration, departure, local service window and
+   lateness.
+9. **See ETA / waiting / service / FINISH**: those timeline columns plus the summary's FINISH arrival.
+10. **Compare BEFORE vs AFTER**: the driver's own input order against the RoutePilot order, with the
+    saved duration and distance the API reports and the explicit violations; the route panel reports
+    both engine fingerprints.
+11. **Disable / restore a stop or change a priority and recalculate**: each stop row's own controls
+    send `PUT /api/plans/{id}` with exactly one change, then "Recalculate" appends exactly one
+    immutable run row and re-reads the route, the selection state and the run history from the server.
+    There is deliberately no drag/reorder control (D21).
+12. **Inspect the immutable run history**: the read-only run list plus "Show run detail"; nothing in
+    the workspace edits, reorders or deletes a run, and a stored recommendation is never presented as
+    the plan's current decision.
+13. Finally read "What this build does NOT do", which is rendered from the API's own capability
+    report instead of being restated in the page.
+
+### Honesty list for this demo
+
+- All shipped data is **DEMO/SYNTHETIC**. It is not real addresses, opening hours, routing or traffic,
+  and it is labelled as such in the page (a static banner that is on screen before any script runs)
+  and in the API's plan, route, run and health payloads.
+- **`SMART_ROUTE` is the only implemented route mode.** The plan's own mode is displayed from the
+  payload and there is no route-mode control.
+- There is **no real routing, no geocoding and no traffic**: every travel time and distance comes from
+  the deterministic synthetic matrix, and the straight line drawn between stops is synthetic
+  geometry, **never road routing**.
+- The exhaustive first-stop recommendation is computed synchronously, and its **~8 s worst case at
+  the ~50-enabled-stop portfolio scale is an ACCEPTED MVP limitation** (D36/D37), reported honestly
+  as `computation_seconds` instead of hidden or papered over with a prefilter. There is no background
+  job queue; a request answers synchronously or is refused.
+- The **map needs network in the browser**: Leaflet and the OSM-compatible tiles are fetched by the
+  browser. When either is unreachable the workspace **degrades honestly** to a labelled notice plus
+  the synthetic straight-line geometry, and the timeline, route, summary, recommendation and run
+  history stay fully usable.
+- Browser layout and tiles are **human-verified**, not machine-verified here: this environment has no
+  working network, so no test loads Leaflet, fetches a tile or checks a rendered map.
+  `tests/web/test_web_executed_dom.py` executes the **served** `web/app.js` in a strict DOM stub
+  driven by payloads recorded from the real API, which is what covers rendering exceptions and
+  rendered state offline.
+
+### Layers and dependencies
+
+- `core/` imports **only the Python standard library** - no HTTP, no UI, no storage, no network.
+  Enforced by an automated check (`tests/test_core_isolation.py`, `tools/isolation_check.py`,
+  `python tools/doctor.py`).
+- `storage/`, `api/` and `demo/` depend on `core`; nothing in `core/` imports them.
+- `web/` is **static** HTML/CSS/JS served as bytes: no Python module imports it, and it contains no
+  business formula - every value it shows is rendered from an API payload unchanged.
+
 ## Layout
 
 ```
@@ -154,8 +264,13 @@ demo/     deterministic demo dataset, synthetic travel matrix, scale fixtures (p
           stops and the ~100-stop stress reference), complete-route demo report
 storage/  SQLite persistence on the approved schema: ordered migrations, the plan/stop repository,
           the immutable run-history repository and the settings repository (Stage 3)
-api/      transport layer: stdlib http.server now, FastAPI later (later)
-web/      HTML/CSS/JS frontend with Leaflet + OSM tiles (later)
+api/      HTTP transport on the stdlib http.server, the framework-agnostic service layer, the JSON
+          serialisation contracts, the map configuration and the `python -m api.serve` entry point
+          (Stage 4) — no FastAPI, no new dependency, no business formula
+web/      static demo workspace: index.html, styles.css, app.js, map.js — Leaflet + OSM-compatible
+          tiles from configured settings, map, timeline panel, recommendation/alternatives, rejected
+          candidates, BEFORE vs AFTER summary, override controls and read-only run history
+          (Stage 4) — served as-is, never imported by Python
 tools/    doctor, the exhaustive first-stop benchmark (demo / portfolio / stress) and other
           developer utilities
 docs/     PRODUCT_SPEC_v2.md (current), PRODUCT_SPEC.md (historical v1), ARCHITECTURE.md,
@@ -192,5 +307,5 @@ tests/    deterministic offline unittest suite
 | 2 ✅ | complete-route evaluation (FINISH leg included), deterministic optimizer with a measured leg cache, **exhaustive** complete-route first-stop recommendation with top-K and rejected-candidate diagnostics, recommendation and route fingerprints, the three baselines, the **complete elapsed-duration default objective with the owner's deterministic 5-key ranking** (D35), the **scale decision: ~50 enabled stops is the primary MVP target** with its portfolio fixture and the ~100-stop stress benchmark (D36), and the complete-route demo narrative (U1–U6, U6b) |
 | 2.2 ✅ | the **exact incremental / delta complete-route evaluator** (U7): prefix reuse plus the FINISH leg, identical semantics, about 2.5x lower latency at the portfolio and stress scales and about 2.2x on the ~30-stop demo plan; the reference full pass stays the comparison baseline and the opt-in slow equivalence gate proves it move by move |
 | 3 ✅ | SQLite storage behind the approved schema (D38, U9–U12): ordered idempotent migrations, plan/stop persistence with an exact round-trip, append-only immutable run history, the settings store, the pure `core/repositories.py` ports, and the `python -m demo.storage_roundtrip` end-to-end demo |
-| 4 | API + web UI (map, timeline panel, route summary, top-K, override) |
+| 4 ✅ | API + web UI: stdlib `http.server` transport behind a framework-agnostic service layer with the documented JSON contracts and error mapping (U13), the recommendation/selection/route/optimize/run-history endpoints with the synchronous single-flight contract (U14), the static `web/` workspace with map, timeline, summary and honest degradation (U15) and the override controls with the read-only run history (U16); U17 is the documentation and acceptance sweep |
 | 5 | reoptimization after each served stop + active-leg protection groundwork |

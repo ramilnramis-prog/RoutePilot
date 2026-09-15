@@ -840,6 +840,61 @@ do it.
   them, and serves `web/` (which does not exist yet) without a code change. No UI file, no new
   dependency and no `core/` change was part of U13. The remaining units stay as listed in (f) above:
   **U14–U17 pending**, with **U15** still owning `web/`.
+- **Amendment 2026-09-15 (implementation): Stage 4 units U13–U16 are delivered; U17 is the
+  documentation and acceptance unit.** The actual artifacts of the units authorized in (f) above are:
+  - **U13 - API transport, framework-agnostic service layer, JSON contracts, error mapping and
+    static-asset serving.** Artifacts: `api/http_server.py` (the stdlib `http.server` transport, the
+    route table, the pure static-path resolver and the documented error-mapping table),
+    `api/services.py` (the framework-agnostic application layer over the repository Protocols),
+    `api/serialization.py` (the JSON contracts) and `api/serve.py` (`python -m api.serve`, loopback by
+    default, gitignored default database `var/routepilot.db`). The **owner-requested test-class typo
+    correction** (`StoredPayloadValidationTests` -> `LoadValidationTests` in the Stage 3 acceptance
+    table above) **was already folded into the U13 documentation update** and is not a separate unit.
+  - **U14 - recommendation, selection, route and run-history endpoints.** Artifacts: the engine-facing
+    endpoints of `api/http_server.py` (`GET /api/plans/{id}/recommendation`, `POST|DELETE
+    /api/plans/{id}/selection`, `GET /api/plans/{id}/route`, `POST /api/plans/{id}/optimize`,
+    `GET /api/plans/{id}/runs`, `GET /api/runs/{run_id}`) with their implementations in
+    `api/services.py`, under the **synchronous single-flight contract** of (e): one bounded per-plan
+    lock (`PLAN_LOCK_TIMEOUT_SECONDS`, answering `409 plan_busy` on expiry), no GET writes anything,
+    only `optimize` appends a run row, and the measured `computation_seconds` is reported on every
+    computation. There is no job queue and no async status subsystem.
+  - **U15 - static workspace with map, timeline panel, summary and honest degradation.** Artifacts:
+    `web/index.html`, `web/styles.css`, `web/app.js` and `web/map.js` (vanilla HTML/CSS/JS: no
+    framework, no npm, no bundler, no build step), plus `api/map_configuration.py`, which resolves the
+    approved tile settings with documented defaults and their `source` instead of hardcoding a vendor
+    URL in the markup. Leaflet / tile failure reaches an honest notice while the non-map workspace
+    stays usable, and the drawn geometry is labelled synthetic straight-line, never road routing.
+  - **U16 - override controls, read-only run history and the integration.** Artifacts: the approved
+    MVP controls of (d) in `web/app.js` (accept the recommendation, manual first-stop choice, cancel /
+    unpin, disable / restore, change priority, recalculate), the read-only run-history view, and the
+    end-to-end integration plus the **executed-DOM guard**.
+  - **Where the acceptance evidence lives:** `tests/api/` (transport, contracts, service layer, static
+    paths, serve CLI), `tests/web/test_web_workspace.py` (the served assets, the control wiring, the
+    honesty strings and the manual visual checklist of the portfolio flow) and
+    `tests/web/test_web_executed_dom.py` (the executed-DOM guard). The U17 acceptance sweep observed:
+    `python -m unittest discover -s tests -t .` -> `Ran 1052 tests in 499.463s` / `OK (skipped=17)`;
+    `python -m compileall -q core demo tools tests api` clean; `python tools/doctor.py` OK with the
+    accepted `tzdata` warning; `node --check` clean for `web/app.js` and `web/map.js`;
+    `git diff --stat -- docs/PRODUCT_SPEC.md docs/PRODUCT_SPEC_v2.md` empty; and a live
+    `python -m api.serve` serving `/`, `styles.css`, `app.js` and `map.js` with all 29 required element
+    ids present, the advisory recommendation payload (2 s measured at the 31-enabled-stop demo scale),
+    a pinned `accepted_recommendation` selection, the committed route with both fingerprints and one
+    appended run.
+  - **Recorded honestly:** this note supersedes the "U14–U17 pending" state of the 2026-09-14
+    amendment above, which is kept unrewritten as the dated record of what was true then. The **U16
+    Builder was interrupted by the harness after writing its changes**, and its call is **counted
+    against the Stage 4 budget** of (f). The recovery review - executing the served script inside a
+    strict DOM stub - found **two real defects**: a browser-breaking string passed to `appendChild` in
+    the recommendation renderer (pre-existing from U15) and a first-stop state that was not rebuilt
+    when the selection changed. Both are fixed and are now guarded by
+    `tests/web/test_web_executed_dom.py`.
+  - **Not claimed:** the tile map was **not visually verified** here - this machine has no working
+    network, so no test loads Leaflet or fetches a tile; browser layout and tiles stay
+    human-verified, and the offline executed-DOM harness covers rendering exceptions and rendered
+    state only. The **~8 s worst-case recommendation latency at the ~50-stop scale remains the
+    accepted MVP limitation** of (e), unchanged by Stage 4. U17 itself changed **no code, test or spec
+    file**: it is documentation plus the acceptance sweep, and `docs/PRODUCT_SPEC.md` /
+    `docs/PRODUCT_SPEC_v2.md` stay byte-unchanged.
 - Status: `approved`. Spec: §15, §19, §23, §25, §26, §36. Owner authorization: Stage 4, units U13–U17.
 
 ---
