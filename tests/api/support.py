@@ -7,9 +7,15 @@ no external network and no external service.
 Where the database lives
 ------------------------
 
-Each test gets its own SQLite **file**, opened from the gitignored ``var/`` directory through the
-same helper the server uses and deleted at the end of the test class, so two tests can never share a
-database.
+Each test gets its own SQLite **file**, opened under the suite-owned scratch root
+``var/tests/`` (``tests.SUITE_SCRATCH_ROOT``) through the same helper the server uses and deleted at
+the end of the test class, so two tests can never share a database.
+
+That scratch root is a **subdirectory of** the application's runtime data directory ``var/``, never
+the runtime directory itself: ``var/`` belongs to the running ``python -m api.serve`` process, which
+writes its database and its append-only run history there. The suite may only create and remove
+``var/tests/``; :func:`cleanup_scratch_root` is structurally incapable of removing ``var/`` or any
+foreign file inside it (D40).
 
 An in-process ``file:...?mode=memory&cache=shared`` URI is supported by
 :func:`storage.sqlite.database.connect` (it enables URI semantics for a ``file:`` identifier only),
@@ -24,6 +30,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import shutil
 import threading
 import unittest
@@ -33,24 +40,44 @@ import uuid
 from dataclasses import dataclass
 from datetime import time
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any
 
 from api.http_server import create_server
 from api.services import ApiServices
+from tests import RUNTIME_DATA_DIR, SUITE_SCRATCH_ROOT
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: Where the suite's throwaway databases live: inside the repository (the sandbox does not reliably
-#: create directories under ``%TEMP%``) but inside the gitignored ``var/`` directory, and removed
-#: again in ``tearDownClass``.
-SCRATCH_ROOT = REPO_ROOT / "var"
+#: Where the suite's throwaway databases live: the suite-owned ``tests`` marker directory directly
+#: under the gitignored runtime data directory ``var/`` (``tests.SUITE_SCRATCH_ROOT``), removed again
+#: in ``tearDownClass``. It is deliberately a **descendant** of ``var/`` and never ``var/`` itself,
+#: so a sweep can only ever delete suite-owned scratch (D40).
+SCRATCH_ROOT = SUITE_SCRATCH_ROOT
+
+#: The name of the suite-owned marker directory directly under the runtime data directory.
+_SCRATCH_MARKER_NAME = "tests"
+
+#: Windows' transient "another handle still has this file open" errors: ERROR_SHARING_VIOLATION and
+#: ERROR_LOCK_VIOLATION. A scratch sweep retries only these, and only for this long, before failing
+#: loudly. A plain access-denied or any other error is never retried and never hidden.
+_WINDOWS_SHARING_VIOLATIONS = frozenset({32, 33})
+_SCRATCH_RETRY_SECONDS = 5.0
 
 _DB_COUNTER = itertools.count(1)
 _DB_LOCK = threading.Lock()
 
 
+class ScratchRootError(RuntimeError):
+    """The scratch sweep was pointed at something the suite does not own.
+
+    Raised instead of deleting anything, so a misconfigured or sabotaged scratch root fails loudly
+    rather than destroying the application's runtime data directory (D40).
+    """
+
+
 def new_scratch_directory(prefix: str = "api-tests") -> Path:
-    """A fresh scratch directory under the gitignored ``var/`` tree."""
+    """A fresh scratch directory under the suite-owned ``var/tests/`` tree."""
     with _DB_LOCK:
         index = next(_DB_COUNTER)
     directory = SCRATCH_ROOT / f"{prefix}-{index}-{uuid.uuid4().hex[:8]}"
@@ -63,14 +90,85 @@ def new_database_file(directory: Path) -> str:
     return str(directory / f"routepilot-{uuid.uuid4().hex[:12]}.db")
 
 
-def cleanup_scratch_root() -> None:
-    """Remove the whole scratch tree.
+def _absolute(path: Path) -> Path:
+    """``path`` resolved to an absolute, symlink-free path for structural comparison."""
+    return Path(os.path.abspath(path))
+
+
+def _scratch_removal_target(runtime_dir: Path) -> Path:
+    """The single path a scratch sweep may remove: ``<runtime_dir>/tests``, proven to be owned.
+
+    ``runtime_dir`` is injectable so a regression guard can point the sweep at an isolated stand-in.
+    The target is **always** the suite marker directory directly under that runtime directory and
+    never the runtime directory itself, and the check refuses everything else - including a runtime
+    directory that is the repository root, or that resolves outside the runtime data directory -
+    before any deletion happens.
+    """
+    runtime = _absolute(runtime_dir)
+    target = _absolute(runtime / _SCRATCH_MARKER_NAME)
+    if target.name != _SCRATCH_MARKER_NAME or target.parent != runtime:
+        raise ScratchRootError(
+            f"refusing to remove {target}: the suite may only remove the "
+            f"{_SCRATCH_MARKER_NAME!r} marker directory directly under a runtime data directory"
+        )
+    if target == runtime:
+        raise ScratchRootError(f"refusing to remove the runtime data directory itself: {target}")
+    if runtime == REPO_ROOT or runtime == REPO_ROOT.parent:
+        raise ScratchRootError(f"refusing to treat {runtime} as the runtime data directory")
+    try:
+        runtime.relative_to(RUNTIME_DATA_DIR)
+    except ValueError as error:
+        raise ScratchRootError(
+            f"refusing to remove {target}: {runtime} is outside the runtime data directory "
+            f"{RUNTIME_DATA_DIR}"
+        ) from error
+    return target
+
+
+def _remove_tree(target: Path) -> None:
+    """Remove ``target``, retrying briefly while Windows still holds a scratch file open.
+
+    A ``tearDownModule`` sweep can run while the last request's connection is still being closed, and
+    Windows then refuses to unlink that scratch database (``WinError 32``) - which is exactly the
+    error ``ignore_errors=True`` used to swallow. Only that transient sharing violation is retried,
+    and only for a bounded deadline; anything else, and a lock that outlasts the deadline, propagates
+    so the suite fails loudly instead of leaving an artifact behind (D40).
+    """
+    deadline = monotonic() + _SCRATCH_RETRY_SECONDS
+    delay = 0.05
+    while True:
+        try:
+            shutil.rmtree(target)
+            return
+        except OSError as error:
+            if not _is_transient_sharing_violation(error) or monotonic() >= deadline:
+                raise
+            sleep(delay)
+            delay = min(delay * 2, 0.5)
+
+
+def _is_transient_sharing_violation(error: OSError) -> bool:
+    """Whether ``error`` is Windows refusing to unlink a file another handle still holds open."""
+    return getattr(error, "winerror", None) in _WINDOWS_SHARING_VIOLATIONS
+
+
+def cleanup_scratch_root(runtime_dir: Path | None = None) -> None:
+    """Remove the suite-owned scratch subtree ``<runtime_dir>/tests`` and nothing else.
 
     Every test class removes its own directory again; this is the belt-and-braces sweep that also
     covers a directory left behind by a killed run, so the suite can prove it leaves no artifact.
-    Attach it as ``tearDownModule`` in a module to run it after that module finishes.
+    Attach it as ``tearDownModule`` in a module to run it after that module finishes - the
+    no-argument call sweeps ``tests.RUNTIME_DATA_DIR``.
+
+    The application's runtime data directory is **never** a deletion target: the sweep removes only
+    the ``tests`` marker directory directly under it, and a target that is not provably that
+    directory raises :class:`ScratchRootError` instead of deleting anything (D40). ``runtime_dir``
+    exists so a regression guard can point the sweep at an isolated stand-in runtime directory.
     """
-    shutil.rmtree(SCRATCH_ROOT, ignore_errors=True)
+    target = _scratch_removal_target(RUNTIME_DATA_DIR if runtime_dir is None else runtime_dir)
+    if not target.is_dir():
+        return
+    _remove_tree(target)
 
 
 # --------------------------------------------------------------------------- #

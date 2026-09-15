@@ -7,7 +7,7 @@ and unchanged. Precedence (v2 section 37): the current specification plus explic
 decisions in this registry control future implementation; this registry records *how* we decided to
 do it.
 
-- Registry revision: **D1–D39**, approved 2026-09-11 (Stage 0, extended during Stage 1; D4–D11
+- Registry revision: **D1–D40**, approved 2026-09-11 (Stage 0, extended during Stage 1; D4–D11
   amended when the AUTO semantics were revoked; D5/D9/D16 aligned with v2 sections 5, 14 and 23;
   D33 added for `input_position`; D34 records the owner-accepted interim ~100-stop latency and is
   amended by D36, which moves the performance target to ~50 enabled stops; D35 settles the default
@@ -17,7 +17,9 @@ do it.
   incremental-evaluation performance follow-up that landed as U7; D38 records the owner's approval of
   `docs/STORAGE_SCHEMA.md` as the Stage 3 implementation schema and the Stage 3 authorization as units
   U8–U12, and amends D14; D39 records the owner's Stage 4 authorization of the API transport and web
-  UI as units U13–U17).
+  UI as units U13–U17; D40 records hotfix H2 — the suite's scratch root is `var/tests/`, never the
+  application's runtime data directory `var/`, and the D38 no-committed-database guarantee is
+  preserved).
 - Status values: `approved` (settled), `amended` (settled with a recorded change), `deferred` (recorded, not implemented).
 
 ---
@@ -896,6 +898,69 @@ do it.
     file**: it is documentation plus the acceptance sweep, and `docs/PRODUCT_SPEC.md` /
     `docs/PRODUCT_SPEC_v2.md` stay byte-unchanged.
 - Status: `approved`. Spec: §15, §19, §23, §25, §26, §36. Owner authorization: Stage 4, units U13–U17.
+
+---
+
+## D40 — test-suite scratch location vs the runtime data directory (hotfix H2)
+
+> **Hotfix record.** This decision records a confirmed, independently reproduced defect and the fix
+> for it: the test suite deleted the application's runtime data directory. It changes no product
+> semantics, no API contract and no storage behaviour; it amends nothing that preceded it, and the
+> D38 guarantee is **preserved**, not weakened.
+
+- **`var/` is the application's runtime data directory.** It is gitignored and it is where
+  `python -m api.serve` writes: `api.services.DEFAULT_DB_PATH` is `var/routepilot.db` (plans, the
+  driver's first-stop selection and its provenance, and the **append-only run history** the product
+  documents as immutable audit, D38). It belongs to the running application, not to the test suite.
+- **The defect.** `tests/api/support.py` set `SCRATCH_ROOT = REPO_ROOT / "var"` - the suite's scratch
+  root **was** the runtime data directory - and `cleanup_scratch_root()` called
+  `shutil.rmtree(SCRATCH_ROOT, ignore_errors=True)`. It was wired as `tearDownModule` in ten modules,
+  so a full-suite run deleted the whole `var/` tree, including a live server's `var/routepilot.db`.
+  Because the server opens one connection per request, every subsequent request then answered
+  `HTTP 500 internal_error` / `OperationalError: unable to open database file`, and the local audit
+  history was lost. A second suite path (`var/storage-identifier-tests`) lived in the runtime
+  directory for the same reason.
+- **The suite owns only `var/tests/`.** `tests/__init__.py` defines the convention once:
+  `RUNTIME_DATA_DIR = REPO_ROOT / "var"` (the application's directory, which the suite must never own
+  or delete) and `SUITE_SCRATCH_ROOT = RUNTIME_DATA_DIR / "tests"` (the only location the suite may
+  create and remove). `tests/api/support.py`'s `SCRATCH_ROOT` and
+  `tests/storage/test_migrations.py`'s identifier scratch both live under that one root, so a single
+  invariant covers every suite-owned path.
+- **The suite is structurally incapable of deleting the runtime directory or a foreign file in it.**
+  `cleanup_scratch_root(runtime_dir=None)` may remove only the `tests` marker directory directly under
+  the runtime data directory: the deletion target is **always** `<runtime>/tests` and **never**
+  `<runtime>`, and an ownership check raises a dedicated `ScratchRootError` (defined in
+  `tests/api/support.py`) instead of deleting anything when the target is not that marker directory,
+  when it resolves to the runtime directory, to the repository root, or to a path outside the runtime
+  data directory. `runtime_dir` is injectable so a guard can point the sweep at an isolated stand-in;
+  the no-argument call is still the `tearDownModule` sweep. No `ignore_errors=True` hides a refusal:
+  a transient Windows sharing violation (`WinError 32`/`33`, another handle still closing the last
+  scratch file) is retried for a bounded 5 s, while every other error - and a lock that outlasts the
+  bound - propagates. The sweep is therefore never a silent skip.
+- **The D38 guarantee is preserved and how the check now proves it.**
+  `tests/storage/test_migrations.py::test_no_database_artifacts_in_the_repository` still forbids every
+  database artifact in the repository, and now states the guarantee in one sentence: *a database file
+  may exist locally only under an ignored path and can never be committed.* For every database-shaped
+  path the scan finds (`*.db`, `*.sqlite`, `*.sqlite3`, `*.db-wal`, `*.db-shm`, `*.db-journal`): a path
+  **tracked** by git is a **failure**; a path that is untracked and **not ignored** is a **failure**; a
+  path that is untracked and **ignored** is permitted, and only because it is **provably** ignored -
+  asserted with `git check-ignore`, so the allowance is earned and not assumed (neither the tree nor
+  `var/` is skipped blindly). A database path inside the runtime data directory must additionally be
+  ignored. The existing before/after `git status --porcelain` check that a migration adds no new
+  working-tree entry is unchanged.
+- **Regression guards.** `tests/test_runtime_data_dir_safety.py` proves the behaviour: a sentinel
+  stand-in runtime directory (a foreign `routepilot.db` plus a `tests/` subtree) survives a sweep
+  pointed at it while its `tests/` subtree is removed; `SCRATCH_ROOT` is neither equal to nor an
+  ancestor of the runtime directory derived from the product constant
+  (`Path(api.services.DEFAULT_DB_PATH).parent`, read-only) and is a proper descendant of it; and the
+  sweep raises `ScratchRootError` - deleting nothing - for the runtime root, the repository root and
+  any path outside the runtime data directory. The guards were **seen failing** against the pre-fix
+  code (sentinel destroyed) before being seen passing against the fix. One pre-existing test-hygiene
+  leak had to be closed for the sweep to be strict at all: `test_http_server.py`'s
+  "one connection per request" case opened a second connection and never closed it, and that open
+  handle is what `ignore_errors=True` had been hiding by leaving a locked scratch database behind.
+  No product file changes: `api/`, `core/`, `storage/` and `web/` are byte-unchanged.
+- Status: `approved`. Spec: §26, §27, §36. Amends nothing; preserves D38.
 
 ---
 

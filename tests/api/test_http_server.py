@@ -39,12 +39,17 @@ class ServerLifecycleTests(ServerBackedTestCase):
         self.assertEqual(self.services.state.schema_version, SCHEMA_VERSION)
 
     def test_every_request_gets_its_own_connection_with_foreign_keys_on(self) -> None:
-        connection = self.services.state.connect()
+        first = self.services.state.connect()
+        second = self.services.state.connect()
         try:
-            self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+            self.assertEqual(first.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+            # A second connection is a distinct object: a sqlite3 connection is not thread-safe, so
+            # the transport opens one per request. Both are closed here, because an open handle on a
+            # file-backed database keeps the scratch file locked on Windows (D40).
+            self.assertIsNot(first, second)
         finally:
-            connection.close()
-        self.assertIsNot(connection, self.services.state.connect())
+            first.close()
+            second.close()
 
 
 class HealthTests(ServerBackedTestCase):

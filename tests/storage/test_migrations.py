@@ -5,7 +5,10 @@ names, constraint violations) instead of being read back from ``docs/STORAGE_SCH
 test fails if the DDL and the approved schema drift apart.
 
 Every database here is ``:memory:`` - the sandbox has no usable temporary-directory facility - so
-the suite cannot create a scratch directory or a database file in the repository.
+the suite cannot create a scratch directory or a database file in the repository. The one file-backed
+case (the ordinary-path identifier check) uses the suite-owned scratch root ``var/tests/``, a
+subdirectory of the application's runtime data directory and never the runtime directory itself
+(D40).
 """
 
 from __future__ import annotations
@@ -31,8 +34,12 @@ from storage.sqlite.database import (
     plan_migrations,
     utc_now_iso,
 )
+from tests import RUNTIME_DATA_DIR, SUITE_SCRATCH_ROOT
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: The patterns a database artifact can appear under; one definition, used by the cleanliness checks.
+DATABASE_ARTIFACT_PATTERNS = ("*.db", "*.sqlite", "*.sqlite3", "*.db-wal", "*.db-shm", "*.db-journal")
 
 #: Absolute timestamps are UTC ISO-8601 with a trailing ``Z`` (schema section 1).
 UTC_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -710,7 +717,7 @@ class SqliteIdentifierTests(unittest.TestCase):
 
     def test_an_ordinary_file_identifier_still_uses_a_real_file(self) -> None:
         """Only a ``file:`` identifier gets URI semantics; a path is still opened as a path."""
-        scratch = REPO_ROOT / "var" / "storage-identifier-tests"
+        scratch = SUITE_SCRATCH_ROOT / "storage-identifier-tests"
         scratch.mkdir(parents=True, exist_ok=True)
         self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
         target = scratch / "routepilot.db"
@@ -733,6 +740,45 @@ class SqliteIdentifierTests(unittest.TestCase):
             connect("C:\\routepilot-does-not-exist\\nested\\routepilot.db")
 
 
+# --------------------------------------------------------------------------- #
+# git-visible cleanliness helpers (D38 preserved, D40)
+# --------------------------------------------------------------------------- #
+def _repository_relative(path: Path) -> str:
+    """``path`` as a POSIX-style path relative to the repository root (git's own spelling)."""
+    return str(Path(path).resolve().relative_to(REPO_ROOT)).replace("\\", "/")
+
+
+def _git(*arguments: str) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ["git", "-C", str(REPO_ROOT), *arguments], capture_output=True, check=False
+    )
+
+
+def _database_artifacts() -> list[str]:
+    """Every database-shaped path in the repository, as repo-relative POSIX paths, sorted."""
+    found: list[str] = []
+    for pattern in DATABASE_ARTIFACT_PATTERNS:
+        for path in REPO_ROOT.rglob(pattern):
+            found.append(str(path.relative_to(REPO_ROOT)).replace("\\", "/"))
+    return sorted(found)
+
+
+def _is_tracked(relative: str) -> bool:
+    """Whether git tracks ``relative`` (``git ls-files`` exited 0 and named the path)."""
+    completed = _git("ls-files", "--error-unmatch", "--", relative)
+    return completed.returncode == 0 and completed.stdout.decode("utf-8", "replace").strip() != ""
+
+
+def _is_ignored(relative: str) -> bool:
+    """Whether git **proves** ``relative`` ignored: ``git check-ignore`` exits 0 and names it.
+
+    Existence is deliberately not required - ``git check-ignore`` answers for a path that is not on
+    disk yet, which is what lets the allowance be asserted before any scratch file is created.
+    """
+    completed = _git("check-ignore", "--quiet", "--no-index", "--", relative)
+    return completed.returncode == 0
+
+
 class RepositoryCleanlinessTests(unittest.TestCase):
     """The suite must not leave a database file or a dirty working tree behind."""
 
@@ -750,12 +796,38 @@ class RepositoryCleanlinessTests(unittest.TestCase):
         ]
 
     def test_no_database_artifacts_in_the_repository(self) -> None:
-        patterns = ("*.db", "*.sqlite", "*.sqlite3", "*.db-wal", "*.db-shm", "*.db-journal")
-        found: list[str] = []
-        for pattern in patterns:
-            for path in REPO_ROOT.rglob(pattern):
-                found.append(str(path.relative_to(REPO_ROOT)))
-        self.assertEqual(found, [], msg="database artifacts must never be written to the repo")
+        """A database file may exist locally only under an ignored path and can never be committed.
+
+        The D38 guarantee is preserved exactly: for every database-shaped path the scan finds, a path
+        **tracked** by git is a failure and an untracked path that is **not ignored** is a failure,
+        so no database artifact can ever be committed. An untracked path that **is ignored** is
+        permitted, and the permission is **earned** rather than assumed: it is asserted with
+        ``git check-ignore``, never granted by ignoring a whole tree or by blindly skipping ``var/``
+        (D40).
+        """
+        found = _database_artifacts()
+        permitted: list[str] = []
+        for relative in found:
+            ignored = _is_ignored(relative)
+            self.assertFalse(
+                _is_tracked(relative), msg=f"a database artifact is tracked by git: {relative}"
+            )
+            self.assertTrue(
+                ignored,
+                msg=f"untracked database artifact {relative} is not ignored, so it could be committed",
+            )
+            permitted.append(relative)
+        self.assertEqual(
+            [path for path in permitted if _is_ignored(path)],
+            permitted,
+            msg="every database artifact left in the tree must be provably gitignored",
+        )
+        # The allowance for the runtime data directory is earned the same way: a database path inside
+        # it must be ignored, because that is the only reason a live server's data may sit here.
+        self.assertTrue(
+            _is_ignored(_repository_relative(RUNTIME_DATA_DIR / "routepilot.db")),
+            msg="a database path inside the runtime data directory is not ignored by git",
+        )
 
     def test_memory_migration_creates_no_file(self) -> None:
         connection = connect(":memory:")
