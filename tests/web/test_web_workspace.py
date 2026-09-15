@@ -1813,12 +1813,19 @@ class MapPresentationTests(unittest.TestCase):
         selected = styles.split(".routepilot-marker .marker-selected {", 1)[1].split("}", 1)[0]
         self.assertNotEqual(recommended, selected, "the advice and the driver's decision must differ")
         self.assertIn("dashed", recommended)
-        self.assertIn("var(--accent-strong)", selected)
+        self.assertIn("var(--accent-route-strong)", selected)
+        # ...and the difference must be the treatment, not just the colour: the recommendation is the
+        # dashed advisory marker and the driver's own selection is a SOLID one. Without this, a dashed
+        # selection (or a dashed combined rule) would still satisfy every assertion above.
+        self.assertNotIn("dashed", selected,
+                         "the driver's selection is a solid marker, not the dashed advisory marker")
         # The same stop can be both only when the driver accepted the recommendation, and the
         # combined state is styled as the driver's selection, which is what actually happened.
         self.assertIn(".routepilot-marker .marker-recommended.marker-selected {", styles)
         combined = styles.split(".routepilot-marker .marker-recommended.marker-selected {", 1)[1]
-        self.assertIn("var(--accent-strong)", combined.split("}", 1)[0])
+        self.assertIn("var(--accent-route-strong)", combined.split("}", 1)[0])
+        self.assertNotIn("dashed", combined.split("}", 1)[0],
+                         "the combined state is the driver's decision, so it stays solid")
 
     def test_the_fit_bounds_survives_over_the_drawn_points_only(self) -> None:
         body = function_body(read_asset(MAP_JS), "drawRoute")

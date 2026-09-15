@@ -4,39 +4,200 @@
   Plain CSS, no framework, no preprocessor, no build step and no new dependency. Served as-is by the
   stdlib transport (api/http_server.py) from web/styles.css.
 
-  The visual job of this file is to make the workspace read like a product dashboard - a clear
-  hierarchy of header, map, decision card, KPI strip, route card and collapsed detail sections -
+  The visual job of this file is to make the workspace read like a product - a clear hierarchy of
+  header, map, decision card, before/after result strip, route card and collapsed detail sections -
   while keeping the honesty surfaces impossible to miss: the compact DEMO/SYNTHETIC badge, the
   advisory notice, the latency/loading state, the map notice and the "what this build does NOT do"
   list. Nothing here carries data or meaning that JavaScript does not supply.
+
+  ---------------------------------------------------------------------------------------------
+  DESIGN TOKENS (tier 1-3)
+  ---------------------------------------------------------------------------------------------
+
+  Colour is semantic, not decorative. One small palette carries the whole product:
+
+    brand        deep navy/indigo  - RoutePilot itself: the wordmark, the primary call to action,
+                                     the default disclosure control.
+    route        blue/cyan         - the route, the map and navigation: the driver's own decision,
+                                     the selected first stop, active controls.
+    recommend    violet/indigo     - a RoutePilot recommendation: ADVISORY ONLY, never applied.
+    success      green             - a positive optimization result and the SAVED metric.
+    warning      warm amber        - warnings and the DEMO/SYNTHETIC limitation, nothing else.
+    danger       red               - a genuine error or a destructive state, nothing else.
+
+  The three tiers:
+
+    tier 1  raw palette ramps (--navy-*, --blue-*, --violet-*, --green-*, --amber-*, --red-*,
+            --slate-*). Nothing outside this block may use them;
+    tier 2  semantic tokens (--brand-*, --accent-route-*, --recommend-*, --success-*, --warning-*,
+            --danger-*, --surface-*, --text-*, --border-*) - every rule in this file uses these;
+    tier 3  legacy aliases (--ink, --line, --accent, --ok-*, --warn-*, --alert-*, --synthetic,
+            --page, --surface-alt) kept working for anything that still names them. Each one points
+            at exactly one tier-2 token, so there is one palette and no second competing one.
+
+  Radius, shadow and spacing are tokens too (--radius-*, --shadow-*, --space-*), so the card
+  rhythm is consistent rather than hand-tuned per rule.
 */
 
 :root {
-  --ink: #16202b;
-  --ink-soft: #4a5a6a;
-  --ink-faint: #7b8894;
-  --line: #d3dae3;
-  --line-soft: #e6ebf1;
-  --surface: #ffffff;
-  --surface-alt: #f4f7fa;
-  --page: #eef2f6;
-  --accent: #14507d;
-  --accent-strong: #103f63;
-  --accent-soft: #e3edf6;
-  --warn-bg: #fdf3e3;
-  --warn-line: #e0a854;
-  --warn-ink: #7a4c05;
-  --alert-bg: #fdecea;
-  --alert-line: #d9534f;
-  --alert-ink: #8b2420;
-  --ok-bg: #e8f5ec;
-  --ok-line: #4b9e68;
-  --ok-ink: #23603a;
-  --synthetic: #6b4bb5;
+  /* -- tier 1: palette ramps (not used directly outside this block) ------------------------- */
+  --navy-700: #1d2b5c;
+  --navy-800: #16224a;
+  --navy-900: #101a3a;
+  --blue-50: #eff6fd;
+  --blue-100: #d9e9fa;
+  --blue-200: #b6d4f2;
+  --blue-500: #1f6fb8;
+  --blue-600: #17609f;
+  --blue-700: #124f85;
+  --violet-50: #f3effd;
+  --violet-100: #e7dffb;
+  --violet-300: #c4b0ef;
+  --violet-500: #6a4cbf;
+  --violet-600: #573c96;
+  --green-50: #eaf6ee;
+  --green-100: #d3ecdb;
+  --green-300: #8fc9a2;
+  --green-500: #2f8a52;
+  --green-600: #246f41;
+  --green-700: #1d5a35;
+  --amber-50: #fdf4e5;
+  --amber-100: #f9e7c6;
+  --amber-300: #e6bb72;
+  --amber-600: #a96806;
+  --amber-700: #8a5405;
+  --red-50: #fdeeed;
+  --red-100: #f9d9d7;
+  --red-300: #e9a6a2;
+  --red-600: #c0403c;
+  --red-700: #9d312d;
+  --slate-25: #fafbfd;
+  --slate-50: #f4f7fa;
+  --slate-100: #eaeff5;
+  --slate-200: #dde4ec;
+  --slate-300: #c8d2de;
+  --slate-400: #8e9caa;
+  --slate-500: #66758a;
+  --slate-600: #4b5b6f;
+  --slate-700: #2b3a4d;
+  --white: #ffffff;
+
+  /* -- tier 2: semantic tokens -------------------------------------------------------------- */
+  /* brand */
+  --brand: var(--navy-800);
+  --brand-strong: var(--navy-900);
+  --brand-soft: var(--blue-50);
+
+  /* route / map / navigation */
+  --accent-route: var(--blue-600);
+  --accent-route-strong: var(--blue-700);
+  --accent-route-soft: var(--blue-100);
+
+  /* RoutePilot recommendation: advisory only, never applied */
+  --recommend: var(--violet-500);
+  --recommend-strong: var(--violet-600);
+  --recommend-soft: var(--violet-50);
+
+  /* positive optimization result and saved metrics */
+  --success: var(--green-500);
+  --success-strong: var(--green-700);
+  --success-soft: var(--green-50);
+
+  /* warnings and the DEMO/SYNTHETIC limitation only */
+  --warning: var(--amber-600);
+  --warning-strong: var(--amber-700);
+  --warning-soft: var(--amber-50);
+
+  /* genuine errors and destructive states only */
+  --danger: var(--red-600);
+  --danger-strong: var(--red-700);
+  --danger-soft: var(--red-50);
+
+  /* surfaces */
+  --surface: var(--white);
+  --surface-elevated: var(--white);
+  --surface-sunken: var(--slate-50);
+  --surface-subtle: var(--slate-25);
+
+  /* borders */
+  --border: var(--slate-300);
+  --border-soft: var(--slate-200);
+  --border-faint: var(--slate-100);
+
+  /* text */
+  --text: var(--slate-700);
+  --text-muted: var(--slate-500);
+  --text-faint: var(--slate-400);
+
+  /* radius / elevation / spacing / rhythm */
+  --radius-lg: 16px;
   --radius: 12px;
   --radius-sm: 8px;
-  --shadow: 0 1px 2px rgba(22, 32, 43, 0.06), 0 6px 18px rgba(22, 32, 43, 0.05);
+  --radius-pill: 999px;
+  --shadow-sm: 0 1px 2px rgba(16, 26, 58, 0.06);
+  --shadow: 0 1px 2px rgba(16, 26, 58, 0.06), 0 6px 16px rgba(16, 26, 58, 0.055);
+  --shadow-strong: 0 2px 6px rgba(16, 26, 58, 0.09), 0 14px 30px rgba(16, 26, 58, 0.09);
+  /* Marker elevation: the navy-black shadow under a stop glyph and under the route-order badge. */
+  --shadow-subtle: 0 1px 2px rgba(16, 26, 58, 0.14);
+  --shadow-badge: 0 1px 3px rgba(16, 26, 58, 0.32);
+  --focus-ring: 0 0 0 3px var(--blue-200);
+
+  /* -- tier 2: on-brand washes and overlays ------------------------------------------------ */
+  /*
+    The translucent layers the product paints over its own surfaces, kept here so no component rule
+    carries a raw colour. The brand wash is the route-blue ramp over the navy topbar; the neutral
+    white overlays are the brand mark and the dark-band hairlines. The wash is derived from the
+    token with a colour-mix, so it follows any palette change instead of duplicating a value.
+  */
+  --brand-wash: color-mix(in srgb, var(--blue-500) 7%, transparent);
+  --overlay-recommend: rgba(106, 76, 191, 0.4);
+  /* neutral white overlays, used only over the dark topbar band and inside the brand mark */
+  --overlay-ring-strong: rgba(255, 255, 255, 0.9);
+  --overlay-ring: rgba(255, 255, 255, 0.85);
+  --overlay-rule: rgba(255, 255, 255, 0.6);
+  --overlay-edge-soft: rgba(255, 255, 255, 0.35);
+  --overlay-edge: rgba(255, 255, 255, 0.34);
+  --overlay-fill-strong: rgba(255, 255, 255, 0.22);
+  --overlay-highlight: rgba(255, 255, 255, 0.2);
+  --overlay-fill: rgba(255, 255, 255, 0.18);
+  --overlay-line: rgba(255, 255, 255, 0.16);
+  --overlay-well: rgba(255, 255, 255, 0.06);
+  --overlay-sheen: rgba(255, 255, 255, 0.05);
+  --overlay-mark-fade: rgba(255, 255, 255, 0);
+  --space-xs: 0.35rem;
+  --space-sm: 0.6rem;
   --space: 1rem;
+  --space-lg: 1.4rem;
+  --space-xl: 2rem;
+  --pad-card: 1.25rem 1.4rem 1.35rem;
+  --gap-grid: 1.2rem;
+  --panel-inset: 0.9rem 1rem;
+
+  /* type stacks: system fonts only, no external font asset and no font icon */
+  --font-sans: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: Consolas, "SFMono-Regular", Menlo, monospace;
+
+  /* -- tier 3: legacy aliases, one tier-2 token each --------------------------------------- */
+  --ink: var(--text);
+  --ink-soft: var(--text-muted);
+  --ink-faint: var(--text-faint);
+  --line: var(--border);
+  --line-soft: var(--border-soft);
+  --surface-alt: var(--surface-sunken);
+  --page: var(--surface-sunken);
+  --accent: var(--accent-route);
+  --accent-strong: var(--accent-route-strong);
+  --accent-soft: var(--accent-route-soft);
+  --warn-bg: var(--warning-soft);
+  --warn-line: var(--warning);
+  --warn-ink: var(--warning-strong);
+  --alert-bg: var(--danger-soft);
+  --alert-line: var(--danger);
+  --alert-ink: var(--danger-strong);
+  --ok-bg: var(--success-soft);
+  --ok-line: var(--success);
+  --ok-ink: var(--success-strong);
+  --synthetic: var(--recommend);
 }
 
 * { box-sizing: border-box; }
@@ -44,17 +205,17 @@
 html, body {
   margin: 0;
   padding: 0;
-  background: var(--page);
-  color: var(--ink);
-  font: 15px/1.55 "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  background: var(--surface-sunken);
+  color: var(--text);
+  font: 15px/1.55 var(--font-sans);
   -webkit-font-smoothing: antialiased;
 }
 
 code {
-  font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 0.86em;
-  background: var(--surface-alt);
-  border: 1px solid var(--line);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-soft);
   border-radius: 4px;
   padding: 0 0.25em;
 }
@@ -62,42 +223,48 @@ code {
 h1, h2, h3, h4 { line-height: 1.25; }
 
 h2 {
-  font-size: 1rem;
+  font-size: 1.05rem;
   margin: 0;
-  color: var(--ink);
-  letter-spacing: -0.005em;
+  color: var(--text);
+  letter-spacing: -0.01em;
+  font-weight: 650;
 }
 
 h3 {
-  font-size: 0.75rem;
-  margin: 1.1rem 0 0.4rem;
+  font-size: 0.72rem;
+  margin: var(--space-lg) 0 0.45rem;
   text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--ink-faint);
+  letter-spacing: 0.09em;
+  color: var(--text-faint);
   font-weight: 700;
 }
 
 h4 {
-  font-size: 0.78rem;
-  margin: 0.9rem 0 0.3rem;
+  font-size: 0.76rem;
+  margin: 1rem 0 0.35rem;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--ink-soft);
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+  font-weight: 700;
 }
 
 .visually-secondary { font-size: 0.95rem; }
 
 /* ---------------------------------------------------------------- topbar */
 /*
-  One slim band: the product name and subtitle, the compact DEMO/SYNTHETIC badge, the compact live
-  status line and the compact computing indicator - plus a slim plan toolbar. The honesty badge is
-  deliberately static markup, so it is on screen before any script runs.
+  One branded band: the brand mark, the wordmark and the subtitle on the left; the compact
+  DEMO/SYNTHETIC badge, the compact live status line and the compact computing indicator on the
+  right; a slim plan toolbar under a hairline. The band carries a restrained navy wash and a thin
+  route-accent rule, so the product is identifiable at a glance. The honesty badge is deliberately
+  static markup, so it is on screen before any script runs.
 */
 .topbar {
-  padding: 0.85rem 1.4rem 0.9rem;
-  background: var(--surface);
-  border-bottom: 1px solid var(--line);
-  box-shadow: var(--shadow);
+  padding: 1rem 1.6rem 1.05rem;
+  background:
+    linear-gradient(180deg, var(--brand-wash) 0%, var(--overlay-mark-fade) 78%),
+    linear-gradient(135deg, var(--navy-900) 0%, var(--navy-800) 52%, var(--navy-700) 100%);
+  border-bottom: 1px solid var(--brand-strong);
+  box-shadow: var(--shadow-sm);
 }
 
 .brandbar {
@@ -105,38 +272,112 @@ h4 {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.6rem 1.2rem;
+  gap: 0.7rem 1.4rem;
 }
 
-.brand { display: flex; flex-direction: column; gap: 0.1rem; }
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.brand-text { display: flex; flex-direction: column; gap: 0.05rem; }
 
 .brand-name {
-  font-size: 1.35rem;
+  font-size: 1.45rem;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.012em;
+  line-height: 1.15;
+  color: var(--white);
 }
 
-.brand-sub { font-size: 0.85rem; color: var(--ink-soft); }
+.brand-sub {
+  font-size: 0.78rem;
+  color: var(--blue-200);
+  letter-spacing: 0.015em;
+}
 
 .brand-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem 0.7rem;
+  gap: 0.5rem 0.75rem;
   justify-content: flex-end;
+}
+
+/* The brand mark: a CSS-only route glyph - a rounded waypoint pin, a route line and two waypoints.
+   No image, no icon font, no markup vector graphic and no encoded image payload: only borders,
+   radii and pseudo-elements. */
+.brand-mark {
+  position: relative;
+  flex: 0 0 auto;
+  width: 2.35rem;
+  height: 2.35rem;
+  border-radius: 11px;
+  background: linear-gradient(150deg, var(--overlay-fill), var(--overlay-sheen));
+  border: 1px solid var(--overlay-edge);
+  box-shadow: inset 0 1px 0 var(--overlay-highlight);
+}
+
+.brand-mark::before {
+  content: "";
+  position: absolute;
+  left: 0.6rem;
+  top: 0.95rem;
+  width: 0.9rem;
+  height: 0.9rem;
+  border: 1px solid var(--overlay-ring-strong);
+  border-left-color: transparent;
+  border-radius: 0 50% 50% 50%;
+  transform: rotate(45deg);
+}
+
+.brand-mark::after {
+  content: "";
+  position: absolute;
+  left: 0.78rem;
+  top: 1.14rem;
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: var(--blue-200);
+}
+
+.brand-waypoints {
+  position: absolute;
+  right: 0.34rem;
+  top: 0.62rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.18rem;
+}
+
+.brand-waypoint {
+  width: 0.32rem;
+  height: 0.32rem;
+  border-radius: 50%;
+  border: 1px solid var(--overlay-ring);
+  background: var(--overlay-fill-strong);
+}
+
+.brand-route-line {
+  width: 1px;
+  height: 0.62rem;
+  background: var(--overlay-rule);
 }
 
 .demo-badge {
   display: inline-block;
   font-size: 0.66rem;
   font-weight: 700;
-  letter-spacing: 0.09em;
+  letter-spacing: 0.11em;
   text-transform: uppercase;
-  color: var(--synthetic);
-  background: #f1ecfb;
-  border: 1px solid var(--synthetic);
-  border-radius: 999px;
-  padding: 0.2rem 0.6rem;
+  color: var(--violet-100);
+  background: var(--overlay-recommend);
+  border: 1px solid var(--violet-300);
+  border-radius: var(--radius-pill);
+  padding: 0.22rem 0.65rem;
   white-space: nowrap;
   cursor: help;
 }
@@ -144,45 +385,55 @@ h4 {
 .banner {
   margin: 0;
   padding: 0.4rem 0.7rem;
-  border: 1px solid var(--line);
-  border-left-width: 4px;
+  border: 1px solid var(--border-soft);
+  border-left-width: 3px;
   border-radius: var(--radius-sm);
-  background: var(--surface-alt);
-  font-size: 0.86rem;
+  background: var(--surface-sunken);
+  font-size: 0.85rem;
 }
 
-.banner-status { max-width: 46rem; color: var(--ink-soft); }
+.banner-status {
+  max-width: 46rem;
+  color: var(--blue-200);
+  font-size: 0.8rem;
+  border-left-color: var(--overlay-edge-soft);
+  background: var(--overlay-well);
+}
+
 .banner-ok {
-  background: var(--ok-bg);
-  border-color: var(--ok-line);
-  border-left-color: var(--ok-line);
-  color: var(--ok-ink);
+  background: var(--success-soft);
+  border-color: var(--success);
+  border-left-color: var(--success);
+  color: var(--success-strong);
 }
 
 .banner-computing {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  border-left-color: var(--accent);
-  color: var(--accent);
+  background: var(--accent-route-soft);
+  border-color: var(--accent-route);
+  border-left-color: var(--accent-route);
+  color: var(--accent-route-strong);
   font-weight: 600;
 }
 
+/* The advisory concept is the recommendation's own colour: violet, never applied. */
 .banner-advisory {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  border-left-color: var(--accent);
-  color: var(--ink);
+  background: var(--recommend-soft);
+  border-color: var(--violet-300);
+  border-left-color: var(--recommend);
+  color: var(--text);
 }
 
-.banner-latency { color: var(--ink-soft); margin: 0.4rem 0 0.8rem; }
-.banner-provenance { color: var(--ink-soft); margin: 0.4rem 0 0.8rem; }
+.banner-advisory strong { color: var(--recommend-strong); }
+
+.banner-latency { color: var(--text-muted); margin: 0.5rem 0 0.9rem; }
+.banner-provenance { color: var(--text-muted); margin: 0.5rem 0 0.9rem; }
 
 .banner-error {
-  margin-top: 0.7rem;
-  background: var(--alert-bg);
-  border-color: var(--alert-line);
-  border-left-color: var(--alert-line);
-  color: var(--alert-ink);
+  margin-top: var(--space-sm);
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  border-left-color: var(--danger);
+  color: var(--danger-strong);
 }
 
 .banner-error strong { display: block; font-size: 0.95rem; }
@@ -192,61 +443,93 @@ h4 {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem 0.7rem;
-  margin-top: 0.75rem;
-  padding-top: 0.7rem;
-  border-top: 1px solid var(--line-soft);
+  margin-top: 0.9rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--overlay-line);
 }
+
+.toolbar label { color: var(--blue-200); }
 
 /* ------------------------------------------------------------ structure */
 .workspace {
   max-width: 1500px;
   margin: 0 auto;
-  padding: 1.1rem 1.4rem 2rem;
+  padding: var(--space-lg) 1.6rem var(--space-xl);
   display: grid;
-  gap: 1.1rem;
+  gap: var(--gap-grid);
 }
 
+/*
+  Card hierarchy: one surface, a soft shadow, a consistent radius and a header / body / footer
+  rhythm. The 3px top rule is the card's own accent - brand for the workspace, route for the map,
+  recommendation for the advisory card, success for the result.
+*/
 .card {
+  position: relative;
   background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow);
-  padding: 1rem 1.1rem 1.15rem;
+  padding: var(--pad-card);
 }
+
+.card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 1.4rem;
+  right: 1.4rem;
+  height: 3px;
+  border-radius: 0 0 3px 3px;
+  background: var(--brand);
+  opacity: 0.85;
+}
+
+/* The collapsed detail sections are cards too, but they are drawers: no accent rule on them, so a
+   collapsed summary keeps its clean line. */
+.card-details::before { display: none; }
+
+.card-map { padding-bottom: 1.1rem; }
+.card-map::before { background: var(--accent-route); }
+.card-decision::before { background: var(--recommend); }
+.card-kpis::before { background: var(--success); }
+.card-route::before { background: var(--accent-route); }
 
 .card-head {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
-  gap: 0.3rem 0.8rem;
-  padding-bottom: 0.6rem;
-  margin-bottom: 0.6rem;
-  border-bottom: 1px solid var(--line-soft);
+  gap: 0.3rem 1rem;
+  padding-bottom: 0.7rem;
+  margin-bottom: 0.85rem;
+  border-bottom: 1px solid var(--border-faint);
 }
 
 .card-kicker {
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--ink-faint);
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+  font-weight: 600;
 }
 
 .top-split {
   display: grid;
-  grid-template-columns: minmax(0, 1.75fr) minmax(340px, 1fr);
-  gap: 1.1rem;
+  grid-template-columns: minmax(0, 1.75fr) minmax(360px, 1fr);
+  gap: var(--gap-grid);
   align-items: start;
 }
 
 .lower {
   display: grid;
-  gap: 0.8rem;
+  gap: 0.85rem;
 }
 
 @media (max-width: 1100px) {
   .top-split { grid-template-columns: 1fr; }
-  .workspace { padding: 1rem; }
+  .workspace { padding: var(--space) 1rem 1.6rem; }
+  .topbar { padding: 0.9rem 1rem 1rem; }
 }
 
 .row {
@@ -254,35 +537,40 @@ h4 {
   flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
-  margin: 0.45rem 0;
+  margin: 0.5rem 0;
 }
 
-.row-quiet { margin-top: 0.35rem; }
+.row-quiet { margin-top: 0.4rem; }
 
 .cta {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
-  margin: 0.9rem 0 0.6rem;
-  padding-top: 0.8rem;
-  border-top: 1px solid var(--line-soft);
+  gap: 0.25rem;
+  margin: 1rem 0 0.7rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border-faint);
 }
 
-.cta-note { font-size: 0.78rem; color: var(--ink-faint); margin: 0; }
+.cta-note { font-size: 0.78rem; color: var(--text-faint); margin: 0; }
 
-.manual { margin: 0.7rem 0; }
+.manual { margin: 0.8rem 0; }
 
 /* -------------------------------------------------------------- controls */
-label { font-size: 0.82rem; color: var(--ink-soft); }
+/*
+  Button hierarchy: one primary per card (.btn-primary), the secondary control
+  (.btn-secondary), the quiet text control (.btn-quiet) and the plain control (bare <button>).
+  Every interactive element has a hover AND a :focus-visible state.
+*/
+label { font-size: 0.82rem; color: var(--text-muted); }
 
 select, button {
   font: inherit;
   font-size: 0.88rem;
-  padding: 0.42rem 0.7rem;
-  border: 1px solid var(--line);
+  padding: 0.44rem 0.75rem;
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface);
-  color: var(--ink);
+  color: var(--text);
 }
 
 select { min-width: 15rem; }
@@ -290,66 +578,80 @@ select { min-width: 15rem; }
 button {
   cursor: pointer;
   background: var(--surface);
-  border-color: var(--line);
-  color: var(--ink);
+  border-color: var(--border);
+  color: var(--text);
   font-weight: 600;
-  transition: background 120ms ease, border-color 120ms ease;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
 }
 
-button:hover { background: var(--surface-alt); }
+button:hover { background: var(--surface-sunken); border-color: var(--border); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
+button:disabled:hover { background: var(--surface); }
 
 button:focus-visible,
 select:focus-visible,
-summary:focus-visible {
-  outline: 2px solid var(--accent);
+summary:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent-route);
   outline-offset: 2px;
+  border-radius: var(--radius-sm);
 }
 
 /* ONE primary call to action per card: accepting the recommendation is the primary path. */
 .btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--brand);
+  border-color: var(--brand-strong);
+  color: var(--white);
   font-size: 0.95rem;
-  padding: 0.6rem 0.9rem;
+  padding: 0.62rem 1.05rem;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
   align-self: flex-start;
 }
-.btn-primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
+.btn-primary:hover {
+  background: var(--brand-strong);
+  border-color: var(--brand-strong);
+  box-shadow: var(--shadow);
+}
 
-.btn-secondary { color: var(--accent); border-color: var(--line); }
-.btn-secondary:hover { background: var(--accent-soft); }
+.btn-secondary {
+  color: var(--accent-route-strong);
+  border-color: var(--blue-200);
+  background: var(--surface);
+}
+.btn-secondary:hover { background: var(--accent-route-soft); border-color: var(--accent-route); }
 
 .btn-quiet {
   background: transparent;
   border-color: transparent;
-  color: var(--ink-soft);
+  color: var(--text-muted);
   font-weight: 500;
   font-size: 0.82rem;
-  padding: 0.3rem 0.4rem;
+  padding: 0.3rem 0.45rem;
   text-decoration: underline;
+  text-underline-offset: 2px;
 }
-.btn-quiet:hover { color: var(--accent); background: transparent; }
+.btn-quiet:hover { color: var(--brand); background: transparent; }
 
 .hint, .legend, .notice {
   font-size: 0.82rem;
-  color: var(--ink-soft);
+  color: var(--text-muted);
   margin: 0.45rem 0;
 }
 
 .legend {
-  border-top: 1px dashed var(--line);
-  padding-top: 0.55rem;
-  color: var(--ink-faint);
+  border-top: 1px dashed var(--border-soft);
+  padding-top: 0.65rem;
+  color: var(--text-muted);
 }
 
 .notice {
-  background: var(--warn-bg);
-  border: 1px solid var(--warn-line);
-  border-left-width: 4px;
+  background: var(--warning-soft);
+  border: 1px solid var(--amber-300);
+  border-left: 3px solid var(--warning);
   border-radius: var(--radius-sm);
-  color: var(--warn-ink);
-  padding: 0.5rem 0.7rem;
+  color: var(--warning-strong);
+  padding: 0.55rem 0.75rem;
 }
 
 /* ------------------------------------------------------------------- map */
@@ -357,16 +659,17 @@ summary:focus-visible {
    load-bearing, not cosmetic: Leaflet positions its panes and its tile <img> elements absolutely,
    so without `position: relative` they are positioned against the page, and without
    `overflow: hidden` a 256x256 tile can escape the container and scatter through the document
-   (confirmed in a real browser - Stage 4 hotfix). */
+   (confirmed in a real browser - Stage 4 hotfix). The container is a quiet sunken well: no overlay,
+   no scrim and no frame is drawn over the tiles. */
 .map {
   position: relative;
   overflow: hidden;
   height: 420px;
   min-height: 260px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
   background:
-    repeating-linear-gradient(45deg, #e7edf3 0 12px, #eef2f6 12px 24px);
+    repeating-linear-gradient(45deg, var(--slate-100) 0 12px, var(--surface-sunken) 12px 24px);
 }
 
 /* Defence in depth for the case where leaflet.css itself fails to load (offline, blocked CDN, a
@@ -391,134 +694,247 @@ summary:focus-visible {
 
 /* Marker glyphs drawn by web/map.js inside Leaflet div icons (labels and payload position numbers
    only, no data of their own). No line is drawn between stops: the route order is carried by the
-   number badge on the stop markers. */
+   number badge on the stop markers.
+
+   The colour story matches the legend, the decision panel and the first-stop state: an ordinary
+   stop is quiet and neutral, the driver's selection is the route accent (blue) and strong, START is
+   success green, FINISH is danger red, and a RoutePilot recommendation is the advisory violet with
+   the dashed treatment. */
 .routepilot-marker span {
   display: inline-block;
   font-size: 0.6rem;
   font-weight: 700;
   letter-spacing: 0.02em;
-  padding: 0.1rem 0.3rem;
-  border-radius: 999px;
-  border: 1px solid var(--accent);
-  background: var(--surface);
-  color: var(--accent);
+  padding: 0.12rem 0.34rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--surface-elevated);
+  color: var(--text-muted);
+  box-shadow: var(--shadow-subtle);
   transform: translate(-50%, -25%);
 }
-.routepilot-marker .marker-start { border-color: var(--ok-line); color: var(--ok-ink); }
-.routepilot-marker .marker-finish { border-color: var(--alert-line); color: var(--alert-ink); }
-.routepilot-marker .marker-stop { border-color: var(--synthetic); color: var(--synthetic); }
+
+/* An ORDINARY route stop stays quiet and low-contrast, so the four meaningful markers stand out. */
+.routepilot-marker .marker-stop {
+  border-color: var(--border);
+  color: var(--text-muted);
+  background: var(--surface-elevated);
+  font-weight: 600;
+  opacity: 0.9;
+}
+
+/* START (the departure plan location): success green. FINISH: danger red. */
+.routepilot-marker .marker-start {
+  border-color: var(--success);
+  color: var(--success-strong);
+  background: var(--success-soft);
+  font-weight: 700;
+}
+.routepilot-marker .marker-finish {
+  border-color: var(--danger);
+  color: var(--danger-strong);
+  background: var(--danger-soft);
+  font-weight: 700;
+}
 
 /* The route-order position, taken from the API's own `order` array: 1-based, and nothing but that
-   array index. Purely presentational, and every marker keeps its own label next to it. */
+   array index. Legible but subdued: it is presentation of order, not a call to action. */
 .routepilot-marker .marker-number {
-  background: var(--synthetic);
-  border-color: var(--synthetic);
-  color: #ffffff;
+  background: var(--brand);
+  border-color: var(--brand-strong);
+  color: var(--white);
   min-width: 1.35rem;
   text-align: center;
+  font-weight: 700;
+  box-shadow: var(--shadow-badge);
 }
 
 /* The recommended first stop (advisory only) and the driver's own selection are styled
    differently on purpose: one is advice, the other is a decision (D4/D32). */
 .routepilot-marker .marker-recommended {
   border-style: dashed;
-  border-color: var(--ok-line);
-  color: var(--ok-ink);
-  background: var(--ok-bg);
+  border-width: 2px;
+  border-color: var(--recommend);
+  color: var(--recommend-strong);
+  background: var(--recommend-soft);
+  font-weight: 700;
 }
 .routepilot-marker .marker-selected {
   border-width: 2px;
-  border-color: var(--accent-strong);
+  border-color: var(--accent-route-strong);
   color: var(--surface);
-  background: var(--accent-strong);
+  background: var(--accent-route-strong);
+  font-weight: 700;
 }
 /* The same stop carries both roles only when the driver accepted the recommendation: it then reads
-   as the driver's selection, which is what actually happened. */
+   as the driver's selection, which is what actually happened. It is never shown as an applied
+   recommendation. */
 .routepilot-marker .marker-recommended.marker-selected {
   border-style: solid;
-  border-color: var(--accent-strong);
+  border-color: var(--accent-route-strong);
   color: var(--surface);
-  background: var(--accent-strong);
+  background: var(--accent-route-strong);
 }
 
 /* ---------------------------------------------------- decision + figures */
+/* The recommended first stop is the recommendation's own concept: advisory violet, never applied. */
 .recommended {
   font-size: 1.02rem;
   font-weight: 600;
-  margin: 0.3rem 0 0.8rem;
-  padding: 0.55rem 0.7rem;
-  border-left: 4px solid var(--ok-line);
-  background: var(--ok-bg);
+  margin: 0.35rem 0 0.9rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--violet-300);
+  border-left: 3px solid var(--recommend);
+  background: var(--recommend-soft);
   border-radius: var(--radius-sm);
+  color: var(--text);
 }
 
 .figures {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 0.6rem;
-  margin: 0.7rem 0;
+  gap: 0.7rem;
+  margin: 0.8rem 0;
 }
 
 .figure {
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-sm);
-  background: var(--surface-alt);
-  padding: 0.55rem 0.7rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-}
-
-.figure-label {
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--ink-faint);
-  font-weight: 700;
-}
-
-.figure-values { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.35rem; }
-
-.figure-duration { font-size: 1.12rem; font-weight: 700; }
-.figure-distance { color: var(--ink-soft); }
-.figure-separator { color: var(--line); }
-.figure-placeholder { font-size: 1.12rem; font-weight: 700; color: var(--ink-faint); }
-
-/* ------------------------------------------------------------ KPI strip */
-.kpi-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 0.7rem;
-}
-
-.kpi {
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-sm);
-  background: var(--surface-alt);
-  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+  padding: 0.65rem 0.8rem;
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
 }
 
-.kpi-label {
-  font-size: 0.7rem;
+.figure-label {
+  font-size: 0.68rem;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--ink-faint);
+  letter-spacing: 0.09em;
+  color: var(--text-faint);
+  font-weight: 700;
+}
+
+.figure-values { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.35rem; }
+
+.figure-duration { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.01em; }
+.figure-distance { color: var(--text-muted); }
+.figure-separator { color: var(--border); }
+.figure-placeholder { font-size: 1.15rem; font-weight: 700; color: var(--text-faint); }
+
+/* ------------------------------------------------------------ KPI strip */
+/*
+  BEFORE -> AFTER -> SAVED. The three cards are one progression: a route-coloured connector runs
+  behind them, an arrow sits between BEFORE and AFTER, and SAVED is the hero - the largest figure,
+  the highest elevation and the success treatment. Sizes and colours live here; the numbers are the
+  API's own and never computed by this file.
+*/
+.kpi-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 0.95rem;
+  padding: 0.7rem 0 0.2rem;
+}
+
+.kpi-grid::before {
+  content: "";
+  position: absolute;
+  left: 1.2rem;
+  right: 1.2rem;
+  top: 1.55rem;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--border) 0%, var(--accent-route) 50%, var(--success) 100%);
+  opacity: 0.4;
+}
+
+.kpi {
+  position: relative;
+  z-index: 1;
+  border: 1px solid var(--border-soft);
+  border-top: 2px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-sm);
+  padding: 0.85rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.kpi::after {
+  content: "";
+  position: absolute;
+  z-index: 3;
+  top: 100%;
+  left: 1.15rem;
+  width: 2px;
+  height: 0.5rem;
+  background: var(--accent-route);
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* The connector between BEFORE and AFTER: an explicit arrow, drawn in CSS, pointing onward. */
+.kpi-grid .kpi:nth-of-type(1)::after {
+  content: "\2192";
+  top: 50%;
+  left: auto;
+  right: -0.72rem;
+  width: auto;
+  height: auto;
+  transform: translateY(-50%);
+  background: none;
+  color: var(--accent-route);
+  font-size: 1.05rem;
+  font-weight: 700;
+  opacity: 1;
+}
+
+.kpi-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-faint);
   font-weight: 700;
 }
 
 .kpi-values { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem; }
-.kpi-duration { font-size: 1.3rem; font-weight: 700; letter-spacing: -0.01em; }
-.kpi-distance { color: var(--ink-soft); }
-.kpi-saved { border-color: var(--ok-line); background: var(--ok-bg); }
-.kpi-saved .kpi-duration { color: var(--ok-ink); }
+.kpi-duration { font-size: 1.3rem; font-weight: 700; letter-spacing: -0.015em; }
+.kpi-distance { color: var(--text-muted); }
+
+/* BEFORE and AFTER: the two route states being compared. */
+.kpi-grid .kpi:nth-of-type(1) { border-top-color: var(--border); }
+.kpi-grid .kpi:nth-of-type(1) .kpi-duration { color: var(--text-muted); font-weight: 650; }
+.kpi-grid .kpi:nth-of-type(2) { border-top-color: var(--accent-route); }
+.kpi-grid .kpi:nth-of-type(2) .kpi-duration { color: var(--accent-route-strong); }
+
+/* SAVED is the hero: the strongest emphasis in the workspace, in the success colour. */
+.kpi-saved {
+  border: 1px solid var(--success);
+  border-top: 2px solid var(--success);
+  background:
+    linear-gradient(180deg, var(--green-100) 0%, var(--success-soft) 72%);
+  box-shadow: var(--shadow-strong);
+  padding: 1rem 1.1rem 1.1rem;
+}
+.kpi-saved .kpi-label { color: var(--success-strong); }
+.kpi-saved .kpi-duration {
+  font-size: 1.9rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--success-strong);
+  line-height: 1.15;
+}
+.kpi-saved .kpi-distance { color: var(--success-strong); opacity: 0.85; }
+.kpi-saved::after { background: var(--success); opacity: 0.5; }
+
 .kpi-note {
   grid-column: 1 / -1;
-  margin-top: 0.1rem;
-  padding-top: 0.4rem;
-  border-top: 1px dashed var(--line);
+  margin-top: 0.2rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border-soft);
 }
 
 /* ------------------------------------------------------------------ data */
@@ -527,51 +943,58 @@ summary:focus-visible {
 .kv {
   display: grid;
   grid-template-columns: minmax(9rem, max-content) 1fr;
-  gap: 0.15rem 0.85rem;
-  margin: 0.4rem 0;
+  gap: 0.2rem 0.9rem;
+  margin: 0.45rem 0;
 }
 
-.kv dt { color: var(--ink-faint); }
+.kv dt { color: var(--text-faint); }
 .kv dd { margin: 0; }
 
 table {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.78rem;
-  margin: 0.35rem 0 0.6rem;
+  margin: 0.4rem 0 0.7rem;
 }
 
 caption {
   text-align: left;
   font-size: 0.76rem;
-  color: var(--ink-faint);
-  padding-bottom: 0.3rem;
+  color: var(--text-faint);
+  padding-bottom: 0.35rem;
 }
 
 th, td {
-  border: 1px solid var(--line-soft);
-  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--border-faint);
+  padding: 0.32rem 0.5rem;
   text-align: left;
   vertical-align: top;
 }
 
 th {
-  background: var(--surface-alt);
-  font-weight: 600;
-  font-size: 0.72rem;
+  background: var(--surface-sunken);
+  font-weight: 700;
+  font-size: 0.7rem;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--ink-soft);
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
   position: sticky;
   top: 0;
 }
 
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
-tbody tr:nth-child(even) td { background: #fbfcfd; }
+tbody tr:nth-child(even) td { background: var(--surface-subtle); }
 
-tr.recommended-row td { background: var(--ok-bg); font-weight: 600; }
-tr.rejected-row td { background: var(--alert-bg); }
+/* A ranked row is the RECOMMENDATION's row: advisory violet, never success green. */
+tr.recommended-row td {
+  background: var(--recommend-soft);
+  font-weight: 600;
+  border-color: var(--violet-100);
+}
+tr.recommended-row td:first-child { box-shadow: inset 3px 0 0 var(--recommend); }
+/* A rejected candidate is a genuine negative result: danger red. */
+tr.rejected-row td { background: var(--danger-soft); border-color: var(--red-100); }
 
 /* ------------------------------------------------------- row previews --- */
 /*
@@ -586,34 +1009,38 @@ tr.rejected-row td { background: var(--alert-bg); }
 
 /* --------------------------------------------------------- disclosures -- */
 .disclosure, .card-details {
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-sm);
-  background: var(--surface-alt);
-  padding: 0.2rem 0.7rem 0.2rem;
-  margin-top: 0.9rem;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+  padding: 0.2rem 0.9rem;
+  margin-top: var(--space);
 }
 
 .card-details {
   background: var(--surface);
-  border-color: var(--line);
-  box-shadow: var(--shadow);
-  border-radius: var(--radius);
-  padding: 0.15rem 1.1rem 0.2rem;
+  border-color: var(--border-soft);
+  box-shadow: var(--shadow-sm);
+  border-radius: var(--radius-lg);
+  padding: 0.2rem 1.4rem 0.25rem;
   margin-top: 0;
 }
 
 .disclosure > summary,
 .card-details > summary {
   cursor: pointer;
-  font-weight: 600;
+  font-weight: 650;
   font-size: 0.9rem;
-  color: var(--accent);
-  padding: 0.65rem 0;
+  color: var(--brand);
+  padding: 0.75rem 0;
   list-style: none;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.55rem;
+  border-radius: var(--radius-sm);
 }
+
+.disclosure > summary:hover,
+.card-details > summary:hover { color: var(--accent-route-strong); }
 
 .disclosure > summary::-webkit-details-marker,
 .card-details > summary::-webkit-details-marker { display: none; }
@@ -622,7 +1049,7 @@ tr.rejected-row td { background: var(--alert-bg); }
 .card-details > summary::before {
   content: "\25B8";
   font-size: 0.8rem;
-  color: var(--ink-faint);
+  color: var(--text-faint);
   transition: transform 120ms ease;
 }
 
@@ -631,103 +1058,111 @@ tr.rejected-row td { background: var(--alert-bg); }
 
 .disclosure[open] > summary,
 .card-details[open] > summary {
-  border-bottom: 1px solid var(--line-soft);
-  margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border-faint);
+  margin-bottom: 0.6rem;
 }
 
-.card-details[open] { padding-bottom: 1rem; }
+.card-details[open] { padding-bottom: var(--space); }
 
 .disclosure-error {
-  margin-top: 0.4rem;
-  background: #fff;
-  border-color: var(--alert-line);
+  margin-top: 0.5rem;
+  background: var(--surface);
+  border-color: var(--danger);
 }
 
-.disclosure-error > summary { color: var(--alert-ink); padding: 0.4rem 0; }
+.disclosure-error > summary { color: var(--danger-strong); padding: 0.5rem 0; }
 
-.error-body { font-size: 0.85rem; color: var(--ink); padding-bottom: 0.3rem; }
+.error-body { font-size: 0.85rem; color: var(--text); padding-bottom: 0.35rem; }
 
 /* ---------------------------------------------------------------- badges */
 .badge {
   display: inline-block;
-  font-size: 0.68rem;
+  font-size: 0.66rem;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
-  padding: 0.08rem 0.4rem;
-  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--radius-pill);
   border: 1px solid currentColor;
   margin-right: 0.3rem;
 }
 
-.badge-true { color: var(--ok-ink); background: var(--ok-bg); }
-.badge-false { color: var(--alert-ink); background: var(--alert-bg); }
+.badge-true { color: var(--success-strong); background: var(--success-soft); }
+.badge-false { color: var(--danger-strong); background: var(--danger-soft); }
 .badge-synthetic {
-  color: var(--synthetic);
-  background: #f1ecfb;
-  border-color: var(--synthetic);
+  color: var(--recommend-strong);
+  background: var(--recommend-soft);
+  border-color: var(--violet-300);
 }
-.badge-mode { color: var(--accent); background: var(--accent-soft); }
+.badge-mode { color: var(--accent-route-strong); background: var(--accent-route-soft); }
 
-.muted { color: var(--ink-faint); }
-.mono { font-family: Consolas, "SFMono-Regular", Menlo, monospace; font-size: 0.74rem; }
-.error-text { color: var(--alert-ink); white-space: pre-wrap; }
+.muted { color: var(--text-faint); }
+.mono { font-family: var(--font-mono); font-size: 0.74rem; }
+.error-text { color: var(--danger-strong); white-space: pre-wrap; }
 
 .capabilities {
   list-style: none;
-  margin: 0.3rem 0;
+  margin: 0.35rem 0;
   padding: 0;
   display: grid;
-  gap: 0.4rem;
+  gap: 0.45rem;
 }
 
 .capabilities li {
-  border: 1px solid var(--line-soft);
-  border-left: 4px solid var(--alert-line);
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--warning);
   border-radius: var(--radius-sm);
-  background: var(--surface-alt);
-  padding: 0.45rem 0.65rem;
+  background: var(--warning-soft);
+  padding: 0.5rem 0.75rem;
   font-size: 0.82rem;
 }
 
 .capability-name { font-weight: 700; }
 .capability-status {
   text-transform: uppercase;
-  font-size: 0.68rem;
-  letter-spacing: 0.05em;
-  color: var(--alert-ink);
-  margin-left: 0.35rem;
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  color: var(--warning-strong);
+  margin-left: 0.4rem;
 }
 
 /* --------------------------------------------------- stop rows + history */
 .stop-list {
   display: grid;
-  gap: 0.35rem;
-  margin: 0.4rem 0 0.6rem;
+  gap: 0.4rem;
+  margin: 0.45rem 0 0.7rem;
 }
 
 .stop-row {
   display: grid;
-  gap: 0.3rem;
-  border: 1px solid var(--line-soft);
-  border-left: 4px solid var(--accent);
+  gap: 0.35rem;
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--accent-route);
   border-radius: var(--radius-sm);
-  background: var(--surface-alt);
-  padding: 0.45rem 0.65rem;
+  background: var(--surface-sunken);
+  padding: 0.5rem 0.75rem;
+  transition: background 120ms ease, border-color 120ms ease;
 }
 
-.stop-row.stop-row-disabled { border-left-color: var(--alert-line); opacity: 0.8; }
+.stop-row:hover { background: var(--surface); border-color: var(--border); }
+
+/* A disabled stop is excluded from optimization: a hollow, quiet state, not an error. */
+.stop-row.stop-row-disabled {
+  border-left-color: var(--border);
+  background: var(--surface-sunken);
+  opacity: 0.72;
+}
 
 .stop-row-head {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.35rem 0.6rem;
+  gap: 0.35rem 0.65rem;
   align-items: baseline;
   font-size: 0.84rem;
 }
 
 .stop-row-id { font-weight: 700; }
-.stop-row-label { color: var(--ink-soft); }
+.stop-row-label { color: var(--text-muted); }
 
 .stop-row-controls {
   display: flex;
@@ -741,39 +1176,39 @@ tr.rejected-row td { background: var(--alert-bg); }
 
 .stop-row-controls button {
   font-size: 0.78rem;
-  padding: 0.28rem 0.5rem;
+  padding: 0.3rem 0.6rem;
   background: var(--surface);
-  border-color: var(--line);
-  color: var(--accent);
+  border-color: var(--blue-200);
+  color: var(--accent-route-strong);
 }
-.stop-row-controls button:hover { background: var(--accent-soft); }
+.stop-row-controls button:hover { background: var(--accent-route-soft); border-color: var(--accent-route); }
 
 .stop-row-controls .priority-input {
   font: inherit;
   font-size: 0.78rem;
   width: 5.5rem;
-  padding: 0.28rem 0.4rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   background: var(--surface);
-  color: var(--ink);
+  color: var(--text);
 }
 
 .run-row-button {
   font-size: 0.76rem;
-  padding: 0.28rem 0.5rem;
+  padding: 0.3rem 0.6rem;
   background: var(--surface);
-  border-color: var(--line);
-  color: var(--accent);
+  border-color: var(--blue-200);
+  color: var(--accent-route-strong);
   white-space: nowrap;
 }
-.run-row-button:hover { background: var(--accent-soft); }
+.run-row-button:hover { background: var(--accent-route-soft); border-color: var(--accent-route); }
 
 .run-detail {
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-sm);
-  background: var(--surface-alt);
-  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+  padding: 0.8rem 1rem;
   font-size: 0.84rem;
 }
 
@@ -787,28 +1222,82 @@ tr.rejected-row td { background: var(--alert-bg); }
 */
 .map-legend-synthetic {
   font-size: 0.76rem;
-  color: var(--synthetic);
+  color: var(--recommend-strong);
   font-weight: 600;
 }
 
-/* Small legend swatches mirroring the two role markers drawn by web/map.js. */
+/* Small legend swatches mirroring the two role markers drawn by web/map.js: the advisory
+   recommendation (violet, dashed) and the driver's own decision (route blue, solid and strong). */
 .marker-legend {
   display: inline-block;
-  padding: 0 0.35rem;
-  border-radius: 999px;
-  border: 1px solid var(--line);
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
   font-weight: 700;
   font-size: 0.72rem;
-  background: var(--surface-alt);
+  background: var(--surface-sunken);
 }
-.marker-legend-recommended { border: 1px dashed var(--ok-line); color: var(--ok-ink); background: var(--ok-bg); }
-.marker-legend-selected { border: 2px solid var(--accent-strong); color: var(--surface); background: var(--accent-strong); }
+.marker-legend-recommended {
+  border: 2px dashed var(--recommend);
+  color: var(--recommend-strong);
+  background: var(--recommend-soft);
+}
+.marker-legend-selected {
+  border: 2px solid var(--accent-route-strong);
+  color: var(--surface);
+  background: var(--accent-route-strong);
+}
 
 /* --------------------------------------------------------------- footer */
 .footer {
   max-width: 1500px;
   margin: 0 auto;
-  padding: 0.5rem 1.4rem 2rem;
-  color: var(--ink-faint);
+  padding: 0.6rem 1.6rem var(--space-xl);
+  color: var(--text-faint);
   font-size: 0.82rem;
+  border-top: 1px solid var(--border-faint);
+}
+
+/* ---------------------------------------------------------- narrow view */
+/*
+  On one column the connector reads vertically: the arrow sits under the BEFORE card and points down
+  through the next cards. The KPI cards are the only elements these rules touch, so nothing here can
+  change what the API supplied.
+*/
+@media (max-width: 720px) {
+  .kpi-grid::before { display: none; }
+  .kpi { padding: 0.8rem 0.9rem; }
+  .kpi::after {
+    top: 100%;
+    left: 1.1rem;
+    right: auto;
+    width: 2px;
+    height: 0.55rem;
+    background: var(--accent-route);
+  }
+  .kpi-grid .kpi:nth-of-type(1)::after {
+    content: "\2193";
+    top: auto;
+    bottom: -1.15rem;
+    left: 0.95rem;
+    right: auto;
+    width: auto;
+    height: auto;
+    transform: none;
+    background: none;
+    color: var(--accent-route);
+    font-size: 0.95rem;
+  }
+  .kpi-saved { padding: 0.9rem 1rem 1rem; }
+  .kpi-saved .kpi-duration { font-size: 1.65rem; }
+}
+
+/* ------------------------------------------------------- reduced motion */
+/* Every transition above is a brief colour or transform cue; none is decoration that must run. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }

@@ -34,8 +34,22 @@
 <header class="topbar">
   <div class="brandbar">
     <div class="brand">
-      <span class="brand-name">RoutePilot</span>
-      <span class="brand-sub">Smart route planning for field teams</span>
+      <!-- The brand mark is drawn PURELY from CSS (web/styles.css, `.brand-mark`): a rounded
+           waypoint pin, a route line and two waypoints, built from borders, radii and
+           pseudo-elements. There is deliberately no image, no icon font, no markup vector graphic
+           and no encoded image payload anywhere in this workspace, so no asset request can fail and
+           no vendor URL enters the markup. -->
+      <span class="brand-mark" aria-hidden="true">
+        <span class="brand-waypoints">
+          <span class="brand-waypoint"></span>
+          <span class="brand-route-line"></span>
+          <span class="brand-waypoint"></span>
+        </span>
+      </span>
+      <span class="brand-text">
+        <span class="brand-name">RoutePilot</span>
+        <span class="brand-sub">Smart route planning for field teams</span>
+      </span>
     </div>
     <div class="brand-meta">
       <span class="demo-badge" title="DEMO / SYNTHETIC DATA - not real addresses, not real opening hours, not real routing, no traffic.">DEMO / SYNTHETIC</span>
